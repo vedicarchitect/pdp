@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated
 
 import structlog
@@ -8,10 +9,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.db.session import get_db
+from pdp.market.bar_model import MarketBar
 from pdp.market.subscription_model import Subscription
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/api/v1", tags=["market"])
+
+
+class Timeframe(StrEnum):
+    m1 = "1m"
+    m5 = "5m"
+    m15 = "15m"
+    m30 = "30m"
+    h1 = "1H"
 
 
 def _get_adapter(request: Request):
@@ -62,6 +72,37 @@ async def remove_subscription(
     adapter = _get_adapter(request)
     await adapter.unsubscribe(security_id, exchange_segment, db)
     return {"status": "unsubscribed", "security_id": security_id}
+
+
+@router.get("/bars/{security_id}")
+async def get_bars(
+    security_id: str,
+    tf: Timeframe,
+    limit: Annotated[int, Query(ge=1, le=2000)] = 375,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Return the most recent N closed bars for a security from TimescaleDB."""
+    result = await db.execute(
+        select(MarketBar)
+        .where(MarketBar.security_id == security_id, MarketBar.timeframe == tf.value)
+        .order_by(MarketBar.bar_time.desc())
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+    return [
+        {
+            "security_id": r.security_id,
+            "timeframe": r.timeframe,
+            "bar_time": r.bar_time.isoformat(),
+            "open": str(r.open),
+            "high": str(r.high),
+            "low": str(r.low),
+            "close": str(r.close),
+            "volume": r.volume,
+            "oi": r.oi,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/subscriptions")

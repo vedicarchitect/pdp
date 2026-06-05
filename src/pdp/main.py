@@ -33,17 +33,36 @@ async def lifespan(app: FastAPI):
         git_sha=settings.GIT_SHA,
     )
 
+    # WebSocket hub — always available (no credentials needed)
+    from pdp.market.ws import WSHub
+
+    ws_hub = WSHub()
+    app.state.ws_hub = ws_hub
+
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
+    bar_writer = None
     if settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+        from pdp.market.bar_writer import BarWriter
+        from pdp.market.bars import BarAggregator
         from pdp.market.dhan_ws import DhanTickerAdapter
         from pdp.market.router import TickRouter
+
+        bar_aggregator = BarAggregator()
+        # Convert SQLAlchemy asyncpg URL → raw asyncpg DSN
+        asyncpg_dsn = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
+        bar_writer = BarWriter(asyncpg_dsn)
+        await bar_writer.start()
 
         adapter = DhanTickerAdapter(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
         app.state.dhan_adapter = adapter
         async with get_session_maker()() as session:
             await adapter.start(session)
-        tick_router = TickRouter()
+        tick_router = TickRouter(
+            bar_aggregator=bar_aggregator,
+            bar_writer=bar_writer,
+            ws_hub=ws_hub,
+        )
         app.state.tick_router = tick_router
         tick_router_task = asyncio.create_task(
             tick_router.run(adapter.queue, app.state.redis),
@@ -62,12 +81,14 @@ async def lifespan(app: FastAPI):
             adapter = app.state.dhan_adapter
             if adapter:
                 await adapter.stop()
-            app.state.tick_router.stop()
+            await app.state.tick_router.stop()
             tick_router_task.cancel()
             try:
                 await tick_router_task
             except asyncio.CancelledError:
                 pass
+        if bar_writer is not None:
+            await bar_writer.stop()
         await app.state.redis.aclose()
         await dispose_engine()
 
@@ -78,9 +99,11 @@ def create_app() -> FastAPI:
 
     from pdp.instruments.routes import router as instruments_router
     from pdp.market.routes import router as market_router
+    from pdp.market.ws import ws_router
 
     app.include_router(instruments_router)
     app.include_router(market_router)
+    app.include_router(ws_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
