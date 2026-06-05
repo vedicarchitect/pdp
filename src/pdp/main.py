@@ -33,11 +33,25 @@ async def lifespan(app: FastAPI):
         git_sha=settings.GIT_SHA,
     )
 
-    # WebSocket hub — always available (no credentials needed)
+    # WebSocket hubs — always available
     from pdp.market.ws import WSHub
+    from pdp.orders.ws import OrdersHub
 
     ws_hub = WSHub()
     app.state.ws_hub = ws_hub
+    orders_hub = OrdersHub()
+    app.state.orders_hub = orders_hub
+
+    # Paper broker + order router — always started (no external credentials needed)
+    from pdp.orders.paper import PaperBroker
+    from pdp.orders.router import OrderRouter
+
+    paper_broker = PaperBroker(get_session_maker(), settings.PAPER_SLIPPAGE_BPS)
+    paper_broker.set_hub(orders_hub)
+    order_router = OrderRouter(settings, paper_broker)
+    app.state.order_router = order_router
+
+    await paper_broker.start(app.state.redis)
 
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
@@ -89,6 +103,7 @@ async def lifespan(app: FastAPI):
                 pass
         if bar_writer is not None:
             await bar_writer.stop()
+        await paper_broker.stop()
         await app.state.redis.aclose()
         await dispose_engine()
 
@@ -100,10 +115,14 @@ def create_app() -> FastAPI:
     from pdp.instruments.routes import router as instruments_router
     from pdp.market.routes import router as market_router
     from pdp.market.ws import ws_router
+    from pdp.orders.routes import router as orders_router
+    from pdp.orders.ws import orders_ws_router
 
     app.include_router(instruments_router)
     app.include_router(market_router)
     app.include_router(ws_router)
+    app.include_router(orders_router)
+    app.include_router(orders_ws_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

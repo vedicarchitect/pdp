@@ -12,6 +12,7 @@ from pdp.settings import get_settings
 from pdp.instruments import models as _instrument_models  # noqa: F401
 from pdp.market import subscription_model as _subscription_model  # noqa: F401
 from pdp.market import bar_model as _bar_model  # noqa: F401
+from pdp.orders import models as _orders_models  # noqa: F401
 
 config = context.config
 if config.config_file_name:
