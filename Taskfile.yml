@@ -1,0 +1,61 @@
+version: "3"
+
+tasks:
+  default:
+    cmds:
+      - task --list-all
+
+  dev:
+    desc: Run the API with reload
+    cmds:
+      - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
+
+  test:
+    desc: Run pytest
+    cmds:
+      - uv run pytest
+
+  lint:
+    desc: Lint with ruff
+    cmds:
+      - uv run ruff check src tests
+      - uv run ruff format --check src tests
+
+  fmt:
+    desc: Format with ruff
+    cmds:
+      - uv run ruff format src tests
+      - uv run ruff check --fix src tests
+
+  typecheck:
+    desc: Type-check with pyright
+    cmds:
+      - uv run pyright
+
+  db:up:
+    desc: Start Timescale + Redis
+    cmds:
+      - docker compose up -d timescale redis
+
+  db:down:
+    desc: Stop services
+    cmds:
+      - docker compose down
+
+  db:migrate:
+    desc: Apply Alembic migrations
+    cmds:
+      - uv run alembic upgrade head
+
+  openspec:list:
+    desc: List OpenSpec changes
+    cmds:
+      - npx -y @fission-ai/openspec@latest list
+
+  openspec:validate:
+    desc: Validate authored OpenSpec changes (skips draft stubs)
+    cmds:
+      - npx -y @fission-ai/openspec@latest validate add-platform-skeleton --strict
+      - npx -y @fission-ai/openspec@latest validate add-instrument-registry --strict
+      - npx -y @fission-ai/openspec@latest validate add-market-data-feed --strict
+      - npx -y @fission-ai/openspec@latest validate add-paper-broker --strict

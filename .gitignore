@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# uv
+.python-version
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / logs
+data/
+logs/
+*.log
+*.duckdb
+*.db-shm
+*.db-wal
+
+# Node (frontend, later)
+node_modules/
+frontend/dist/
+
+# Local claude
+.claude/settings.local.json
