@@ -1,20 +1,20 @@
 ## 1. Schema
 
 - [ ] 1.1 Alembic migration `0003_market_bars.py` creating hypertable + compression + retention policies
-- [ ] 1.2 Alembic migration `0004_subscriptions.py` with `subscriptions(security_id, exchange_segment, added_at)`
+- [x] 1.2 Alembic migration `0004_subscriptions.py` with `subscriptions(security_id, exchange_segment, added_at)`
 
 ## 2. Dhan WS Adapter
 
-- [ ] 2.1 `src/pdp/market/dhan_ws.py` — connect, auth, binary frame decode via `msgspec.Struct`
-- [ ] 2.2 Exponential reconnect (1→2→4→…→30s cap)
-- [ ] 2.3 Subscribe / unsubscribe API; persist to `subscriptions` table
-- [ ] 2.4 Emit decoded ticks to bounded `asyncio.Queue` (1000)
+- [x] 2.1 `src/pdp/market/dhan_ws.py` — connect, auth, binary frame decode via `msgspec.Struct`
+- [x] 2.2 Exponential reconnect (1→2→4→…→30s cap)
+- [x] 2.3 Subscribe / unsubscribe API; persist to `subscriptions` table
+- [x] 2.4 Emit decoded ticks to bounded `asyncio.Queue` (1000)
 
 ## 3. Tick Router
 
-- [ ] 3.1 `src/pdp/market/router.py` — consume queue, fan out to Redis + BarAggregator + WS Hub
-- [ ] 3.2 Redis: `SET ltp:<id> <ltp> EX 5` + `PUBLISH tick.<id> <json>`
-- [ ] 3.3 Drop-oldest on backpressure with structured warning
+- [x] 3.1 `src/pdp/market/router.py` — consume queue, fan out to Redis + BarAggregator + WS Hub
+- [x] 3.2 Redis: `SET ltp:<id> <ltp> EX 5` + `PUBLISH tick.<id> <json>`
+- [x] 3.3 Drop-oldest on backpressure with structured warning
 
 ## 4. Bar Aggregator
 
@@ -27,7 +27,7 @@
 
 - [ ] 5.1 `src/pdp/market/ws.py` — `/ws/market` endpoint, per-client queue (bounded=50)
 - [ ] 5.2 Subscribe/unsubscribe JSON protocol
-- [ ] 5.3 `src/pdp/market/routes.py` — `GET /api/v1/ltp`, `GET /api/v1/bars/{security_id}`
+- [x] 5.3 `src/pdp/market/routes.py` — `GET /api/v1/ltp`, `GET /api/v1/bars/{security_id}` (ltp done; bars deferred to add-market-data-bars)
 
 ## 6. Tests + Load
 
