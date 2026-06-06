@@ -833,7 +833,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
-    { name = "asyncpg", specifier = ">=0.30" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "click", specifier = ">=8.1" },
     { name = "dhanhq", specifier = ">=2.2.0" },
     { name = "fastapi", specifier = ">=0.115" },

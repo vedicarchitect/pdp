@@ -87,9 +87,7 @@ async def lifespan(app: FastAPI):
         from pdp.market.router import TickRouter
 
         bar_aggregator = BarAggregator()
-        # Convert SQLAlchemy asyncpg URL → raw asyncpg DSN
-        asyncpg_dsn = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
-        bar_writer = BarWriter(asyncpg_dsn)
+        bar_writer = BarWriter(app.state.mongo_db["market_bars"])
         await bar_writer.start()
 
         adapter = DhanTickerAdapter(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
