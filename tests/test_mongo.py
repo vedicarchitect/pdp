@@ -39,15 +39,22 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
 
     chains_col = MagicMock()
     chains_col.create_index = AsyncMock()
+    portfolio_col = MagicMock()
+    portfolio_col.create_index = AsyncMock()
+
+    def _getitem(name: str):
+        if name == "portfolio_snapshots":
+            return portfolio_col
+        return chains_col
 
     db = MagicMock()
     db.create_collection = AsyncMock()
-    db.__getitem__ = MagicMock(return_value=chains_col)
+    db.__getitem__ = MagicMock(side_effect=_getitem)
     settings = Settings()  # type: ignore[call-arg]
 
     await init_collections(db, settings)
 
-    # Three indexes: TTL on captured_at (legacy), TTL on snapshot_ts (OPTIONS_CHAIN_TTL_DAYS), compound lookup
+    # Three indexes on option_chains: TTL captured_at (legacy), TTL snapshot_ts, compound lookup
     assert chains_col.create_index.call_count == 3
     chains_col.create_index.assert_any_call(
         [("captured_at", ASCENDING)],
@@ -60,6 +67,8 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
         expireAfterSeconds=settings.OPTIONS_CHAIN_TTL_DAYS * 86400,
         name="ttl_snapshot_ts",
     )
+    # Two indexes on portfolio_snapshots: TTL snapshot_ts, unique snapshot_date
+    assert portfolio_col.create_index.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -91,6 +100,15 @@ def _make_mock_mongo_db(ping_ok: bool):
     return mongo_db
 
 
+def _mock_portfolio_service():
+    svc = MagicMock()
+    svc.start = AsyncMock()
+    svc.stop = AsyncMock()
+    svc.subscribe_fill_events = MagicMock()
+    svc.get_snapshot = MagicMock(return_value=[])
+    return svc
+
+
 @pytest.mark.asyncio
 async def test_readyz_includes_mongo_ok() -> None:
     app = create_app()
@@ -101,6 +119,7 @@ async def test_readyz_includes_mongo_ok() -> None:
         patch("pdp.main.init_collections", new=AsyncMock()),
         patch("pdp.main.mongo_disconnect"),
         patch("pdp.main.get_engine") as mock_engine,
+        patch("pdp.portfolio.service.PortfolioService", return_value=_mock_portfolio_service()),
     ):
         mock_mongo_db = _make_mock_mongo_db(ping_ok=True)
         mock_connect.return_value = (MagicMock(), mock_mongo_db)
@@ -131,6 +150,7 @@ async def test_readyz_returns_503_when_mongo_down() -> None:
         patch("pdp.main.init_collections", new=AsyncMock()),
         patch("pdp.main.mongo_disconnect"),
         patch("pdp.main.get_engine") as mock_engine,
+        patch("pdp.portfolio.service.PortfolioService", return_value=_mock_portfolio_service()),
     ):
         mock_mongo_db = _make_mock_mongo_db(ping_ok=False)
         mock_connect.return_value = (MagicMock(), mock_mongo_db)

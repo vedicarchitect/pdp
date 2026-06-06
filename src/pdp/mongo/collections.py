@@ -13,6 +13,7 @@ log = structlog.get_logger()
 async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
     await _ensure_market_bars(db)
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
+    await _ensure_portfolio_snapshots(db)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -56,6 +57,25 @@ async def _ensure_option_chains(
     await db["option_chains"].create_index(
         [("underlying", ASCENDING), ("expiry", ASCENDING), ("snapshot_ts", DESCENDING)],
         name="idx_underlying_expiry_snapshot",
+    )
+
+
+async def _ensure_portfolio_snapshots(db: AsyncIOMotorDatabase, ttl_days: int = 90) -> None:  # type: ignore[type-arg]
+    try:
+        await db.create_collection("portfolio_snapshots")
+        log.info("mongo_collection_created", collection="portfolio_snapshots")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="portfolio_snapshots")
+
+    await db["portfolio_snapshots"].create_index(
+        [("snapshot_ts", ASCENDING)],
+        expireAfterSeconds=ttl_days * 86400,
+        name="ttl_snapshot_ts",
+    )
+    await db["portfolio_snapshots"].create_index(
+        [("snapshot_date", ASCENDING)],
+        unique=True,
+        name="uq_snapshot_date",
     )
 
 

@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     OPTIONS_UNDERLYINGS: str = '["NIFTY","BANKNIFTY"]'
     OPTIONS_CHAIN_TTL_DAYS: int = 7
 
+    PORTFOLIO_MTM_INTERVAL_SECONDS: int = 5
+    PORTFOLIO_EOD_SNAPSHOT: bool = True
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

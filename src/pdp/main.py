@@ -44,6 +44,8 @@ async def lifespan(app: FastAPI):
     from pdp.market.ws import WSHub
     from pdp.options.hub import OptionsHub
     from pdp.orders.ws import OrdersHub
+    from pdp.portfolio.hub import PortfolioHub
+    from pdp.portfolio.service import PortfolioService
 
     ws_hub = WSHub()
     app.state.ws_hub = ws_hub
@@ -51,6 +53,8 @@ async def lifespan(app: FastAPI):
     app.state.orders_hub = orders_hub
     options_hub = OptionsHub()
     app.state.options_hub = options_hub
+    portfolio_hub = PortfolioHub()
+    app.state.portfolio_hub = portfolio_hub
 
     # Paper broker + order router — always started (no external credentials needed)
     from pdp.orders.paper import PaperBroker
@@ -112,6 +116,18 @@ async def lifespan(app: FastAPI):
         app.state.dhan_adapter = None
         log.info("market_feed_skipped", reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set")
 
+    # Portfolio service — always started (works in paper and live mode)
+    portfolio_service = PortfolioService(
+        redis=app.state.redis,
+        engine=get_engine(),
+        hub=portfolio_hub,
+        settings=settings,
+        mongo_db=mongo_db,
+    )
+    await portfolio_service.start()
+    app.state.portfolio_service = portfolio_service
+    portfolio_service.subscribe_fill_events(orders_hub)
+
     # Options chain poller — only when live and credentialed
     options_poller = None
     if settings.LIVE and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
@@ -133,6 +149,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("app_shutting_down")
+        await portfolio_service.stop()
         if tick_router_task is not None:
             adapter = app.state.dhan_adapter
             if adapter:
@@ -166,6 +183,8 @@ def create_app() -> FastAPI:
     from pdp.options.ws import options_ws_router
     from pdp.orders.routes import router as orders_router
     from pdp.orders.ws import orders_ws_router
+    from pdp.portfolio.routes import router as portfolio_router
+    from pdp.portfolio.ws import portfolio_ws_router
 
     app.include_router(instruments_router)
     app.include_router(market_router)
@@ -174,6 +193,8 @@ def create_app() -> FastAPI:
     app.include_router(options_ws_router)
     app.include_router(orders_router)
     app.include_router(orders_ws_router)
+    app.include_router(portfolio_router)
+    app.include_router(portfolio_ws_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

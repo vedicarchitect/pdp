@@ -1,27 +1,30 @@
 ## Why
 
-(STUB — to be authored after `add-paper-broker` ships.)
-
-Long-term equity / MF holdings need real-time mark-to-market P&L, corporate-action awareness (splits, bonuses, dividends), and a unified view alongside intraday/positional. The paper-broker `positions` table covers F&O only — equity holdings have different semantics (long-only, T+1 settlement, demat sync).
+The `positions` table (migration 0005) already stores fills from both the paper and Dhan brokers, but `unrealized_pnl` is always written as 0 — no mark-to-market computation exists anywhere in the codebase. There is no REST endpoint for position state and no way for a strategy or UI to subscribe to live P&L updates.
 
 ## What Changes
 
-- New `holdings` table (broker-synced).
-- Holdings ingest from broker `/holdings` endpoint + manual override CSV.
-- Real-time P&L via LTP from `market-data` Redis cache.
-- Corporate-action ledger and auto-adjustment of cost basis.
-- `GET /api/v1/holdings` + `/ws/portfolio` event stream.
+- New `PortfolioService` background task that maintains an in-memory position cache, subscribes to Redis `tick.<sid>` pub/sub for held securities, and recomputes unrealised P&L on each tick.
+- Periodic flush writes updated `unrealized_pnl` back to the PG `positions` table (no new table needed).
+- EOD snapshot persisted to MongoDB `portfolio_snapshots` collection at market close.
+- REST: `GET /api/v1/portfolio/positions` and `GET /api/v1/portfolio/summary`.
+- WebSocket: `/ws/portfolio` pushes a full position payload on every MTM update.
+- `PortfolioHub` wiring into `main.py` lifespan alongside the existing hubs.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `portfolio`: Long-term equity/MF holdings, P&L, corporate-action handling.
+- `portfolio`: Real-time MTM P&L across open positions, portfolio summary aggregation, REST + WebSocket exposure, and EOD MongoDB snapshot.
 
 ### Modified Capabilities
 
-(none)
+(none — `positions` table schema is unchanged; only the unrealized_pnl column gets populated at runtime)
 
 ## Impact
 
-Depends on `platform-core`, `instrument-registry`, `market-data`, `order-execution`. To be designed in detail once dependencies ship.
+- **`src/pdp/portfolio/`** — new package (service, hub, routes, ws, snapshot).
+- **`src/pdp/main.py`** — wire `PortfolioService` and `PortfolioHub` into lifespan.
+- **`src/pdp/settings.py`** — two new settings (`PORTFOLIO_MTM_INTERVAL_SECONDS`, `PORTFOLIO_EOD_SNAPSHOT`).
+- **`src/pdp/mongo/collections.py`** — ensure `portfolio_snapshots` collection + TTL index.
+- Depends on: `platform-core` (PG, structlog), `market-data` (Redis `tick.*` pub/sub + `ltp:<sid>` keys), `order-execution` (positions table + OrdersHub fill events), `mongo-store` (motor client).

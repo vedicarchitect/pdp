@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -38,8 +39,18 @@ class OrdersHub:
 
     def __init__(self) -> None:
         self._clients: set[_Client] = set()
+        self._position_callbacks: list[Callable[[dict[str, Any]], None]] = []
+
+    def register_position_callback(self, cb: Callable[[dict[str, Any]], None]) -> None:
+        self._position_callbacks.append(cb)
 
     def publish(self, event_type: str, payload: dict[str, Any]) -> None:
+        if event_type == "position":
+            for cb in self._position_callbacks:
+                try:
+                    cb(payload)
+                except Exception as exc:
+                    log.warning("position_callback_error", exc=str(exc))
         if not self._clients:
             return
         msg = json.dumps({"type": event_type, "payload": payload})
