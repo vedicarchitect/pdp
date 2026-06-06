@@ -19,7 +19,8 @@ Everything is spec-first: no implementation lands without a proposal under `open
 | Web framework    | FastAPI + uvicorn (uvloop, httptools)             |
 | Response models  | `msgspec.Struct` (hot path), `pydantic` (input)   |
 | DataFrame engine | Polars                                            |
-| DB (cold)        | PostgreSQL 16 + TimescaleDB 2 (hypertables)       |
+| DB (transactional) | PostgreSQL 16 + TimescaleDB 2 (hypertables for market_bars; ACID for orders/positions/accounts) |
+| DB (analytics)   | MongoDB 7 (options chains + Greeks as documents; one doc per expiry snapshot) |
 | DB (hot/cache)   | Redis 7 (pub/sub + streams + hash)                |
 | ORM / migrations | SQLAlchemy 2.0 async + Alembic                    |
 | HTTP client      | httpx (async)                                     |
@@ -37,6 +38,7 @@ Everything is spec-first: no implementation lands without a proposal under `open
 - **Spec-first**: every capability lives under `openspec/specs/<capability>/spec.md` after archival.
 - **One mutation per route**: avoid kitchen-sink endpoints.
 - **Universal indicators**: levels/indicators/value-areas computed once, consumed by all strategies.
+- **DB separation**: PostgreSQL/Timescale owns ticks/bars/orders/positions (ACID, structured); MongoDB owns options chains + Greeks (document-per-expiry, fast sequential scan for backtest).
 - **Latency budget**: tick → WebSocket fan-out p99 ≤ 50ms on a single instrument.
 - **Settings via env** + `pydantic-settings`; never read `os.environ` directly in app code.
 - **Structured logging only**: no bare `print()` or `rich` output inside core modules.
