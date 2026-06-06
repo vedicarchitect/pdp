@@ -154,8 +154,9 @@ class DhanTickerAdapter:
         """Spin up a MarketFeed in the thread pool; resolve when it disconnects."""
         instruments = [(exch, sid, _FEED_MODE) for (sid, _), exch in self._subs.items()]
         if not instruments:
-            # No instruments yet — wait until a subscribe call arrives
-            await asyncio.sleep(5)
+            # No instruments yet — wait until a subscribe call arrives.
+            # Use a longer idle sleep so the reconnect loop doesn't busy-spin.
+            await asyncio.sleep(30)
             return
 
         loop = self._loop

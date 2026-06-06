@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     PAPER_SLIPPAGE_BPS: float = 2.0
 
+    MONGO_URI: str = "mongodb://localhost:27017"
+    MONGO_DB_NAME: str = "pdp"
+    MONGO_CHAIN_TTL_DAYS: int = 30
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

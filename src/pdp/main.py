@@ -11,6 +11,9 @@ from sqlalchemy import text
 
 from pdp.db.session import dispose_engine, get_engine, get_session_maker
 from pdp.logging import RequestIdMiddleware, configure_logging
+from pdp.mongo.client import connect as mongo_connect
+from pdp.mongo.client import disconnect as mongo_disconnect
+from pdp.mongo.collections import init_collections
 from pdp.settings import Settings, get_settings
 
 log = structlog.get_logger()
@@ -24,6 +27,10 @@ async def lifespan(app: FastAPI):
     app.state.started_at = started_at
     app.state.settings = settings
     app.state.redis = redis_asyncio.from_url(settings.REDIS_URL, decode_responses=True)
+    mongo_client, mongo_db = mongo_connect(settings)
+    app.state.mongo_client = mongo_client
+    app.state.mongo_db = mongo_db
+    await init_collections(mongo_db, settings)
     log.info(
         "app_starting",
         app=settings.APP_NAME,
@@ -48,10 +55,27 @@ async def lifespan(app: FastAPI):
 
     paper_broker = PaperBroker(get_session_maker(), settings.PAPER_SLIPPAGE_BPS)
     paper_broker.set_hub(orders_hub)
-    order_router = OrderRouter(settings, paper_broker)
-    app.state.order_router = order_router
-
     await paper_broker.start(app.state.redis)
+
+    # Live Dhan broker — only when explicitly enabled and credentialed (paper-first).
+    dhan_broker = None
+    if settings.LIVE and settings.BROKER == "dhan" and settings.DHAN_CLIENT_ID:
+        from pdp.orders.dhan_broker import DhanBroker
+
+        dhan_broker = DhanBroker(get_session_maker(), settings)
+        dhan_broker.set_hub(orders_hub)
+        await dhan_broker.start(app.state.redis)
+        log.info("dhan_broker_enabled", client_id=settings.DHAN_CLIENT_ID)
+    else:
+        log.info(
+            "dhan_broker_disabled",
+            live=settings.LIVE,
+            broker=settings.BROKER,
+            has_credentials=bool(settings.DHAN_CLIENT_ID),
+        )
+
+    order_router = OrderRouter(settings, paper_broker, dhan_broker)
+    app.state.order_router = order_router
 
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
@@ -103,8 +127,11 @@ async def lifespan(app: FastAPI):
                 pass
         if bar_writer is not None:
             await bar_writer.stop()
+        if dhan_broker is not None:
+            await dhan_broker.stop()
         await paper_broker.stop()
         await app.state.redis.aclose()
+        mongo_disconnect(app.state.mongo_client)
         await dispose_engine()
 
 
@@ -136,8 +163,11 @@ def create_app() -> FastAPI:
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
+        from fastapi.responses import JSONResponse
+
         db_state = "ok"
         redis_state = "ok"
+        mongo_state = "ok"
         try:
             async with get_engine().begin() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -147,15 +177,18 @@ def create_app() -> FastAPI:
             await app.state.redis.ping()
         except Exception as exc:
             redis_state = f"error: {exc.__class__.__name__}"
-        status_code = 200 if db_state == "ok" and redis_state == "ok" else 503
-        from fastapi.responses import JSONResponse
-
+        try:
+            await app.state.mongo_db.command("ping")
+        except Exception as exc:
+            mongo_state = f"error: {exc.__class__.__name__}"
+        all_ok = db_state == "ok" and redis_state == "ok" and mongo_state == "ok"
         return JSONResponse(
-            status_code=status_code,
+            status_code=200 if all_ok else 503,
             content={
-                "status": "ready" if status_code == 200 else "degraded",
+                "status": "ready" if all_ok else "degraded",
                 "db": db_state,
                 "redis": redis_state,
+                "mongo": mongo_state,
             },
         )
 

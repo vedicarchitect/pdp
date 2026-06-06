@@ -172,22 +172,27 @@ class PaperBroker:
 
     async def _run(self, redis: Redis) -> None:
         pubsub = redis.pubsub()
+        subscribed: set[str] = set()
         try:
             while not self._stop_event.is_set():
-                watched = set(self._open_orders.keys())
-                if watched:
-                    await pubsub.subscribe(*(f"tick.{sid}" for sid in watched))
-                async for message in pubsub.listen():
-                    if self._stop_event.is_set():
-                        break
-                    if message["type"] != "message":
-                        continue
-                    await self._on_tick(message)
-                    # Resubscribe if new securities were added
-                    new = set(self._open_orders.keys()) - watched
-                    if new:
-                        await pubsub.subscribe(*(f"tick.{sid}" for sid in new))
-                        watched |= new
+                # Subscribe incrementally to any newly-watched securities.
+                new = set(self._open_orders.keys()) - subscribed
+                if new:
+                    await pubsub.subscribe(*(f"tick.{sid}" for sid in new))
+                    subscribed |= new
+                if not subscribed:
+                    # Nothing to watch yet — wait instead of busy-spinning.
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=0.5)
+                    except TimeoutError:
+                        pass
+                    continue
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=0.5
+                )
+                if message is None or message["type"] != "message":
+                    continue
+                await self._on_tick(message)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -272,72 +277,98 @@ class PaperBroker:
         fill_price: Decimal,
         now: datetime,
     ) -> Position | None:
-        result = await session.execute(
-            select(Position).where(
-                Position.security_id == order.security_id,
-                Position.exchange_segment == order.exchange_segment,
-                Position.product == order.product,
-            )
-        )
-        pos = result.scalar_one_or_none()
-        qty = order.qty if order.side == Side.BUY else -order.qty
-        if pos is None:
-            pos = Position(
-                security_id=order.security_id,
-                exchange_segment=order.exchange_segment,
-                product=order.product,
-                net_qty=qty,
-                avg_price=fill_price,
-                realized_pnl=Decimal("0"),
-                unrealized_pnl=Decimal("0"),
-                updated_at=now,
-            )
-            session.add(pos)
-        else:
-            old_qty = pos.net_qty
-            old_avg = pos.avg_price
-            new_qty = old_qty + qty
-
-            if new_qty == 0:
-                # Fully closed
-                realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
-                pos.realized_pnl += realized
-                pos.avg_price = Decimal("0")
-            elif (old_qty > 0 and qty > 0) or (old_qty < 0 and qty < 0):
-                # Adding to position — weighted average
-                total_cost = old_avg * Decimal(str(old_qty)) + fill_price * Decimal(str(order.qty))
-                pos.avg_price = _round4(total_cost / Decimal(str(abs(new_qty))))
-            else:
-                # Reducing position
-                reduce_qty = min(abs(qty), abs(old_qty))
-                if old_qty > 0:
-                    realized = _round4((fill_price - old_avg) * Decimal(str(reduce_qty)))
-                else:
-                    realized = _round4((old_avg - fill_price) * Decimal(str(reduce_qty)))
-                pos.realized_pnl += realized
-
-            pos.net_qty = new_qty
-            pos.updated_at = now
-        await session.flush()
-        return pos
+        return await upsert_position(session, order, fill_price, now)
 
     def _compute_charges(self, order: Order, fill_price: Decimal) -> Decimal:
-        # Look up instrument_type from cost cache (default to EQUITY if unknown)
-        calc = None
+        return compute_charges(self._costs, order, fill_price)
+
+
+def compute_charges(
+    costs: dict[str, ChargesCalculator],
+    order: Order,
+    fill_price: Decimal,
+    qty: int | None = None,
+) -> Decimal:
+    """Compute charges for a fill from a ``broker_costs`` cache.
+
+    Shared by the paper engine and the live Dhan broker. Picks the cost row by an
+    exchange-segment heuristic (F&O / currency → derivatives, else equity).
+    """
+    # Ensure the cache has at least one row, else charges are zero.
+    if not costs:
+        return Decimal("0")
+    seg = order.exchange_segment.upper()
+    guessed = "FUTIDX" if ("FNO" in seg or "CUR" in seg) else "EQUITY"
+    calc = costs.get(guessed)
+    if calc is None:
+        # Fall back to any available row.
         for itype in ("OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK", "EQUITY"):
-            calc = self._costs.get(itype)
+            calc = costs.get(itype)
             if calc is not None:
                 break
-        if calc is None:
-            return Decimal("0")
-        # Prefer exact match by exchange_segment heuristic
-        seg = order.exchange_segment.upper()
-        if "FNO" in seg or "CUR" in seg:
-            guessed = "FUTIDX"
+    if calc is None:
+        return Decimal("0")
+    return calc.compute(qty if qty is not None else order.qty, fill_price, order.side)
+
+
+async def upsert_position(
+    session: AsyncSession,
+    order: Order,
+    fill_price: Decimal,
+    now: datetime,
+) -> Position | None:
+    """Upsert the position for ``order`` using weighted-average / realize-on-reduce.
+
+    Shared by the paper engine and the live Dhan broker so P&L semantics match.
+    """
+    result = await session.execute(
+        select(Position).where(
+            Position.security_id == order.security_id,
+            Position.exchange_segment == order.exchange_segment,
+            Position.product == order.product,
+        )
+    )
+    pos = result.scalar_one_or_none()
+    qty = order.qty if order.side == Side.BUY else -order.qty
+    if pos is None:
+        pos = Position(
+            security_id=order.security_id,
+            exchange_segment=order.exchange_segment,
+            product=order.product,
+            net_qty=qty,
+            avg_price=fill_price,
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            updated_at=now,
+        )
+        session.add(pos)
+    else:
+        old_qty = pos.net_qty
+        old_avg = pos.avg_price
+        new_qty = old_qty + qty
+
+        if new_qty == 0:
+            # Fully closed
+            realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
+            pos.realized_pnl += realized
+            pos.avg_price = Decimal("0")
+        elif (old_qty > 0 and qty > 0) or (old_qty < 0 and qty < 0):
+            # Adding to position — weighted average
+            total_cost = old_avg * Decimal(str(old_qty)) + fill_price * Decimal(str(order.qty))
+            pos.avg_price = _round4(total_cost / Decimal(str(abs(new_qty))))
         else:
-            guessed = "EQUITY"
-        calc = self._costs.get(guessed, calc)
-        return calc.compute(order.qty, fill_price, order.side)
+            # Reducing position
+            reduce_qty = min(abs(qty), abs(old_qty))
+            if old_qty > 0:
+                realized = _round4((fill_price - old_avg) * Decimal(str(reduce_qty)))
+            else:
+                realized = _round4((old_avg - fill_price) * Decimal(str(reduce_qty)))
+            pos.realized_pnl += realized
+
+        pos.net_qty = new_qty
+        pos.updated_at = now
+    await session.flush()
+    return pos
 
 
 def _order_dict(o: Order) -> dict:

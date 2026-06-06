@@ -13,6 +13,7 @@ from pdp.instruments.models import Instrument
 from pdp.orders.models import Order, OrderStatus, TradeMode
 
 if TYPE_CHECKING:
+    from pdp.orders.dhan_broker import DhanBroker
     from pdp.orders.paper import PaperBroker
     from pdp.settings import Settings
 
@@ -37,9 +38,21 @@ class OrderRouter:
     - Handing filled orders to PaperBroker
     """
 
-    def __init__(self, settings: Settings, paper: PaperBroker) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        paper: PaperBroker,
+        dhan_broker: DhanBroker | None = None,
+    ) -> None:
         self._settings = settings
         self._paper = paper
+        self._dhan = dhan_broker
+
+    def _broker_for(self, broker: str) -> PaperBroker | DhanBroker:
+        """Select the engine that owns orders for the given broker name."""
+        if broker == "dhan" and self._dhan is not None:
+            return self._dhan
+        return self._paper
 
     async def place_order(
         self,
@@ -100,7 +113,7 @@ class OrderRouter:
         await session.refresh(order)
 
         if status == OrderStatus.OPEN:
-            await self._paper.add_order(order)
+            await self._broker_for(broker).add_order(order)
             log.info(
                 "order_placed",
                 order_id=order.id,
@@ -123,7 +136,7 @@ class OrderRouter:
         order.status = OrderStatus.CANCELLED
         order.cancelled_at = datetime.now(UTC)
         await session.commit()
-        await self._paper.cancel_order(order_id)
+        await self._broker_for(order.broker).cancel_order(order_id)
         return order
 
     async def _validate_lot_size(

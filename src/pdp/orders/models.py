@@ -49,6 +49,7 @@ class Order(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     broker: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)
     security_id: Mapped[str] = mapped_column(String, nullable=False)

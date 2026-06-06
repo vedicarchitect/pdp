@@ -31,6 +31,14 @@ def test_missing_database_url_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) 
         s.Settings()  # type: ignore[call-arg]
 
 
+def test_mongo_defaults() -> None:
+    s = _reload_settings_module()
+    settings = s.Settings()  # type: ignore[call-arg]
+    assert settings.MONGO_URI == "mongodb://localhost:27017"
+    assert settings.MONGO_DB_NAME == "pdp"
+    assert settings.MONGO_CHAIN_TTL_DAYS == 30
+
+
 def test_env_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://x:y@h:1/d")
     monkeypatch.setenv("DATABASE_SYNC_URL", "postgresql+psycopg://x:y@h:1/d")
