@@ -57,7 +57,6 @@ class PortfolioService:
         self._subscribed_sids: set[str] = set()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
-        self._pending_reload = False
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -81,11 +80,11 @@ class PortfolioService:
         log.info("portfolio_service_stopped")
 
     def subscribe_fill_events(self, orders_hub: OrdersHub) -> None:
-        """Register a callback so fill events trigger a fast position reload."""
+        """Register a callback so fill events are acknowledged (reload happens in flush loop)."""
         orders_hub.register_position_callback(self._on_position_event)
 
     def _on_position_event(self, payload: dict[str, Any]) -> None:
-        self._pending_reload = True
+        pass  # positions reload on every flush cycle; callback keeps the hook wired
 
     # ------------------------------------------------------------------ #
     # Position cache                                                       #
@@ -197,10 +196,9 @@ class PortfolioService:
 
             await self._flush_dirty()
 
-            if self._pending_reload or True:
-                self._pending_reload = False
-                async with AsyncSession(self._engine) as session:
-                    await self._load_positions(session)
+            async with AsyncSession(self._engine) as session:
+                await self._load_positions(session)
+            await self._check_ltp_stale()
 
     async def _flush_dirty(self) -> None:
         if not self._dirty:
@@ -227,6 +225,19 @@ class PortfolioService:
         except Exception as exc:
             log.warning("portfolio_flush_error", error=str(exc))
             self._dirty.update(dirty_keys)
+
+    async def _check_ltp_stale(self) -> None:
+        """Mark positions ltp_stale=True when the Redis LTP key has expired."""
+        for ps in self._cache.values():
+            if ps.net_qty == 0:
+                continue
+            try:
+                val = await self._redis.get(f"ltp:{ps.security_id}")
+            except Exception as exc:
+                log.warning("portfolio_ltp_stale_check_error", sid=ps.security_id, exc=str(exc))
+                continue
+            if val is None:
+                ps.ltp_stale = True
 
     # ------------------------------------------------------------------ #
     # EOD snapshot                                                         #

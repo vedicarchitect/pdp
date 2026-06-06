@@ -71,7 +71,7 @@ Controlled by `PORTFOLIO_EOD_SNAPSHOT` (bool, default `true`).
 - **In-memory cache diverges from PG if service restarts mid-session** → On restart, reload from PG. Any ticks during downtime are missed but PG `avg_price`/`net_qty` are correct from fills; only `unrealized_pnl` needs refresh from LTP.
 - **Redis `ltp:<sid>` key expires after 5s** → If the key is missing (market closed, no ticks), `unrealized_pnl` is not updated but the stale in-memory value is retained and labelled with `ltp_stale: true` in the WS push. REST reads return the last known value.
 - **Position subscription drift** → If a position goes flat (net_qty = 0) the service unsubscribes from that tick channel to avoid processing irrelevant ticks.
-- **Paper + live positions coexist** → The `positions` table has a `mode` column (via Order.mode). Summary aggregation groups by mode; REST endpoints accept `?mode=paper|live` filter.
+- **Paper + live positions coexist** → The `positions` table has no `mode` column; mode is derived from the `LIVE` setting for the summary response. Per-position mode tracking would require a schema change deferred to a future change.
 
 ## Migration Plan
 

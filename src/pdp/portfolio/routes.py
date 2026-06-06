@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,7 +33,6 @@ def _pos_dict(p: Position) -> dict:
 @router.get("/positions")
 async def get_positions(
     db: Annotated[AsyncSession, Depends(get_db)],
-    mode: str | None = Query(default=None, description="Filter by trade mode: paper or live"),
 ) -> JSONResponse:
     result = await db.execute(select(Position))
     positions = result.scalars().all()

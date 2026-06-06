@@ -81,21 +81,41 @@ def test_tick_for_unrelated_security_ignored():
     assert not svc._dirty
 
 
-def test_ltp_stale_flag():
+def test_ltp_stale_cleared_on_tick():
     svc = _make_service()
     key = ("13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos()
+    svc._cache[key].ltp_stale = True  # pre-marked stale
 
-    # First tick — ltp_stale should be False
     svc._handle_tick({"security_id": "13", "ltp": "22300.0"})
     assert svc._cache[key].ltp_stale is False
 
-    # Manually mark stale (simulates Redis key expiry)
-    svc._cache[key].ltp_stale = True
 
-    # After marking stale, the position dict includes ltp_stale=True
-    d = svc._cache[key].to_dict()
-    assert d["ltp_stale"] is True
+@pytest.mark.asyncio
+async def test_ltp_stale_set_when_redis_key_missing():
+    """_check_ltp_stale sets ltp_stale=True when Redis GET returns None."""
+    svc = _make_service()
+    svc._redis.get = AsyncMock(return_value=None)  # key expired
+    key = ("13", "NSE_FNO", "NRML")
+    svc._cache[key] = _make_pos(net_qty=1)
+
+    await svc._check_ltp_stale()
+
+    assert svc._cache[key].ltp_stale is True
+
+
+@pytest.mark.asyncio
+async def test_ltp_stale_not_set_when_redis_key_present():
+    svc = _make_service()
+    svc._redis.get = AsyncMock(return_value="22500.0")  # key alive
+    key = ("13", "NSE_FNO", "NRML")
+    ps = _make_pos(net_qty=1)
+    ps.ltp_stale = False
+    svc._cache[key] = ps
+
+    await svc._check_ltp_stale()
+
+    assert svc._cache[key].ltp_stale is False
 
 
 def _make_pos_for_sid(sid: str, net_qty: int = 1) -> PositionState:

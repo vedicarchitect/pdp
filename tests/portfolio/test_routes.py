@@ -71,9 +71,10 @@ async def test_summary_aggregates_pnl():
 
 
 @pytest.mark.asyncio
-async def test_positions_mode_param_accepted():
+async def test_positions_no_mode_filter():
+    """Mode filter was removed — positions table has no mode column."""
     db = _mock_db([])
-    resp = await get_positions(db=db, mode="paper")
+    resp = await get_positions(db=db)
     import json
     data = json.loads(resp.body)
     assert data["count"] == 0

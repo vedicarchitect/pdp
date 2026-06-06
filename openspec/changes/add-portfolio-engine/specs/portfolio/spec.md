@@ -27,20 +27,15 @@ The system SHALL maintain an in-memory position cache loaded from the PG `positi
 ### Requirement: Portfolio REST endpoints
 
 The system SHALL expose:
-- `GET /api/v1/portfolio/positions` — returns all positions from PG (with the latest `unrealized_pnl`). Accepts optional `?mode=paper|live` query parameter to filter by trade mode.
-- `GET /api/v1/portfolio/summary` — returns `{"total_unrealized_pnl": float, "total_realized_pnl": float, "day_pnl": float, "open_positions": int, "mode": "paper|live|mixed"}`.
+- `GET /api/v1/portfolio/positions` — returns all positions from PG (with the latest `unrealized_pnl`).
+- `GET /api/v1/portfolio/summary` — returns `{"total_unrealized_pnl": float, "total_realized_pnl": float, "day_pnl": float, "open_positions": int, "mode": "paper|live"}`.
 
-Both endpoints SHALL return HTTP 200 with an empty positions array if no positions exist. Both endpoints SHALL read from the PG `positions` table (not the in-memory cache) for consistency.
+Both endpoints SHALL return HTTP 200 with an empty positions array if no positions exist. Both endpoints SHALL read from the PG `positions` table (not the in-memory cache) for consistency. Mode filtering is not supported as the `positions` table has no `mode` column; the `mode` field in the summary response is derived from the `LIVE` setting.
 
 #### Scenario: Positions endpoint returns open positions
 
 - **WHEN** `GET /api/v1/portfolio/positions` is called and two open positions exist
 - **THEN** HTTP 200 is returned with a JSON array containing both positions including `unrealized_pnl`, `realized_pnl`, `avg_price`, `net_qty`, and `updated_at`
-
-#### Scenario: Positions endpoint with mode filter
-
-- **WHEN** `GET /api/v1/portfolio/positions?mode=paper` is called
-- **THEN** only positions whose originating orders have `mode=paper` are returned
 
 #### Scenario: Summary endpoint
 
