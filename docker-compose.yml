@@ -30,6 +30,19 @@ services:
       timeout: 3s
       retries: 10
 
+  mongo:
+    image: mongo:7
+    container_name: pdp-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: pdp-pgadmin
@@ -46,3 +59,4 @@ services:
 volumes:
   timescale_data:
   redis_data:
+  mongo_data:
