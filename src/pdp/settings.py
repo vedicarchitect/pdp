@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     MONGO_DB_NAME: str = "pdp"
     MONGO_CHAIN_TTL_DAYS: int = 30
 
+    OPTIONS_POLL_INTERVAL_SECONDS: int = 30
+    OPTIONS_RISK_FREE_RATE: float = 0.065
+    OPTIONS_UNDERLYINGS: str = '["NIFTY","BANKNIFTY"]'
+    OPTIONS_CHAIN_TTL_DAYS: int = 7
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

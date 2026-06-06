@@ -42,12 +42,15 @@ async def lifespan(app: FastAPI):
 
     # WebSocket hubs — always available
     from pdp.market.ws import WSHub
+    from pdp.options.hub import OptionsHub
     from pdp.orders.ws import OrdersHub
 
     ws_hub = WSHub()
     app.state.ws_hub = ws_hub
     orders_hub = OrdersHub()
     app.state.orders_hub = orders_hub
+    options_hub = OptionsHub()
+    app.state.options_hub = options_hub
 
     # Paper broker + order router — always started (no external credentials needed)
     from pdp.orders.paper import PaperBroker
@@ -109,6 +112,23 @@ async def lifespan(app: FastAPI):
         app.state.dhan_adapter = None
         log.info("market_feed_skipped", reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set")
 
+    # Options chain poller — only when live and credentialed
+    options_poller = None
+    if settings.LIVE and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+        from pdp.options.poller import OptionsChainPoller
+
+        options_poller = OptionsChainPoller(
+            collection=app.state.mongo_db["option_chains"],
+            hub=options_hub,
+            settings=settings,
+        )
+        app.state.options_poller = options_poller
+        await options_poller.start()
+        log.info("options_poller_enabled")
+    else:
+        app.state.options_poller = None
+        log.info("options_poller_disabled", live=settings.LIVE, has_credentials=bool(settings.DHAN_CLIENT_ID))
+
     try:
         yield
     finally:
@@ -125,6 +145,8 @@ async def lifespan(app: FastAPI):
                 pass
         if bar_writer is not None:
             await bar_writer.stop()
+        if options_poller is not None:
+            await options_poller.stop()
         if dhan_broker is not None:
             await dhan_broker.stop()
         await paper_broker.stop()
@@ -140,12 +162,16 @@ def create_app() -> FastAPI:
     from pdp.instruments.routes import router as instruments_router
     from pdp.market.routes import router as market_router
     from pdp.market.ws import ws_router
+    from pdp.options.routes import router as options_router
+    from pdp.options.ws import options_ws_router
     from pdp.orders.routes import router as orders_router
     from pdp.orders.ws import orders_ws_router
 
     app.include_router(instruments_router)
     app.include_router(market_router)
     app.include_router(ws_router)
+    app.include_router(options_router)
+    app.include_router(options_ws_router)
     app.include_router(orders_router)
     app.include_router(orders_ws_router)
 

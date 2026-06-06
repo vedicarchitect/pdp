@@ -47,10 +47,18 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
 
     await init_collections(db, settings)
 
-    chains_col.create_index.assert_called_once_with(
+    # Three indexes: TTL on captured_at (legacy), TTL on snapshot_ts (OPTIONS_CHAIN_TTL_DAYS), compound lookup
+    assert chains_col.create_index.call_count == 3
+    chains_col.create_index.assert_any_call(
         [("captured_at", ASCENDING)],
         expireAfterSeconds=settings.MONGO_CHAIN_TTL_DAYS * 86400,
         name="ttl_captured_at",
+    )
+    from pymongo import ASCENDING as ASC
+    chains_col.create_index.assert_any_call(
+        [("snapshot_ts", ASC)],
+        expireAfterSeconds=settings.OPTIONS_CHAIN_TTL_DAYS * 86400,
+        name="ttl_snapshot_ts",
     )
 
 

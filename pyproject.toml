@@ -25,6 +25,7 @@ dependencies = [
     "dhanhq>=2.2.0",
     "motor>=3.4",
     "asyncpg>=0.31.0",
+    "py-vollib-vectorized>=0.1.1",
 ]
 
 [project.optional-dependencies]
