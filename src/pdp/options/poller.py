@@ -42,88 +42,117 @@ def _in_market_hours() -> bool:
     return start <= now <= end
 
 
-def _parse_chain(raw: dict, underlying: str, risk_free_rate: float) -> list[dict]:
-    """Convert Dhan optionchain response into list of strike dicts with Greeks."""
+def _spot_of(raw: dict) -> float:
     data = raw.get("data", raw)
-    spot = float(data.get("last_price", data.get("lastPrice", 0)) or 0)
-    oc_data = data.get("oc", data.get("optionChain", {}))
+    return float(data.get("last_price", data.get("lastPrice", 0)) or 0)
 
-    # Build flat list of strikes
+
+def _dhan_side(side: dict) -> dict:
+    """Extract a CE/PE side from Dhan's raw payload, using Dhan greeks if present.
+
+    Dhan reports ``implied_volatility`` in percent; we store it as a decimal to match
+    the vollib convention. ``iv``/greeks are ``None`` when Dhan omits them so the
+    caller can fall back to vollib.
+    """
+    g = side.get("greeks") or {}
+    iv_raw = side.get("implied_volatility")
+    has_greeks = all(g.get(k) is not None for k in ("delta", "gamma", "theta", "vega"))
+    iv = float(iv_raw) / 100.0 if iv_raw not in (None, "") else None
+    return {
+        "ltp": float(side.get("last_price", side.get("lastPrice", 0)) or 0),
+        "oi": int(side.get("oi", side.get("openInterest", 0)) or 0),
+        "volume": int(side.get("volume", 0) or 0),
+        "iv": iv,
+        "delta": float(g["delta"]) if has_greeks else None,
+        "gamma": float(g["gamma"]) if has_greeks else None,
+        "theta": float(g["theta"]) if has_greeks else None,
+        "vega": float(g["vega"]) if has_greeks else None,
+    }
+
+
+def _parse_chain(raw: dict, underlying: str, risk_free_rate: float) -> list[dict]:
+    """Convert a single-expiry Dhan optionchain response into strike dicts.
+
+    Expects the canonical shape from ``dhan_client.fetch_chain``:
+    ``{"data": {"last_price": ..., "oc": {"<strike>": {"ce": {...}, "pe": {...}}}},
+       "expiry": "<ISO>"}``. Prefers Dhan-provided IV/greeks per side and falls back
+    to vollib only for sides Dhan did not supply.
+    """
+    data = raw.get("data", raw)
+    expiry_str = raw.get("expiry", "")
+    spot = _spot_of(raw)
+    oc_data = data.get("oc", data.get("optionChain", {})) or {}
+
     rows: list[dict] = []
     for strike_str, sides in oc_data.items():
         try:
             strike = float(strike_str)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
-        ce = sides.get("CE") or sides.get("ce") or {}
-        pe = sides.get("PE") or sides.get("pe") or {}
-        rows.append(
-            {
-                "strike": strike,
-                "ce_ltp": float(ce.get("last_price", ce.get("lastPrice", 0)) or 0),
-                "pe_ltp": float(pe.get("last_price", pe.get("lastPrice", 0)) or 0),
-                "ce_oi": int(ce.get("oi", ce.get("openInterest", 0)) or 0),
-                "pe_oi": int(pe.get("oi", pe.get("openInterest", 0)) or 0),
-                "ce_volume": int(ce.get("volume", 0) or 0),
-                "pe_volume": int(pe.get("volume", 0) or 0),
-                # expiry comes from the Dhan response per strike
-                "expiry": ce.get("expiry_date", ce.get("expiryDate", "")),
-            }
-        )
+        ce = _dhan_side(sides.get("ce") or sides.get("CE") or {})
+        pe = _dhan_side(sides.get("pe") or sides.get("PE") or {})
+        rows.append({"strike": strike, "ce": ce, "pe": pe})
 
     if not rows:
         return []
 
-    # Determine nearest expiry dates present
-    expiry_dates: list[str] = sorted({r["expiry"] for r in rows if r["expiry"]})[:_MAX_EXPIRIES]
+    rows.sort(key=lambda r: r["strike"])
 
-    result: list[dict] = []
-    for expiry_str in expiry_dates:
-        expiry_rows = [r for r in rows if r["expiry"] == expiry_str]
+    # Fallback: compute vollib greeks once if any side is missing Dhan values.
+    needs_fallback = any(
+        r["ce"]["delta"] is None or r["ce"]["iv"] is None
+        or r["pe"]["delta"] is None or r["pe"]["iv"] is None
+        for r in rows
+    )
+    fallback = None
+    if needs_fallback:
         try:
             expiry_date = date.fromisoformat(expiry_str)
         except ValueError:
-            continue
-
-        df = pl.DataFrame(
-            {
-                "strike": [r["strike"] for r in expiry_rows],
-                "ce_ltp": [r["ce_ltp"] for r in expiry_rows],
-                "pe_ltp": [r["pe_ltp"] for r in expiry_rows],
-            }
-        )
-        df_with_greeks = greeks.compute_greeks(df, spot, expiry_date, risk_free_rate)
-
-        for i, r in enumerate(expiry_rows):
-            row_greeks = df_with_greeks.row(i, named=True)
-            result.append(
+            expiry_date = None
+        if expiry_date is not None:
+            df = pl.DataFrame(
                 {
-                    "expiry": expiry_str,
-                    "strike": r["strike"],
-                    "ce": {
-                        "ltp": r["ce_ltp"],
-                        "oi": r["ce_oi"],
-                        "volume": r["ce_volume"],
-                        "iv": float(row_greeks["ce_iv"]),
-                        "delta": float(row_greeks["ce_delta"]),
-                        "gamma": float(row_greeks["ce_gamma"]),
-                        "theta": float(row_greeks["ce_theta"]),
-                        "vega": float(row_greeks["ce_vega"]),
-                    },
-                    "pe": {
-                        "ltp": r["pe_ltp"],
-                        "oi": r["pe_oi"],
-                        "volume": r["pe_volume"],
-                        "iv": float(row_greeks["pe_iv"]),
-                        "delta": float(row_greeks["pe_delta"]),
-                        "gamma": float(row_greeks["pe_gamma"]),
-                        "theta": float(row_greeks["pe_theta"]),
-                        "vega": float(row_greeks["pe_vega"]),
-                    },
+                    "strike": [r["strike"] for r in rows],
+                    "ce_ltp": [r["ce"]["ltp"] for r in rows],
+                    "pe_ltp": [r["pe"]["ltp"] for r in rows],
                 }
             )
+            fallback = greeks.compute_greeks(df, spot, expiry_date, risk_free_rate)
 
+    result: list[dict] = []
+    for i, r in enumerate(rows):
+        fb = fallback.row(i, named=True) if fallback is not None else None
+        result.append(
+            {
+                "expiry": expiry_str,
+                "strike": r["strike"],
+                "ce": _merge_side(r["ce"], fb, "ce"),
+                "pe": _merge_side(r["pe"], fb, "pe"),
+            }
+        )
     return result
+
+
+def _merge_side(side: dict, fallback_row: dict | None, prefix: str) -> dict:
+    """Use Dhan values where present, else the vollib fallback row (else 0)."""
+    def pick(key: str) -> float:
+        if side[key] is not None:
+            return float(side[key])
+        if fallback_row is not None:
+            return float(fallback_row[f"{prefix}_{key}"])
+        return 0.0
+
+    return {
+        "ltp": side["ltp"],
+        "oi": side["oi"],
+        "volume": side["volume"],
+        "iv": pick("iv"),
+        "delta": pick("delta"),
+        "gamma": pick("gamma"),
+        "theta": pick("theta"),
+        "vega": pick("vega"),
+    }
 
 
 class OptionsChainPoller:
@@ -189,54 +218,71 @@ class OptionsChainPoller:
 
     async def _poll_one(self, underlying: str, http: httpx.AsyncClient) -> None:
         try:
-            raw = await dhan_client.fetch_chain(
+            expiries = await dhan_client.fetch_expiries(
                 underlying,
                 self._settings.DHAN_ACCESS_TOKEN,
                 self._settings.DHAN_CLIENT_ID,
-                httpx_client=http,
             )
         except Exception as exc:
-            log.warning("options_chain_fetch_error", underlying=underlying, exc=str(exc))
+            log.warning("options_expiry_fetch_error", underlying=underlying, exc=str(exc))
             return
 
-        all_strikes = _parse_chain(raw, underlying, self._risk_free)
-        if not all_strikes:
-            log.warning("options_chain_empty", underlying=underlying)
+        if not expiries:
+            log.warning("options_expiry_empty", underlying=underlying)
             return
 
-        # Group by expiry and write one doc per expiry
-        expiries: dict[str, list[dict]] = {}
-        for s in all_strikes:
-            expiries.setdefault(s["expiry"], []).append(s)
+        for idx, expiry_str in enumerate(expiries[:_MAX_EXPIRIES]):
+            if idx > 0:
+                # Honour Dhan's 1-request-per-3-seconds option-chain rate limit.
+                await asyncio.sleep(3)
+            await self._poll_expiry(underlying, expiry_str)
 
-        spot = float((raw.get("data", raw)).get("last_price", raw.get("data", raw).get("lastPrice", 0)) or 0)
-        snapshot_ts = datetime.now(UTC)
-
-        for expiry_str, strike_list in expiries.items():
-            doc = {
-                "underlying": underlying,
-                "expiry": expiry_str,
-                "snapshot_ts": snapshot_ts,
-                "spot_price": spot,
-                "max_pain": analytics.compute_max_pain(strike_list),
-                "pcr": analytics.compute_pcr(strike_list),
-                "strikes": strike_list,
-            }
-            try:
-                await self._col.insert_one(doc)
-            except Exception as exc:
-                log.warning(
-                    "options_chain_insert_error",
-                    underlying=underlying,
-                    expiry=expiry_str,
-                    exc=str(exc),
-                )
-                continue
-
-            self._hub.broadcast(underlying, expiry_str, doc)
-            log.info(
-                "options_chain_stored",
+    async def _poll_expiry(self, underlying: str, expiry_str: str) -> None:
+        try:
+            raw = await dhan_client.fetch_chain(
+                underlying,
+                expiry_str,
+                self._settings.DHAN_ACCESS_TOKEN,
+                self._settings.DHAN_CLIENT_ID,
+            )
+        except Exception as exc:
+            log.warning(
+                "options_chain_fetch_error",
                 underlying=underlying,
                 expiry=expiry_str,
-                n_strikes=len(strike_list),
+                exc=str(exc),
             )
+            return
+
+        strike_list = _parse_chain(raw, underlying, self._risk_free)
+        if not strike_list:
+            log.warning("options_chain_empty", underlying=underlying, expiry=expiry_str)
+            return
+
+        doc = {
+            "underlying": underlying,
+            "expiry": expiry_str,
+            "snapshot_ts": datetime.now(UTC),
+            "spot_price": _spot_of(raw),
+            "max_pain": analytics.compute_max_pain(strike_list),
+            "pcr": analytics.compute_pcr(strike_list),
+            "strikes": strike_list,
+        }
+        try:
+            await self._col.insert_one(doc)
+        except Exception as exc:
+            log.warning(
+                "options_chain_insert_error",
+                underlying=underlying,
+                expiry=expiry_str,
+                exc=str(exc),
+            )
+            return
+
+        self._hub.broadcast(underlying, expiry_str, doc)
+        log.info(
+            "options_chain_stored",
+            underlying=underlying,
+            expiry=expiry_str,
+            n_strikes=len(strike_list),
+        )
