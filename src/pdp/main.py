@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pdp.db.session import dispose_engine, get_engine, get_session_maker
+from pdp.db.session import dispose_engine, get_engine, get_session_maker  # noqa: F401 (re-used in lifespan)
 from pdp.logging import RequestIdMiddleware, configure_logging
 from pdp.mongo.client import connect as mongo_connect
 from pdp.mongo.client import disconnect as mongo_disconnect
@@ -143,6 +143,17 @@ async def lifespan(app: FastAPI):
     portfolio_service.subscribe_fill_events(orders_hub)
     strategy_host.subscribe_fill_events(orders_hub)
 
+    # Wire hard-cap auto-kill: when daily loss > RISK_DAILY_LOSS_CAP_INR the
+    # kill-switch fires automatically (paper-safe — no real money at risk).
+    from pdp.risk.service import KillSwitchService as _KSS
+
+    _ks = _KSS()
+
+    async def _auto_kill() -> None:
+        await _ks.execute(get_session_maker(), order_router, {"trigger": "hard_cap_auto"})
+
+    portfolio_service.set_hard_cap_callback(_auto_kill, settings.RISK_DAILY_LOSS_CAP_INR)
+
     # Options chain poller — only when live and credentialed
     options_poller = None
     if settings.LIVE and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
@@ -200,6 +211,7 @@ def create_app() -> FastAPI:
     from pdp.orders.ws import orders_ws_router
     from pdp.portfolio.routes import router as portfolio_router
     from pdp.portfolio.ws import portfolio_ws_router
+    from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
 
     app.include_router(instruments_router)
@@ -211,6 +223,8 @@ def create_app() -> FastAPI:
     app.include_router(orders_ws_router)
     app.include_router(portfolio_router)
     app.include_router(portfolio_ws_router)
+    app.include_router(risk_router)
+    app.include_router(settings_router)
     app.include_router(strategy_router)
 
     @app.get("/healthz")

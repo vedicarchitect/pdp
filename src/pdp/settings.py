@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     PORTFOLIO_MTM_INTERVAL_SECONDS: int = 5
     PORTFOLIO_EOD_SNAPSHOT: bool = True
 
+    RISK_DAILY_LOSS_CAP_INR: float = 50000.0
+    RISK_PER_STRATEGY_LOSS_CAP_INR: float = 20000.0
+    RISK_SOFT_CAP_PCT: float = 80.0
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

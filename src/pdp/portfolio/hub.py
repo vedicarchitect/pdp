@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import structlog
 
@@ -44,10 +45,13 @@ class PortfolioHub:
         self._clients.discard(client)
         log.info("ws_portfolio_client_disconnected", addr=client.addr, total=len(self._clients))
 
-    def broadcast(self, positions: list[dict]) -> None:
+    def broadcast(self, positions: list[dict], summary: dict[str, Any] | None = None) -> None:
         if not self._clients:
             return
-        payload = json.dumps({"type": "portfolio_update", "positions": positions})
+        msg: dict[str, Any] = {"type": "portfolio_update", "positions": positions}
+        if summary is not None:
+            msg["summary"] = summary
+        payload = json.dumps(msg)
         for client in self._clients:
             client.push(payload)
 

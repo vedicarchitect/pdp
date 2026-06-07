@@ -22,6 +22,8 @@ from pdp.portfolio.hub import PortfolioHub
 from pdp.portfolio.models import PositionState
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pdp.orders.ws import OrdersHub
     from pdp.settings import Settings
 
@@ -57,6 +59,51 @@ class PortfolioService:
         self._subscribed_sids: set[str] = set()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
+        self._day_start_pnl: Decimal = Decimal("0")
+        self._hard_cap_cb: Any = None
+        self._hard_cap_inr: Decimal = Decimal("0")
+        self._hard_cap_triggered: bool = False  # prevent repeated triggers
+
+    # ------------------------------------------------------------------ #
+    # Risk cap integration                                                #
+    # ------------------------------------------------------------------ #
+
+    def set_hard_cap_callback(
+        self,
+        callback: "Callable[[], Awaitable[None]]",
+        daily_loss_cap_inr: float,
+    ) -> None:
+        """Wire the hard-cap breach callback (auto-invoked when daily loss exceeds cap)."""
+        self._hard_cap_cb = callback
+        self._hard_cap_inr = Decimal(str(daily_loss_cap_inr))
+        self._hard_cap_triggered = False
+
+    def get_daily_loss(self) -> Decimal:
+        """Current session loss (positive = net loss since day start)."""
+        current_pnl = sum(
+            (ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values()
+        )
+        return max(Decimal("0"), self._day_start_pnl - current_pnl)
+
+    def _build_summary(self) -> dict:
+        total_realized = sum(ps.realized_pnl for ps in self._cache.values())
+        total_unrealized = sum(ps.unrealized_pnl for ps in self._cache.values())
+        current_pnl = total_realized + total_unrealized
+        return {
+            "total_realized_pnl": float(total_realized),
+            "total_unrealized_pnl": float(total_unrealized),
+            "day_pnl": float(current_pnl - self._day_start_pnl),
+            "realized_loss_today": float(max(Decimal("0"), self._day_start_pnl - current_pnl)),
+            "open_positions": sum(1 for ps in self._cache.values() if ps.net_qty != 0),
+        }
+
+    def _reset_day_start_pnl(self) -> None:
+        current_pnl = sum(
+            (ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values()
+        )
+        self._day_start_pnl = current_pnl
+        self._hard_cap_triggered = False
+        log.info("portfolio_day_start_reset", day_start_pnl=str(self._day_start_pnl))
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -65,10 +112,13 @@ class PortfolioService:
     async def start(self) -> None:
         async with AsyncSession(self._engine) as session:
             await self._load_positions(session)
+        self._reset_day_start_pnl()
         self._tasks = [
             asyncio.create_task(self._run_tick_listener(), name="portfolio-tick"),
             asyncio.create_task(self._run_flush(), name="portfolio-flush"),
             asyncio.create_task(self._run_eod_snapshot(), name="portfolio-eod"),
+            asyncio.create_task(self._run_loss_reset(), name="portfolio-loss-reset"),
+            asyncio.create_task(self._run_periodic_broadcast(), name="portfolio-periodic-broadcast"),
         ]
         log.info("portfolio_service_started", positions=len(self._cache))
 
@@ -175,7 +225,7 @@ class PortfolioService:
                 changed = True
 
         if changed:
-            self._hub.broadcast(self.get_snapshot())
+            self._hub.broadcast(self.get_snapshot(), self._build_summary())
 
     # ------------------------------------------------------------------ #
     # Periodic flush + reload                                              #
@@ -199,6 +249,7 @@ class PortfolioService:
             async with AsyncSession(self._engine) as session:
                 await self._load_positions(session)
             await self._check_ltp_stale()
+            await self._check_hard_cap()
 
     async def _flush_dirty(self) -> None:
         if not self._dirty:
@@ -289,3 +340,61 @@ class PortfolioService:
             log.info("portfolio_eod_snapshot_written", date=snapshot_date.isoformat())
         except Exception as exc:
             log.warning("portfolio_eod_snapshot_error", error=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Hard-cap enforcement                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _check_hard_cap(self) -> None:
+        if self._hard_cap_cb is None or self._hard_cap_inr <= 0 or self._hard_cap_triggered:
+            return
+        daily_loss = self.get_daily_loss()
+        if daily_loss >= self._hard_cap_inr:
+            self._hard_cap_triggered = True
+            log.warning(
+                "hard_cap_breached_auto_kill",
+                daily_loss=str(daily_loss),
+                cap=str(self._hard_cap_inr),
+            )
+            try:
+                await self._hard_cap_cb()
+            except Exception as exc:
+                log.error("hard_cap_callback_error", exc=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Daily loss reset at market open                                      #
+    # ------------------------------------------------------------------ #
+
+    async def _run_loss_reset(self) -> None:
+        """Reset the day-start P&L reference at 09:15 IST (market open)."""
+        last_reset_date: date | None = None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._stop_event.wait()),
+                    timeout=30.0,
+                )
+            except TimeoutError:
+                pass
+            if self._stop_event.is_set():
+                break
+            now_ist = _ist_now()
+            today = now_ist.date()
+            if now_ist.hour == 9 and now_ist.minute == 15 and last_reset_date != today:
+                self._reset_day_start_pnl()
+                last_reset_date = today
+
+    # ------------------------------------------------------------------ #
+    # Periodic portfolio broadcast (100ms)                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _run_periodic_broadcast(self) -> None:
+        """Broadcast position snapshot every 100ms so clients always have fresh data."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            if self._stop_event.is_set():
+                break
+            self._hub.broadcast(self.get_snapshot(), self._build_summary())

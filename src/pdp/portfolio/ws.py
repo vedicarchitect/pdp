@@ -32,7 +32,8 @@ async def portfolio_ws(ws: WebSocket) -> None:
     service = getattr(ws.app.state, "portfolio_service", None)
     if service is not None:
         snapshot = service.get_snapshot()
-        initial = json.dumps({"type": "portfolio_update", "positions": snapshot})
+        summary = service._build_summary()
+        initial = json.dumps({"type": "portfolio_update", "positions": snapshot, "summary": summary})
         client.push(initial)
 
     pump_task = asyncio.create_task(_pump(client), name=f"portfolio-ws-pump-{client.addr}")
