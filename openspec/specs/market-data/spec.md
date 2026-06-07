@@ -36,14 +36,14 @@ The system SHALL aggregate ticks into 1m, 5m, 15m, 30m, and 1H OHLCV bars per `(
 - **WHEN** a tick arrives with `ltt` more than 2 seconds ahead of `ts_recv`
 - **THEN** `ts_recv` is used for bar boundary determination
 
-### Requirement: Bar persistence to TimescaleDB
+### Requirement: Bar persistence to MongoDB
 
-The system SHALL persist closed bars to the `market_bars` hypertable via batched writes (flush every 1 second or 500-row buffer, whichever first).
+The system SHALL persist closed bars to the `market_bars` MongoDB time-series collection via batched writes (flush every 1 second or 500-document buffer, whichever first).
 
 #### Scenario: Closed bar persisted
 
 - **WHEN** a 5m bar closes for security 13
-- **THEN** within 2 seconds a row exists in `market_bars` with matching `(security_id, timeframe, bar_time)` and OHLCV values
+- **THEN** within 2 seconds a document exists in `market_bars` with matching `(security_id, timeframe, bar_time)` and OHLCV values
 
 ### Requirement: WebSocket fan-out
 
@@ -61,7 +61,7 @@ The system SHALL expose a `/ws/market` WebSocket endpoint accepting JSON message
 
 ### Requirement: REST snapshot endpoints
 
-The system SHALL expose `GET /api/v1/ltp?ids=<csv>` returning current LTPs from Redis, and `GET /api/v1/bars/{security_id}?tf=<timeframe>&limit=<n>` returning the most recent N bars from TimescaleDB.
+The system SHALL expose `GET /api/v1/ltp?ids=<csv>` returning current LTPs from Redis, and `GET /api/v1/bars/{security_id}?tf=<timeframe>&limit=<n>` returning the most recent N bars from the `market_bars` MongoDB collection.
 
 #### Scenario: LTP returns latest
 

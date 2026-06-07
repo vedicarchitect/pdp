@@ -1,6 +1,6 @@
 ### Requirement: OHLCV bar aggregation
 
-The system SHALL aggregate incoming ticks per `(security_id, timeframe)` into OHLCV bars where `timeframe` is one of `1m`, `5m`, `15m`, `30m`, or `1H`. Each bar's boundary SHALL be determined by wall-clock UTC truncation of the tick's `ltt` field. A `BarClosed` event SHALL be emitted synchronously on boundary crossing so downstream consumers (TimescaleDB writer, Redis stream, WS hub) receive it within the same event-loop iteration.
+The system SHALL aggregate incoming ticks per `(security_id, timeframe)` into OHLCV bars where `timeframe` is one of `1m`, `5m`, `15m`, `30m`, or `1H`. Each bar's boundary SHALL be determined by wall-clock UTC truncation of the tick's `ltt` field. A `BarClosed` event SHALL be emitted synchronously on boundary crossing so downstream consumers (MongoDB writer, Redis stream, WS hub) receive it within the same event-loop iteration.
 
 #### Scenario: Bar opens on first tick
 
@@ -76,7 +76,7 @@ The system SHALL expose a `/ws/market` WebSocket endpoint. After connecting, a c
 
 ### Requirement: Historical bars REST endpoint
 
-The system SHALL expose `GET /api/v1/bars/{security_id}?tf=<timeframe>&limit=<n>` returning the `n` most-recent closed bars for the given security and timeframe from the `market_bars` MongoDB collection, ordered by `ts` descending. `limit` SHALL default to 375 and be capped at 2000. The response shape SHALL be identical to the previous TimescaleDB-backed implementation.
+The system SHALL expose `GET /api/v1/bars/{security_id}?tf=<timeframe>&limit=<n>` returning the `n` most-recent closed bars for the given security and timeframe from the `market_bars` MongoDB collection, ordered by `ts` descending. `limit` SHALL default to 375 and be capped at 2000. The response shape SHALL be identical across storage backends.
 
 #### Scenario: Returns recent bars in order
 

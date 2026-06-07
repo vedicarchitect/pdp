@@ -33,9 +33,9 @@ tasks:
       - uv run pyright
 
   db:up:
-    desc: Start Timescale + Redis
+    desc: Start Postgres + Redis + Mongo
     cmds:
-      - docker compose up -d timescale redis
+      - docker compose up -d postgres redis mongo
 
   db:down:
     desc: Stop services

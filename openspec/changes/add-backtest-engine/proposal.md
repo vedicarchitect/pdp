@@ -1,6 +1,6 @@
 ## Why
 
-(STUB.) Backtests must run against the same `Strategy` interface as live, using Timescale `market_bars` history, and produce comparable trade logs / equity curves.
+(STUB.) Backtests must run against the same `Strategy` interface as live, using MongoDB `market_bars` history, and produce comparable trade logs / equity curves.
 
 ## What Changes
 

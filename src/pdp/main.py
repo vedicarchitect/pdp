@@ -84,6 +84,19 @@ async def lifespan(app: FastAPI):
     order_router = OrderRouter(settings, paper_broker, dhan_broker)
     app.state.order_router = order_router
 
+    # Strategy host — always started; loads YAML configs from ./strategies/
+    from pathlib import Path
+
+    from pdp.strategy.host import StrategyHost
+
+    strategy_host = StrategyHost(
+        strategies_dir=Path("strategies"),
+        order_router=order_router,
+        session_maker=get_session_maker(),
+    )
+    strategy_host.load_registry()
+    app.state.strategy_host = strategy_host
+
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
     bar_writer = None
@@ -105,6 +118,7 @@ async def lifespan(app: FastAPI):
             bar_aggregator=bar_aggregator,
             bar_writer=bar_writer,
             ws_hub=ws_hub,
+            strategy_host=strategy_host,
         )
         app.state.tick_router = tick_router
         tick_router_task = asyncio.create_task(
@@ -127,6 +141,7 @@ async def lifespan(app: FastAPI):
     await portfolio_service.start()
     app.state.portfolio_service = portfolio_service
     portfolio_service.subscribe_fill_events(orders_hub)
+    strategy_host.subscribe_fill_events(orders_hub)
 
     # Options chain poller — only when live and credentialed
     options_poller = None
@@ -185,6 +200,7 @@ def create_app() -> FastAPI:
     from pdp.orders.ws import orders_ws_router
     from pdp.portfolio.routes import router as portfolio_router
     from pdp.portfolio.ws import portfolio_ws_router
+    from pdp.strategy.routes import router as strategy_router
 
     app.include_router(instruments_router)
     app.include_router(market_router)
@@ -195,6 +211,7 @@ def create_app() -> FastAPI:
     app.include_router(orders_ws_router)
     app.include_router(portfolio_router)
     app.include_router(portfolio_ws_router)
+    app.include_router(strategy_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

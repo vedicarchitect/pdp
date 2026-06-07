@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from pdp.market.bar_writer import BarWriter
     from pdp.market.bars import BarAggregator
     from pdp.market.ws import WSHub
+    from pdp.strategy.host import StrategyHost
 
 log = structlog.get_logger()
 
@@ -25,7 +26,7 @@ class TickRouter:
       1. Redis hot LTP cache  (SET ltp:<id> EX 5)
       2. Redis pub/sub        (PUBLISH tick.<id>)
       3. BarAggregator        (emits BarClosed events)
-      4. BarWriter            (batched Timescale persistence)
+      4. BarWriter            (batched MongoDB persistence)
       5. WSHub                (WebSocket fan-out for ticks and bars)
       6. Redis streams        (XADD bars.<id>.<tf>)
     """
@@ -35,11 +36,13 @@ class TickRouter:
         bar_aggregator: BarAggregator | None = None,
         bar_writer: BarWriter | None = None,
         ws_hub: WSHub | None = None,
+        strategy_host: StrategyHost | None = None,
     ) -> None:
         self._running = False
         self._bar_aggregator = bar_aggregator
         self._bar_writer = bar_writer
         self._ws_hub = ws_hub
+        self._strategy_host = strategy_host
 
     async def run(self, queue: asyncio.Queue[Tick], redis: Redis) -> None:
         self._running = True
@@ -84,13 +87,17 @@ class TickRouter:
         if self._bar_aggregator is not None:
             closed_bars = self._bar_aggregator.push(tick)
             for bar in closed_bars:
-                # 4 — enqueue for Timescale write
+                # 4 — enqueue for MongoDB write
                 if self._bar_writer is not None:
                     self._bar_writer.enqueue(bar)
 
                 # 5 — WS fan-out for bars
                 if self._ws_hub is not None:
                     self._ws_hub.publish_bar(bar)
+
+                # 7b — strategy host bar dispatch
+                if self._strategy_host is not None:
+                    self._strategy_host.on_bar(bar)
 
                 # 6 — Redis stream XADD bars.<sid>.<tf>
                 await redis.xadd(
@@ -111,3 +118,7 @@ class TickRouter:
         # 5 — WS fan-out for raw ticks
         if self._ws_hub is not None:
             self._ws_hub.publish_tick(tick)
+
+        # 7 — strategy host dispatch (non-blocking; drops on full inbox)
+        if self._strategy_host is not None:
+            self._strategy_host.on_tick(tick)

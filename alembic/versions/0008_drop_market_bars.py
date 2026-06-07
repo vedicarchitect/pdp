@@ -1,4 +1,4 @@
-"""drop market_bars hypertable — bars moved to MongoDB
+"""drop market_bars table — bars moved to MongoDB
 
 Revision ID: 0008
 Revises: 0007
@@ -20,6 +20,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Intentionally no-op: hypertable recreation belongs to the
+    # Intentionally no-op: market_bars recreation belongs to the
     # add-market-data-bars migration; this is a one-way move to MongoDB.
     pass

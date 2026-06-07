@@ -6,7 +6,7 @@ Measures tick-to-WebSocket-out p99 latency under 200 simultaneous subscribers.
 
 ```bash
 pip install locust websocket-client
-docker compose up -d          # Timescale + Redis
+docker compose up -d          # Postgres + Redis + Mongo
 uv run pdp                    # Start the server (in another terminal)
 ```
 

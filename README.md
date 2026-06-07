@@ -9,7 +9,7 @@ Self-hosted, paper-first trading & investment platform for intraday, positional,
 cp .env.example .env
 
 # 2. Bring up infra
-docker compose up -d timescale redis
+docker compose up -d postgres redis mongo
 
 # 3. Install Python deps
 uv sync
@@ -45,7 +45,7 @@ PDP/
 ├── src/pdp/           Python package
 ├── alembic/           DB migrations
 ├── tests/             pytest suite
-├── docker-compose.yml TimescaleDB + Redis (dev)
+├── docker-compose.yml PostgreSQL + Redis + MongoDB (dev)
 └── Taskfile.yml       task runner
 ```
 

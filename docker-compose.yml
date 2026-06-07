@@ -1,7 +1,7 @@
 services:
-  timescale:
-    image: timescale/timescaledb:latest-pg16
-    container_name: pdp-timescale
+  postgres:
+    image: postgres:16
+    container_name: pdp-postgres
     environment:
       POSTGRES_USER: pdp
       POSTGRES_PASSWORD: pdp
@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - timescale_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pdp -d pdp"]
       interval: 5s
@@ -54,9 +54,9 @@ services:
     ports:
       - "5050:80"
     depends_on:
-      - timescale
+      - postgres
 
 volumes:
-  timescale_data:
+  postgres_data:
   redis_data:
   mongo_data:

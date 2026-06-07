@@ -19,7 +19,7 @@ Everything is spec-first: no implementation lands without a proposal under `open
 | Web framework    | FastAPI + uvicorn (uvloop, httptools)             |
 | Response models  | `msgspec.Struct` (hot path), `pydantic` (input)   |
 | DataFrame engine | Polars                                            |
-| DB (transactional) | PostgreSQL 16 + TimescaleDB 2 (hypertables for market_bars; ACID for orders/positions/accounts) |
+| DB (transactional) | PostgreSQL 16 (ACID ledger: orders, positions, accounts, instruments) |
 | DB (analytics)   | MongoDB 7 (options chains + Greeks as documents; one doc per expiry snapshot) |
 | DB (hot/cache)   | Redis 7 (pub/sub + streams + hash)                |
 | ORM / migrations | SQLAlchemy 2.0 async + Alembic                    |
@@ -32,13 +32,39 @@ Everything is spec-first: no implementation lands without a proposal under `open
 | Broker (v1)      | Dhan (paper + live-gated)                         |
 | Frontend (later) | Vite + React 19 + TanStack Query + shadcn/ui      |
 
+## Architecture
+
+Two storage tiers with a strict split: **PostgreSQL is the ACID transactional ledger** (orders,
+trades, positions, accounts, instruments) and **MongoDB is the time-series warehouse** for all
+historical market data (OHLCV bars, option chains, Greeks). **Redis** is the hot path —
+LTP cache, tick pub/sub, and bar streams.
+
+```mermaid
+flowchart LR
+    Dhan[Dhan WS feed] --> TR[TickRouter]
+    TR -->|"SET ltp:id EX5 / PUBLISH tick.id"| Redis[("Redis 7<br/>hot cache · pub/sub · streams")]
+    TR --> WS["WSHub /ws/market"]
+    TR --> BA[BarAggregator]
+    BA --> BW[BarWriter] -->|insert_many| Mongo[("MongoDB 7<br/>time-series warehouse:<br/>market_bars · option_chains")]
+    BA -->|"XADD bars.id.tf"| Redis
+
+    subgraph ledger ["Orders &amp; Ledger"]
+      API[FastAPI routes] --> OR[OrderRouter] --> PB["PaperBroker / DhanBroker"]
+      PB -->|"orders · trades · positions"| PG[("PostgreSQL 16<br/>ACID ledger")]
+    end
+    Redis -->|"tick.id"| PB
+
+    OptPoller[OptionsChainPoller] -->|chain snapshots| Mongo
+    Portfolio[PortfolioService] -->|MTM P&amp;L| PG
+```
+
 ## Conventions
 
 - **Paper-first**: orders route to the paper engine unless `LIVE=1` AND broker is wired.
 - **Spec-first**: every capability lives under `openspec/specs/<capability>/spec.md` after archival.
 - **One mutation per route**: avoid kitchen-sink endpoints.
 - **Universal indicators**: levels/indicators/value-areas computed once, consumed by all strategies.
-- **DB separation**: PostgreSQL/Timescale owns ticks/bars/orders/positions (ACID, structured); MongoDB owns options chains + Greeks (document-per-expiry, fast sequential scan for backtest).
+- **DB separation**: PostgreSQL owns the transactional ledger only (orders/trades/positions/accounts/instruments — ACID, structured); MongoDB owns all historical/time-series market data (OHLCV bars + options chains + Greeks; fast sequential scan for backtest).
 - **Latency budget**: tick → WebSocket fan-out p99 ≤ 50ms on a single instrument.
 - **Settings via env** + `pydantic-settings`; never read `os.environ` directly in app code.
 - **Structured logging only**: no bare `print()` or `rich` output inside core modules.

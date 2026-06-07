@@ -280,7 +280,10 @@ class DhanBroker:
             order.status = OrderStatus.FILLED
             order.filled_at = now
             self._hub.publish("order", _order_dict(order))
-            self._hub.publish("trade", _trade_dict(trade))
+            self._hub.publish(
+                "trade",
+                {**_trade_dict(trade), "strategy_id": order.strategy_id},
+            )
             if position is not None:
                 self._hub.publish("position", _position_dict(position))
 
