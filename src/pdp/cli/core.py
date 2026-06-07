@@ -6,6 +6,7 @@ import click
 import structlog
 import uvicorn
 
+from pdp.cli.progress.main import progress
 from pdp.db.session import get_session_maker
 from pdp.instruments.loader import refresh_instruments
 from pdp.settings import get_settings
@@ -14,6 +15,9 @@ from pdp.settings import get_settings
 @click.group()
 def cli() -> None:
     """PDP command-line interface."""
+
+
+cli.add_command(progress)
 
 
 @cli.command()
