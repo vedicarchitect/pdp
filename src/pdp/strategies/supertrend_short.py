@@ -1,0 +1,200 @@
+"""SuperTrend(3,1) intraday option-selling paper strategy.
+
+On the NIFTY 5-minute bar, sell an OTM option aligned with the SuperTrend direction:
+green (up) -> short PE, red (down) -> short CE. A direction flip buys back the open leg and
+opens the opposite side. While the trend holds, scale in one lot per bar up to a cap. No
+entries before the start time; flatten all at the square-off time. Paper-only.
+
+Schedule and sizing live in the YAML ``params`` block — see strategies/supertrend_short.yaml.
+"""
+from __future__ import annotations
+
+from datetime import datetime, time
+from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
+
+from pdp.strategy.abc import Strategy
+from pdp.strategy.strikes import resolve_otm_option
+
+if TYPE_CHECKING:
+    from pdp.market.bars import BarClosed
+    from pdp.strategy.context import StrategyContext
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_hhmm(value: str) -> time:
+    hh, mm = value.split(":")
+    return time(int(hh), int(mm))
+
+
+def _now_ist() -> time:
+    return datetime.now(_IST).time()
+
+
+class SuperTrendShort(Strategy):
+    async def on_init(self, ctx: StrategyContext) -> None:
+        self.ctx = ctx
+        p = ctx.params
+        self.underlying: str = p.get("underlying", "NIFTY")
+        self.sid: str = str(p.get("underlying_security_id", "13"))
+        self.index_segment: str = p.get("index_segment", "IDX_I")
+        self.timeframe: str = p.get("timeframe", "5m")
+        self.option_segment: str = p.get("option_segment", "NSE_FNO")
+        self.otm_steps: int = int(p.get("otm_steps", 1))
+        self.strike_step: int | None = (
+            int(p["strike_step"]) if p.get("strike_step") is not None else None
+        )
+        self.lot_size: int = int(p.get("lot_size", 65))
+        self.start_lots: int = int(p.get("start_lots", 2))
+        self.add_lots: int = int(p.get("add_lots", 1))
+        self.max_lots: int = int(p.get("max_lots", 5))
+        self.start_t: time = _parse_hhmm(p.get("start_ist", "09:30"))
+        self.squareoff_t: time = _parse_hhmm(p.get("square_off_ist", "15:10"))
+
+        self._direction: int | None = None
+        self._current: dict[str, Any] | None = None
+        self._subscribed: set[str] = set()
+        self._done_for_day = False
+        self._last_bar_time = None
+
+        # Ensure the underlying index feed is on so bars (and thus SuperTrend) flow.
+        if ctx.market is not None:
+            await ctx.market.subscribe(self.sid, self.index_segment)
+
+        ctx.log.info(
+            "supertrend_short_init",
+            underlying=self.underlying,
+            timeframe=self.timeframe,
+            start=self.start_t.isoformat(),
+            square_off=self.squareoff_t.isoformat(),
+            lots=f"{self.start_lots}->{self.max_lots}",
+        )
+
+    async def on_bar(self, bar: BarClosed) -> None:
+        if bar.security_id != self.sid or bar.timeframe != self.timeframe:
+            return
+        if self._last_bar_time == bar.bar_time:
+            return  # de-dup repeated dispatch of the same bar
+        self._last_bar_time = bar.bar_time
+
+        now = _now_ist()
+
+        # End-of-day square-off takes priority.
+        if now >= self.squareoff_t:
+            if self._current is not None:
+                await self._close_current("square_off")
+            self._done_for_day = True
+            return
+        if self._done_for_day:
+            return
+
+        st = self.ctx.indicators.supertrend(self.sid, self.timeframe) if self.ctx.indicators else None
+        if st is None or st.direction is None:
+            return
+        self._direction = st.direction
+
+        # No new entries before the start of the trading window.
+        if now < self.start_t:
+            return
+
+        desired = "PE" if st.direction > 0 else "CE"
+
+        if self._current is None:
+            await self._open(bar, desired, self.start_lots)
+        elif self._current["option_type"] != desired:
+            await self._close_current("flip")
+            await self._open(bar, desired, self.start_lots)
+        elif self._current["lots"] < self.max_lots:
+            await self._add(self.add_lots)
+
+    async def on_shutdown(self) -> None:
+        if self.ctx.market is None:
+            return
+        for sid in list(self._subscribed):
+            try:
+                await self.ctx.market.unsubscribe(sid, self.option_segment)
+            except Exception as exc:  # pragma: no cover - best-effort cleanup
+                self.ctx.log.warning("unsubscribe_failed", security_id=sid, exc=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Internal                                                            #
+    # ------------------------------------------------------------------ #
+
+    async def _open(self, bar: BarClosed, option_type: str, lots: int) -> None:
+        spot = float(bar.close)
+        inst = None
+        if self.ctx.session_maker is not None:
+            async with self.ctx.session_maker() as session:
+                inst = await resolve_otm_option(
+                    session,
+                    underlying=self.underlying,
+                    spot=spot,
+                    option_type=option_type,
+                    otm_steps=self.otm_steps,
+                    strike_step=self.strike_step,
+                )
+        if inst is None:
+            self.ctx.log.warning("open_skipped_no_instrument", option_type=option_type, spot=spot)
+            return
+
+        sid = inst.security_id
+        segment = inst.exchange_segment
+        # Subscribe the option feed first so the paper engine receives ticks to fill on.
+        if self.ctx.market is not None and sid not in self._subscribed:
+            if await self.ctx.market.subscribe(sid, segment):
+                self._subscribed.add(sid)
+
+        order = await self._place(sid, segment, "SELL", lots)
+        if order is None:
+            return
+        self._current = {
+            "security_id": sid,
+            "segment": segment,
+            "option_type": option_type,
+            "strike": float(inst.strike) if inst.strike is not None else None,
+            "lots": lots,
+        }
+        self.ctx.log.info(
+            "leg_opened",
+            option_type=option_type,
+            security_id=sid,
+            strike=self._current["strike"],
+            lots=lots,
+        )
+
+    async def _add(self, add_lots: int) -> None:
+        c = self._current
+        assert c is not None
+        order = await self._place(c["security_id"], c["segment"], "SELL", add_lots)
+        if order is None:
+            return
+        c["lots"] += add_lots
+        self.ctx.log.info("leg_scaled", security_id=c["security_id"], lots=c["lots"])
+
+    async def _close_current(self, reason: str) -> None:
+        c = self._current
+        if c is None:
+            return
+        order = await self._place(c["security_id"], c["segment"], "BUY", c["lots"])
+        if order is None:
+            return  # keep the leg so a later bar / square-off retries the cover
+        self.ctx.log.info("leg_closed", security_id=c["security_id"], lots=c["lots"], reason=reason)
+        self._current = None
+
+    async def _place(self, security_id: str, segment: str, side: str, lots: int):
+        qty = lots * self.lot_size
+        try:
+            return await self.ctx.orders.place_order(
+                security_id=security_id,
+                exchange_segment=segment,
+                side=side,
+                qty=qty,
+                order_type="MARKET",
+                product="MIS",
+            )
+        except Exception as exc:
+            self.ctx.log.warning(
+                "order_rejected", security_id=security_id, side=side, qty=qty, exc=str(exc)
+            )
+            return None

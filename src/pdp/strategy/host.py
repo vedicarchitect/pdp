@@ -9,13 +9,20 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from pdp.strategy.abc import FillEvent, Strategy
-from pdp.strategy.context import StrategyContext, StrategyOrderClient
+from pdp.strategy.context import (
+    IndicatorReader,
+    MarketControl,
+    StrategyContext,
+    StrategyOrderClient,
+)
 from pdp.strategy.registry import StrategyConfig, import_strategy_class, load_all, load_one
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from pdp.indicators.engine import IndicatorEngine
     from pdp.market.bars import BarClosed
+    from pdp.market.dhan_ws import DhanTickerAdapter
     from pdp.market.models import Tick
     from pdp.orders.router import OrderRouter
     from pdp.orders.ws import OrdersHub
@@ -87,6 +94,16 @@ class StrategyHost:
         self._session_maker = session_maker
         self._configs: dict[str, StrategyConfig] = {}
         self._running: dict[str, _StrategyState] = {}
+        self._indicator_engine: IndicatorEngine | None = None
+        self._market_adapter: DhanTickerAdapter | None = None
+
+    def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
+        """Wire the universal indicator engine read by strategies via ctx.indicators."""
+        self._indicator_engine = engine
+
+    def set_market_adapter(self, adapter: DhanTickerAdapter | None) -> None:
+        """Wire the live feed adapter so strategies can subscribe via ctx.market."""
+        self._market_adapter = adapter
 
     # ------------------------------------------------------------------ #
     # Registry                                                             #
@@ -145,6 +162,9 @@ class StrategyHost:
             params=dict(cfg.params),
             watchlist=list(cfg.watchlist),
             log=log.bind(strategy_id=cfg.id),
+            indicators=IndicatorReader(self._indicator_engine),
+            market=MarketControl(self._market_adapter, self._session_maker),
+            session_maker=self._session_maker,
         )
 
         inbox: asyncio.Queue[_Event] = asyncio.Queue(maxsize=_INBOX_SIZE)

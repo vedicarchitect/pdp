@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
     )
 
     # WebSocket hubs — always available
+    from pdp.alerts.ws import AlertsHub
     from pdp.market.ws import WSHub
     from pdp.options.hub import OptionsHub
     from pdp.orders.ws import OrdersHub
@@ -55,6 +56,8 @@ async def lifespan(app: FastAPI):
     app.state.options_hub = options_hub
     portfolio_hub = PortfolioHub()
     app.state.portfolio_hub = portfolio_hub
+    alerts_hub = AlertsHub()
+    app.state.alerts_hub = alerts_hub
 
     # Paper broker + order router — always started (no external credentials needed)
     from pdp.orders.paper import PaperBroker
@@ -97,14 +100,44 @@ async def lifespan(app: FastAPI):
     strategy_host.load_registry()
     app.state.strategy_host = strategy_host
 
+    # Universal indicator engine — computes SuperTrend(3,1) once per (security, timeframe)
+    # on each closed bar; strategies consume it via ctx.indicators (rule #4).
+    from pdp.indicators.engine import IndicatorEngine
+
+    indicator_engine = IndicatorEngine(st_period=3, st_multiplier=1)
+    app.state.indicator_engine = indicator_engine
+    strategy_host.set_indicator_engine(indicator_engine)
+
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
     bar_writer = None
+    alert_evaluator = None
     if settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+        from pdp.alerts.evaluator import AlertEvaluator
         from pdp.market.bar_writer import BarWriter
         from pdp.market.bars import BarAggregator
         from pdp.market.dhan_ws import DhanTickerAdapter
         from pdp.market.router import TickRouter
+
+        # Initialize alerts evaluator (pass the sessionmaker instance, per
+        # Callable[[], AsyncSession] — sessionmaker() yields an AsyncSession)
+        alert_evaluator = AlertEvaluator(get_session_maker())
+        app.state.alert_evaluator = alert_evaluator
+
+        # Register callback to push alerts to WebSocket hub
+        def on_alert_notification(notification):
+            # Push alert to AlertsHub (which routes to user's connected clients)
+            # We'll look up the user_id from the alert record
+            # For v1, we use a deferred approach: UI polls or subscribes to WebSocket
+            # and receives backfill on connect
+            alerts_hub = app.state.alerts_hub
+            # TODO: Query alert from DB to get user_id and publish to hub
+            log.debug("alert_notification", alert_id=notification.alert_id, status=notification.status)
+
+        alert_evaluator.register_notification_callback(on_alert_notification)
+
+        # Load alerts from database
+        await alert_evaluator.load_alerts()
 
         bar_aggregator = BarAggregator()
         bar_writer = BarWriter(app.state.mongo_db["market_bars"])
@@ -112,6 +145,7 @@ async def lifespan(app: FastAPI):
 
         adapter = DhanTickerAdapter(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
         app.state.dhan_adapter = adapter
+        strategy_host.set_market_adapter(adapter)
         async with get_session_maker()() as session:
             await adapter.start(session)
         tick_router = TickRouter(
@@ -119,13 +153,15 @@ async def lifespan(app: FastAPI):
             bar_writer=bar_writer,
             ws_hub=ws_hub,
             strategy_host=strategy_host,
+            alert_evaluator=alert_evaluator,
+            indicator_engine=indicator_engine,
         )
         app.state.tick_router = tick_router
         tick_router_task = asyncio.create_task(
             tick_router.run(adapter.queue, app.state.redis),
             name="tick-router",
         )
-        log.info("market_feed_started", client_id=settings.DHAN_CLIENT_ID)
+        log.info("market_feed_started", client_id=settings.DHAN_CLIENT_ID, alerts_engine="enabled")
     else:
         app.state.dhan_adapter = None
         log.info("market_feed_skipped", reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set")
@@ -142,6 +178,14 @@ async def lifespan(app: FastAPI):
     app.state.portfolio_service = portfolio_service
     portfolio_service.subscribe_fill_events(orders_hub)
     strategy_host.subscribe_fill_events(orders_hub)
+
+    # Paper-trade journal — records fills, computes daily P&L / progress stats.
+    from pdp.journal.service import JournalService
+
+    journal_service = JournalService(mongo_db=mongo_db)
+    await journal_service.start()
+    journal_service.subscribe_fill_events(orders_hub)
+    app.state.journal_service = journal_service
 
     # Wire hard-cap auto-kill: when daily loss > RISK_DAILY_LOSS_CAP_INR the
     # kill-switch fires automatically (paper-safe — no real money at risk).
@@ -175,6 +219,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("app_shutting_down")
+        await journal_service.stop()
         await portfolio_service.stop()
         if tick_router_task is not None:
             adapter = app.state.dhan_adapter
@@ -202,7 +247,10 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PDP", version="0.1.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
 
+    from pdp.alerts.routes import router as alerts_router
+    from pdp.alerts.ws import alerts_ws_router
     from pdp.instruments.routes import router as instruments_router
+    from pdp.journal.routes import router as journal_router
     from pdp.market.routes import router as market_router
     from pdp.market.ws import ws_router
     from pdp.options.routes import router as options_router
@@ -215,7 +263,10 @@ def create_app() -> FastAPI:
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
 
+    app.include_router(alerts_router)
+    app.include_router(alerts_ws_router)
     app.include_router(instruments_router)
+    app.include_router(journal_router)
     app.include_router(market_router)
     app.include_router(ws_router)
     app.include_router(options_router)

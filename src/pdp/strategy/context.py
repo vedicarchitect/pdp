@@ -12,6 +12,9 @@ from pdp.orders.models import Order, OrderStatus, OrderType, Product, Side
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from pdp.indicators.engine import IndicatorEngine
+    from pdp.indicators.supertrend import SuperTrendState
+    from pdp.market.dhan_ws import DhanTickerAdapter
     from pdp.orders.router import OrderRouter
     from pdp.strategy.registry import WatchlistEntry
 
@@ -20,12 +23,54 @@ class RiskCapBreached(Exception):
     """Raised when a strategy's risk cap would be exceeded by a new order."""
 
 
+class IndicatorReader:
+    """Read-only view over the universal indicator engine for strategies."""
+
+    def __init__(self, engine: IndicatorEngine | None) -> None:
+        self._engine = engine
+
+    def supertrend(self, security_id: str, timeframe: str) -> SuperTrendState | None:
+        if self._engine is None:
+            return None
+        return self._engine.get(security_id, timeframe)
+
+
+class MarketControl:
+    """Lets a strategy subscribe/unsubscribe feed instruments at runtime.
+
+    No-op when no live Dhan adapter is configured (e.g. paper smoke tests).
+    """
+
+    def __init__(
+        self,
+        adapter: DhanTickerAdapter | None,
+        session_maker: async_sessionmaker[AsyncSession] | None,
+    ) -> None:
+        self._adapter = adapter
+        self._session_maker = session_maker
+
+    async def subscribe(self, security_id: str, segment: str) -> bool:
+        if self._adapter is None or self._session_maker is None:
+            return False
+        async with self._session_maker() as session:
+            return await self._adapter.subscribe(security_id, segment, session)
+
+    async def unsubscribe(self, security_id: str, segment: str) -> None:
+        if self._adapter is None or self._session_maker is None:
+            return
+        async with self._session_maker() as session:
+            await self._adapter.unsubscribe(security_id, segment, session)
+
+
 @dataclass
 class StrategyContext:
     orders: StrategyOrderClient
     params: dict[str, Any]
     watchlist: list[WatchlistEntry]
     log: Any = field(default_factory=structlog.get_logger)
+    indicators: IndicatorReader | None = None
+    market: MarketControl | None = None
+    session_maker: async_sessionmaker[AsyncSession] | None = None
 
 
 class StrategyOrderClient:

@@ -1,0 +1,32 @@
+# SuperTrend(3,1) intraday option-selling paper strategy on NIFTY.
+#
+# green (uptrend)  -> short OTM-1 PE ;  red (downtrend) -> short OTM-1 CE
+# flip -> close + reverse ; scale-in 2 -> 5 lots while the trend holds ;
+# no entries before 09:30 IST ; flatten all at 15:10 IST. Paper-only.
+
+id: supertrend_short
+class: pdp.strategies.supertrend_short.SuperTrendShort
+
+watchlist:
+  - security_id: "13"          # NIFTY index (Dhan IDX_I security_id)
+    exchange_segment: IDX_I
+    timeframes: [5m]
+
+params:
+  underlying: NIFTY
+  underlying_security_id: "13"
+  index_segment: IDX_I
+  timeframe: 5m
+  option_segment: NSE_FNO
+  otm_steps: 1                 # sell one strike OTM
+  strike_step: 50             # NIFTY strike spacing
+  lot_size: 65                # NIFTY lot size
+  start_lots: 2               # entry size on a fresh signal
+  add_lots: 1                 # added per bar while the trend holds
+  max_lots: 5                 # scale-in cap
+  start_ist: "09:30"          # no entries before this (IST)
+  square_off_ist: "15:10"     # flatten everything at/after this (IST)
+
+risk:
+  max_open_orders: 12          # transient OPEN orders during scale-in / cover
+  max_daily_loss_inr: 20000
