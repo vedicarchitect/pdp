@@ -6,6 +6,7 @@ import click
 import structlog
 import uvicorn
 
+from pdp.cli.backtest_commands import backtest
 from pdp.cli.progress.main import progress
 from pdp.db.session import get_session_maker
 from pdp.instruments.loader import refresh_instruments
@@ -18,6 +19,7 @@ def cli() -> None:
 
 
 cli.add_command(progress)
+cli.add_command(backtest)
 
 
 @cli.command()
