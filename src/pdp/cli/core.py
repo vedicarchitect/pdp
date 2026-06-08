@@ -8,6 +8,7 @@ import uvicorn
 
 from pdp.cli.backtest_commands import backtest
 from pdp.cli.progress.main import progress
+from pdp.cli.strategy_commands import strategy
 from pdp.db.session import get_session_maker
 from pdp.instruments.loader import refresh_instruments
 from pdp.settings import get_settings
@@ -20,6 +21,7 @@ def cli() -> None:
 
 cli.add_command(progress)
 cli.add_command(backtest)
+cli.add_command(strategy)
 
 
 @cli.command()
