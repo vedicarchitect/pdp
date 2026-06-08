@@ -95,8 +95,13 @@ class DhanTickerAdapter:
     async def stop(self) -> None:
         self._stop_event.set()
         if self._feed is not None:
+            # Set _running=False so _run_async exits; close_connection() can block
+            # the event loop via run_coroutine_threadsafe(...).result() — run it in an
+            # executor to avoid blocking the async shutdown path.
+            feed = self._feed
             try:
-                self._feed.close_connection()
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, feed.close_connection)
             except Exception as exc:
                 log.debug("dhan_close_error", exc=str(exc))
         self._executor.shutdown(wait=False)
@@ -177,7 +182,7 @@ class DhanTickerAdapter:
 
         def _run() -> None:
             try:
-                feed.run_forever()
+                feed.run()  # run() loops on _run_async() and fires on_message; run_forever() only connects and returns
             except Exception as exc:
                 loop.call_soon_threadsafe(fut.set_exception, exc)
             else:
