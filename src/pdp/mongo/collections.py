@@ -14,6 +14,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_market_bars(db)
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
     await _ensure_portfolio_snapshots(db)
+    await _ensure_positional_eod_snapshots(db)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -79,9 +80,27 @@ async def _ensure_portfolio_snapshots(db: AsyncIOMotorDatabase, ttl_days: int = 
     )
 
 
+async def _ensure_positional_eod_snapshots(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    try:
+        await db.create_collection("positional_eod_snapshots")
+        log.info("mongo_collection_created", collection="positional_eod_snapshots")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="positional_eod_snapshots")
+
+    await db["positional_eod_snapshots"].create_index(
+        [("date", ASCENDING)],
+        unique=True,
+        name="uq_date",
+    )
+
+
 def get_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["market_bars"]
 
 
 def get_chains_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["option_chains"]
+
+
+def get_positional_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["positional_eod_snapshots"]

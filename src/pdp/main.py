@@ -211,6 +211,7 @@ def create_app() -> FastAPI:
     from pdp.orders.ws import orders_ws_router
     from pdp.portfolio.routes import router as portfolio_router
     from pdp.portfolio.ws import portfolio_ws_router
+    from pdp.positional.routes import router as positional_router
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
 
@@ -223,6 +224,7 @@ def create_app() -> FastAPI:
     app.include_router(orders_ws_router)
     app.include_router(portfolio_router)
     app.include_router(portfolio_ws_router)
+    app.include_router(positional_router)
     app.include_router(risk_router)
     app.include_router(settings_router)
     app.include_router(strategy_router)
