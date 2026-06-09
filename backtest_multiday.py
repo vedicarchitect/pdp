@@ -31,6 +31,9 @@ ADD_LOTS     = 1
 MAX_LOTS     = 5
 STRIKE_STEP  = 50
 OTM_STEPS    = 1
+NIFTY_EXPIRY_WEEKDAY = 1   # Tuesday
+_EXP_CE_SID  = -1          # synthetic sid for expired CE fallback
+_EXP_PE_SID  = -2          # synthetic sid for expired PE fallback
 START_H, START_M  = 9,  30
 SQOFF_H, SQOFF_M  = 15, 10
 LEG_STOP_PER_LOT = 1_000.0  # close if MTM loss >= this × current lots
@@ -139,6 +142,139 @@ def fetch_nifty(date_str):
 def fetch_opt(sid, date_str):
     return fetch_bars(sid, date_str, "NSE_FNO", "OPTIDX")
 
+def next_weekly_expiry(d: date) -> date:
+    days_ahead = (NIFTY_EXPIRY_WEEKDAY - d.weekday()) % 7
+    return d + timedelta(days=days_ahead)
+
+def expiry_in_db(expiry_str: str) -> bool:
+    cur = pg.execute("SELECT 1 FROM instruments WHERE underlying='NIFTY' AND expiry=%s LIMIT 1",
+                     (expiry_str,))
+    return cur.fetchone() is not None
+
+def _expired_meta(opt_type: str) -> dict:
+    strike_label = f"ATM+{OTM_STEPS}" if opt_type == "CE" else f"ATM-{OTM_STEPS}"
+    return {
+        "underlying":   "NIFTY",
+        "expiry_flag":  "WEEK",
+        "expiry_code":  1,
+        "strike_label": strike_label,
+        "option_type":  opt_type,
+        "timeframe":    "5m",
+    }
+
+def _expired_from_mongo(opt_type: str, trade_ds: str) -> list:
+    """Read warehoused expired-option bars for trade_ds from MongoDB (IST-naive tuples)."""
+    d  = date.fromisoformat(trade_ds)
+    lo = datetime(d.year, d.month, d.day, 0, 0,  tzinfo=timezone.utc)
+    hi = datetime(d.year, d.month, d.day, 23, 59, tzinfo=timezone.utc)
+    meta = _expired_meta(opt_type)
+    q = {f"metadata.{k}": v for k, v in meta.items()}
+    q["ts"] = {"$gte": lo, "$lte": hi}
+    docs = list(mdb["expired_option_bars"].find(q).sort("ts", 1))
+    out = []
+    for doc in docs:
+        ts = doc["ts"]
+        if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+        ist_dt = (ts + IST).replace(tzinfo=None)
+        out.append((ist_dt, float(doc["open"]), float(doc["high"]),
+                    float(doc["low"]), float(doc["close"])))
+    return sorted(out)
+
+def fetch_opt_expired(opt_type: str, trade_ds: str) -> list:
+    """Expired weekly ATM±OTM_STEPS bars: MongoDB warehouse first, Dhan API fallback.
+
+    On a cache miss the live API (expiry_code=1) is queried and the bars are
+    persisted into `expired_option_bars` so subsequent runs read from Mongo.
+    """
+    sid = _EXP_CE_SID if opt_type == "CE" else _EXP_PE_SID
+    k   = (sid, trade_ds)
+    if k in _bars: return _bars[k]
+
+    # 1) MongoDB warehouse
+    mongo_bars = _expired_from_mongo(opt_type, trade_ds)
+    if mongo_bars:
+        _bars[k] = mongo_bars
+        return _bars[k]
+
+    # 2) Live API fallback (expiry_code=1 = nearest expiry from the from_date)
+    drv        = "CALL" if opt_type == "CE" else "PUT"
+    strike_str = f"ATM+{OTM_STEPS}" if opt_type == "CE" else f"ATM-{OTM_STEPS}"
+    try:
+        r = dhan.expired_options_data(
+            security_id=13,
+            exchange_segment="NSE_FNO",
+            instrument_type="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike=strike_str,
+            drv_option_type=drv,
+            required_data=["open", "high", "low", "close", "volume", "oi", "iv"],
+            from_date=trade_ds,
+            to_date=trade_ds,
+            interval=5,
+        )
+        time.sleep(0.4)
+    except Exception:
+        _bars[k] = []; return []
+    if not (isinstance(r, dict) and r.get("status") == "success"):
+        _bars[k] = []; return []
+    data_key = "ce" if opt_type == "CE" else "pe"
+    data = r.get("data", {})
+    while (isinstance(data, dict) and "data" in data
+           and "ce" not in data and "pe" not in data and "open" not in data):
+        data = data["data"]
+    if isinstance(data, dict) and data_key in data:
+        data = data[data_key]
+    if isinstance(data, dict) and "data" in data and "open" not in data:
+        data = data["data"]
+    if not (isinstance(data, dict) and "open" in data):
+        _bars[k] = []; return []
+    _bars[k] = _parse_dhan_bars(data)
+    _persist_expired(opt_type, data)
+    return _bars[k]
+
+def _persist_expired(opt_type: str, data: dict) -> None:
+    """Write API-fetched expired bars into the Mongo warehouse (UTC ts, idempotent)."""
+    meta  = _expired_meta(opt_type)
+    opens = data["open"]; highs = data["high"]; lows = data["low"]; closes = data["close"]
+    vols  = data.get("volume", []); ois = data.get("oi", []); ivs = data.get("iv", [])
+    tss   = data.get("timestamp", data.get("start_Time", []))
+    docs  = []
+    for i in range(len(closes)):
+        if not closes[i] or i >= len(tss): continue
+        ts = tss[i]
+        if isinstance(ts, (int, float)):
+            bar_ts = datetime.fromtimestamp(ts, tz=timezone.utc)
+        else:
+            try:
+                bar_ts = datetime.fromisoformat(str(ts))
+                bar_ts = bar_ts.replace(tzinfo=timezone.utc) if bar_ts.tzinfo is None \
+                         else bar_ts.astimezone(timezone.utc)
+            except ValueError:
+                continue
+        docs.append({
+            "ts": bar_ts, "metadata": dict(meta),
+            "open": float(opens[i]), "high": float(highs[i]),
+            "low": float(lows[i]), "close": float(closes[i]),
+            "volume": int(vols[i]) if i < len(vols) and vols[i] is not None else 0,
+            "oi":     int(ois[i])  if i < len(ois)  and ois[i]  is not None else 0,
+            "iv":     float(ivs[i]) if i < len(ivs) and ivs[i] is not None else 0.0,
+        })
+    if not docs: return
+    # Only write into an existing time-series collection; never auto-create a
+    # plain collection here (the app/backfill own time-series creation).
+    if "expired_option_bars" not in mdb.list_collection_names(): return
+    q = {f"metadata.{key}": v for key, v in meta.items()}
+    q["ts"] = {"$gte": docs[0]["ts"], "$lte": docs[-1]["ts"]}
+    have = {(d["ts"] if d["ts"].tzinfo else d["ts"].replace(tzinfo=timezone.utc))
+            for d in mdb["expired_option_bars"].find(q, {"ts": 1, "_id": 0})}
+    fresh = [d for d in docs if d["ts"] not in have]
+    if fresh:
+        try:
+            mdb["expired_option_bars"].insert_many(fresh, ordered=False)
+        except Exception:
+            pass
+
 # ── Position tracker ──────────────────────────────────────────────────────────
 @dataclass
 class Position:
@@ -200,9 +336,15 @@ def simulate_day(trade_date: date):
     nifty_open  = float(nifty_bars[0]["open"])
     nifty_close = float(nifty_bars[-1]["close"])
 
-    exp = active_expiry(trade_date)
-    if not exp: return None
-    imap = inst_map(exp)
+    correct_exp  = next_weekly_expiry(trade_date).isoformat()
+    use_expired  = not expiry_in_db(correct_exp)
+    if use_expired:
+        exp  = correct_exp
+        imap = {}
+    else:
+        exp  = active_expiry(trade_date)
+        if not exp: return None
+        imap = inst_map(exp)
 
     # Precompute ST series
     tracker = SuperTrendTracker(period=3, multiplier=1)
@@ -216,10 +358,13 @@ def simulate_day(trade_date: date):
     start_dt = datetime(trade_date.year, trade_date.month, trade_date.day, START_H, START_M)
     sqoff_dt = datetime(trade_date.year, trade_date.month, trade_date.day, SQOFF_H, SQOFF_M)
 
-    # Pre-fetch option bars for all possible strikes
-    needed_sids = set(imap.values())
-    for sid in needed_sids:
-        fetch_opt(sid, ds)
+    # Pre-fetch option bars
+    if use_expired:
+        fetch_opt_expired("CE", ds)
+        fetch_opt_expired("PE", ds)
+    else:
+        for sid in set(imap.values()):
+            fetch_opt(sid, ds)
 
     # ── Bar-by-bar simulation ──────────────────────────────────────────────────
     pos:       Position | None = None
@@ -289,8 +434,11 @@ def simulate_day(trade_date: date):
 
         # ── Open / scale-in ──
         k = (otm_strike(bar_close, desired), desired)
-        sid = imap.get(k)
-        if not sid: continue
+        if use_expired:
+            sid = _EXP_CE_SID if desired == "CE" else _EXP_PE_SID
+        else:
+            sid = imap.get(k)
+            if not sid: continue
 
         opt_bars_n = _bars.get((sid, ds), [])
 
@@ -344,6 +492,7 @@ def simulate_day(trade_date: date):
         "realized":     day_pnl - charges,
         "done_reason":  stop_reason,
         "nifty_bars":   len(nifty_bars),
+        "use_expired":  use_expired,
     }
 
 # ── Output helpers ────────────────────────────────────────────────────────────
@@ -352,10 +501,11 @@ W = 130
 def print_day(r):
     print(f"\n{'='*W}")
     sign = "+" if r["nifty_chg"] >= 0 else ""
-    stop = f"  [DAY STOP: {r['done_reason']}]" if r["done_reason"] else ""
+    stop    = f"  [DAY STOP: {r['done_reason']}]" if r["done_reason"] else ""
+    approx  = "  [APPROX: expired_options_data]" if r.get("use_expired") else ""
     print(f"  {r['date']}  |  NIFTY {r['nifty_open']:.2f} -> {r['nifty_close']:.2f} "
           f"({sign}{r['nifty_chg']:.2f})  |  Expiry: {r['expiry']}  "
-          f"|  Bars: {r['nifty_bars']}{stop}")
+          f"|  Bars: {r['nifty_bars']}{stop}{approx}")
     print(f"{'='*W}")
     print(f"  {'#':>3}  {'Side':<4}  {'Type':<2} {'Strike':>7}  {'Time':>5}  "
           f"{'Qty':>5}  {'Price':>7}  {'NIFTY':>9}  "
