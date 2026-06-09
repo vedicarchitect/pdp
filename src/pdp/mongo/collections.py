@@ -12,6 +12,7 @@ log = structlog.get_logger()
 
 async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
     await _ensure_market_bars(db)
+    await _ensure_expired_option_bars(db)
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
     await _ensure_portfolio_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
@@ -30,6 +31,27 @@ async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore
         log.info("mongo_collection_created", collection="market_bars")
     except CollectionInvalid:
         log.debug("mongo_collection_exists", collection="market_bars")
+
+
+async def _ensure_expired_option_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Time-series store for ATM-relative bars of expired option contracts.
+
+    Keyed by ATM-relative label (not security_id) because the rolling-option API
+    re-evaluates ATM per bar. metadata distinguishes the rolling series:
+    underlying / expiry_flag / expiry_code / strike_label / option_type / timeframe.
+    """
+    try:
+        await db.create_collection(
+            "expired_option_bars",
+            timeseries={
+                "timeField": "ts",
+                "metaField": "metadata",
+                "granularity": "seconds",
+            },
+        )
+        log.info("mongo_collection_created", collection="expired_option_bars")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="expired_option_bars")
 
 
 async def _ensure_option_chains(
@@ -96,6 +118,10 @@ async def _ensure_positional_eod_snapshots(db: AsyncIOMotorDatabase) -> None:  #
 
 def get_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["market_bars"]
+
+
+def get_expired_option_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["expired_option_bars"]
 
 
 def get_chains_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
