@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import type { Position, StrategyGroup } from '../../types/intraday'
 
 interface Props {
@@ -56,8 +56,16 @@ function LegRow({ pos }: { pos: Position }) {
 function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expanded: boolean; onToggle: () => void }) {
   return (
     <tr
-      className="border-t border-gray-700 cursor-pointer hover:bg-gray-800 transition-colors"
+      className="border-t border-gray-700 cursor-pointer hover:bg-gray-800 transition-colors focus-visible:outline-none focus-visible:bg-gray-700"
       onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onToggle()
+        }
+      }}
+      tabIndex={0}
+      aria-expanded={expanded}
     >
       <td className="px-4 py-2 font-medium flex items-center gap-2">
         <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
@@ -93,7 +101,11 @@ export function PositionTable({ positions }: Props) {
   function toggle(id: string) {
     setExpanded((prev) => {
       const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
       return next
     })
   }
@@ -112,9 +124,8 @@ export function PositionTable({ positions }: Props) {
         </thead>
         <tbody className="divide-y divide-gray-800">
           {groups.map((group) => (
-            <>
+            <React.Fragment key={group.strategy_id}>
               <StrategyRow
-                key={group.strategy_id}
                 group={group}
                 expanded={expanded.has(group.strategy_id)}
                 onToggle={() => toggle(group.strategy_id)}
@@ -122,7 +133,7 @@ export function PositionTable({ positions }: Props) {
               {expanded.has(group.strategy_id) && group.positions.map((pos) => (
                 <LegRow key={`${pos.security_id}-${pos.product}`} pos={pos} />
               ))}
-            </>
+            </React.Fragment>
           ))}
         </tbody>
       </table>
