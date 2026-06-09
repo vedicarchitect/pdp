@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import func, select
 
-from pdp.orders.models import Order, OrderStatus, OrderType, Product, Side
+from pdp.orders.models import Order, OrderStatus, OrderType, Position, Product, Side
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -122,6 +122,22 @@ class StrategyOrderClient:
     async def cancel_order(self, order_id: int) -> Order | None:
         async with self._session_maker() as session:
             return await self._router.cancel_order(session, order_id)
+
+    async def cancel_open_entry_orders(self, security_id: str) -> list[int]:
+        """Cancel all OPEN SELL orders this strategy has on a security."""
+        async with self._session_maker() as session:
+            return await self._router.cancel_open_entry_orders(
+                session, security_id, self._strategy_id
+            )
+
+    async def get_net_qty(self, security_id: str) -> int:
+        """Return net_qty from the positions table for this security (0 if no row)."""
+        async with self._session_maker() as session:
+            result = await session.execute(
+                select(Position.net_qty).where(Position.security_id == security_id)
+            )
+            row = result.first()
+            return int(row[0]) if row else 0
 
     async def _check_risk(self, session: AsyncSession) -> None:
         open_count = await self._count_open_orders(session)

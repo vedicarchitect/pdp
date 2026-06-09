@@ -211,6 +211,10 @@ class PaperBroker:
         if ltp_raw is None or sid not in self._open_orders:
             return
         ltp = Decimal(str(ltp_raw))
+        if ltp <= Decimal("0"):
+            # Ignore zero-price ticks — Dhan sends LTP=0 before the first real quote.
+            # Filling at zero produces a bogus avg_price on the position.
+            return
         orders_to_fill = [o for o in self._open_orders.get(sid, []) if _should_fill(o, ltp)]
         for order in orders_to_fill:
             await self._fill(order, ltp, payload.get("exchange_segment", ""))
@@ -356,8 +360,8 @@ async def upsert_position(
             pos.realized_pnl += realized
             pos.avg_price = Decimal("0")
         elif (old_qty > 0 and qty > 0) or (old_qty < 0 and qty < 0):
-            # Adding to position — weighted average
-            total_cost = old_avg * Decimal(str(old_qty)) + fill_price * Decimal(str(order.qty))
+            # Adding to position — weighted average (abs so short-side old_qty sign doesn't invert cost)
+            total_cost = old_avg * Decimal(str(abs(old_qty))) + fill_price * Decimal(str(order.qty))
             pos.avg_price = _round4(total_cost / Decimal(str(abs(new_qty))))
         else:
             # Reducing position
