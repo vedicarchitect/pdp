@@ -139,6 +139,39 @@ class OrderRouter:
         await self._broker_for(order.broker).cancel_order(order_id)
         return order
 
+    async def cancel_open_entry_orders(
+        self,
+        session: AsyncSession,
+        security_id: str,
+        strategy_id: str,
+    ) -> list[int]:
+        """Cancel all OPEN SELL orders for a security+strategy before a close event.
+
+        Returns the list of cancelled order IDs.
+        """
+        broker, _ = select_broker(self._settings)
+        result = await session.execute(
+            select(Order).where(
+                Order.security_id == security_id,
+                Order.strategy_id == strategy_id,
+                Order.side == "SELL",
+                Order.status == OrderStatus.OPEN,
+            )
+        )
+        orders = result.scalars().all()
+        now = datetime.now(UTC)
+        cancelled_ids: list[int] = []
+        for order in orders:
+            order.status = OrderStatus.CANCELLED
+            order.cancelled_at = now
+            cancelled_ids.append(order.id)
+        if cancelled_ids:
+            await session.commit()
+            for oid in cancelled_ids:
+                await self._broker_for(broker).cancel_order(oid)
+            log.info("entry_orders_cancelled", count=len(cancelled_ids), security_id=security_id)
+        return cancelled_ids
+
     async def _validate_lot_size(
         self,
         session: AsyncSession,

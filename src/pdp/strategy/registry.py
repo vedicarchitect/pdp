@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, field_validator
+
+if TYPE_CHECKING:
+    from pdp.strategy.abc import Strategy
 
 
 class WatchlistEntry(BaseModel):
@@ -75,3 +78,19 @@ def import_strategy_class(dotted: str):  # type: ignore[return]
     if cls is None:
         raise ImportError(f"class {class_name!r} not found in module {module_path!r}")
     return cls
+
+
+def get_strategy(
+    strategy_id: str, strategies_dir: Path = Path("strategies")
+) -> Strategy:
+    """Load a strategy's YAML config and return an instantiated Strategy.
+
+    Used outside the live host (e.g. the backtest CLI) to get a ready-to-run instance
+    with ``strategy_id`` and ``params`` populated, mirroring how StrategyHost.start does it.
+    """
+    cfg = load_one(strategy_id, strategies_dir)
+    cls = import_strategy_class(cfg.cls)
+    instance: Strategy = cls()
+    instance.strategy_id = cfg.id
+    instance.params = dict(cfg.params)
+    return instance

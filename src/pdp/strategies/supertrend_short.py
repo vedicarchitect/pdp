@@ -148,6 +148,11 @@ class SuperTrendShort(Strategy):
         order = await self._place(sid, segment, "SELL", lots)
         if order is None:
             return
+        if order.status in ("CANCELLED", "REJECTED"):
+            self.ctx.log.warning(
+                "open_sell_terminal", security_id=sid, order_id=order.id, status=order.status
+            )
+            return
         self._current = {
             "security_id": sid,
             "segment": segment,
@@ -169,6 +174,11 @@ class SuperTrendShort(Strategy):
         order = await self._place(c["security_id"], c["segment"], "SELL", add_lots)
         if order is None:
             return
+        if order.status in ("CANCELLED", "REJECTED"):
+            self.ctx.log.warning(
+                "scale_sell_terminal", security_id=c["security_id"], order_id=order.id, status=order.status
+            )
+            return
         c["lots"] += add_lots
         self.ctx.log.info("leg_scaled", security_id=c["security_id"], lots=c["lots"])
 
@@ -176,7 +186,16 @@ class SuperTrendShort(Strategy):
         c = self._current
         if c is None:
             return
-        order = await self._place(c["security_id"], c["segment"], "BUY", c["lots"])
+        await self.ctx.orders.cancel_open_entry_orders(c["security_id"])
+        net_qty = await self.ctx.orders.get_net_qty(c["security_id"])
+        if net_qty == 0:
+            self.ctx.log.info(
+                "close_skipped_no_position", security_id=c["security_id"], reason=reason
+            )
+            self._current = None
+            return
+        close_lots = abs(net_qty) // self.lot_size
+        order = await self._place(c["security_id"], c["segment"], "BUY", close_lots)
         if order is None:
             return  # keep the leg so a later bar / square-off retries the cover
         self.ctx.log.info("leg_closed", security_id=c["security_id"], lots=c["lots"], reason=reason)

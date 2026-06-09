@@ -108,6 +108,19 @@ async def lifespan(app: FastAPI):
     app.state.indicator_engine = indicator_engine
     strategy_host.set_indicator_engine(indicator_engine)
 
+    # Seed IndicatorEngine from MongoDB / Dhan API so ST is valid immediately on first bar.
+    from pdp.indicators.warmup import warm_up_indicator_engine
+    from pdp.strategy.registry import load_all
+
+    _all_configs = load_all(Path("strategies"))
+    _watchlist_dicts = [
+        {"security_id": w.security_id, "exchange_segment": w.exchange_segment, "timeframes": w.timeframes}
+        for cfg in _all_configs
+        for w in cfg.watchlist
+    ]
+    if _watchlist_dicts and settings.DHAN_CLIENT_ID:
+        await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
+
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
     bar_writer = None
