@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FeedStatus, PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
+import type { PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
 import type { Position } from '../types/intraday'
 
 const WS_DISABLED = import.meta.env.VITE_WS_DISABLED === 'true'
@@ -24,19 +24,30 @@ function groupPositions(positions: Position[]): StrategyGroup[] {
       strategy_id: p.strategy_id,
       greeks: p.delta != null ? { delta: p.delta ?? 0, gamma: p.gamma ?? 0, theta: p.theta ?? 0, vega: p.vega ?? 0 } : undefined,
     }
-    const existing = map.get(key) ?? []
+    let existing = map.get(key)
+    if (!existing) {
+      existing = []
+      map.set(key, existing)
+    }
     existing.push(leg)
-    map.set(key, existing)
   }
 
   const groups: StrategyGroup[] = []
   for (const [strategy_id, legs] of map.entries()) {
-    const net_delta = legs.reduce((s, l) => s + (l.greeks?.delta ?? 0) * l.net_qty, 0)
-    const net_gamma = legs.reduce((s, l) => s + (l.greeks?.gamma ?? 0) * l.net_qty, 0)
-    const net_theta = legs.reduce((s, l) => s + (l.greeks?.theta ?? 0) * l.net_qty, 0)
-    const net_vega = legs.reduce((s, l) => s + (l.greeks?.vega ?? 0) * l.net_qty, 0)
-    const unrealized_pnl = legs.reduce((s, l) => s + l.unrealized_pnl, 0)
-    const realized_pnl = legs.reduce((s, l) => s + l.realized_pnl, 0)
+    let net_delta = 0, net_gamma = 0, net_theta = 0, net_vega = 0
+    let unrealized_pnl = 0, realized_pnl = 0
+
+    // O(N) single-pass aggregation instead of O(6N) via reduce
+    for (const l of legs) {
+      const qty = l.net_qty
+      net_delta += (l.greeks?.delta ?? 0) * qty
+      net_gamma += (l.greeks?.gamma ?? 0) * qty
+      net_theta += (l.greeks?.theta ?? 0) * qty
+      net_vega += (l.greeks?.vega ?? 0) * qty
+      unrealized_pnl += l.unrealized_pnl
+      realized_pnl += l.realized_pnl
+    }
+
     groups.push({
       strategy_id,
       legs,

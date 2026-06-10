@@ -7,18 +7,31 @@ function groupPositions(positions: Position[]) {
   for (const pos of positions) {
     if (pos.net_qty === 0) continue
     const key = pos.strategy_id ?? 'Ungrouped'
-    const arr = map.get(key) ?? []
+    let arr = map.get(key)
+    if (!arr) {
+      arr = []
+      map.set(key, arr)
+    }
     arr.push(pos)
-    map.set(key, arr)
   }
-  return Array.from(map.entries()).map(([strategy_id, legs]) => ({
-    strategy_id,
-    positions: legs,
-    total_delta: legs.reduce((s, p) => s + (p.delta ?? 0) * p.net_qty, 0),
-    total_pnl: legs.reduce((s, p) => s + p.realized_pnl + p.unrealized_pnl, 0),
-    realized_pnl: legs.reduce((s, p) => s + p.realized_pnl, 0),
-    unrealized_pnl: legs.reduce((s, p) => s + p.unrealized_pnl, 0),
-  }))
+  return Array.from(map.entries()).map(([strategy_id, legs]) => {
+    let total_delta = 0, total_pnl = 0, realized_pnl = 0, unrealized_pnl = 0
+    for (const p of legs) {
+      total_delta += (p.delta ?? 0) * p.net_qty
+      const pnl = p.realized_pnl + p.unrealized_pnl
+      total_pnl += pnl
+      realized_pnl += p.realized_pnl
+      unrealized_pnl += p.unrealized_pnl
+    }
+    return {
+      strategy_id,
+      positions: legs,
+      total_delta,
+      total_pnl,
+      realized_pnl,
+      unrealized_pnl,
+    }
+  })
 }
 
 const makePos = (overrides: Partial<Position> = {}): Position => ({

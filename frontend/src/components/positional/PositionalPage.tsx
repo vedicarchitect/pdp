@@ -58,9 +58,12 @@ export function PositionalPage() {
   const allLegs = enrichedGroups.flatMap((g) => g.legs)
   const hasPositions = allLegs.length > 0
 
-  const totalPnl = enrichedGroups.reduce((s, g) => s + g.total_pnl, 0)
-  const totalUnrealized = enrichedGroups.reduce((s, g) => s + g.unrealized_pnl, 0)
-  const totalRealized = enrichedGroups.reduce((s, g) => s + g.realized_pnl, 0)
+  let totalPnl = 0, totalUnrealized = 0, totalRealized = 0
+  for (const g of enrichedGroups) {
+    totalPnl += g.total_pnl
+    totalUnrealized += g.unrealized_pnl
+    totalRealized += g.realized_pnl
+  }
 
   return (
     <div className="flex flex-col gap-4">
