@@ -20,8 +20,16 @@ export function StrategyGroupRow({ group }: Props) {
   return (
     <>
       <tr
-        className="border-t border-gray-700 hover:bg-gray-800 cursor-pointer select-none"
+        className="border-t border-gray-700 hover:bg-gray-800 cursor-pointer select-none focus-visible:outline-none focus-visible:bg-gray-700"
         onClick={() => setExpanded((e) => !e)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setExpanded((ex) => !ex)
+          }
+        }}
+        tabIndex={0}
+        aria-expanded={expanded}
       >
         <td className="px-3 py-2.5 font-medium text-white flex items-center gap-2">
           <span className="text-gray-500 text-xs w-4">{expanded ? '▼' : '▶'}</span>
