@@ -19,21 +19,42 @@ function groupPositions(positions: Position[]): StrategyGroup[] {
   const map = new Map<string, Position[]>()
   for (const pos of positions) {
     const key = pos.strategy_id ?? 'Ungrouped'
-    const arr = map.get(key) ?? []
+    let arr = map.get(key)
+    if (!arr) {
+      arr = []
+      map.set(key, arr)
+    }
     arr.push(pos)
-    map.set(key, arr)
   }
-  return Array.from(map.entries()).map(([strategy_id, legs]) => ({
-    strategy_id,
-    positions: legs,
-    total_delta: legs.reduce((s, p) => s + (p.delta ?? 0) * p.net_qty, 0),
-    total_gamma: legs.reduce((s, p) => s + (p.gamma ?? 0) * p.net_qty, 0),
-    total_theta: legs.reduce((s, p) => s + (p.theta ?? 0) * p.net_qty, 0),
-    total_vega: legs.reduce((s, p) => s + (p.vega ?? 0) * p.net_qty, 0),
-    total_pnl: legs.reduce((s, p) => s + p.realized_pnl + p.unrealized_pnl, 0),
-    realized_pnl: legs.reduce((s, p) => s + p.realized_pnl, 0),
-    unrealized_pnl: legs.reduce((s, p) => s + p.unrealized_pnl, 0),
-  }))
+  return Array.from(map.entries()).map(([strategy_id, legs]) => {
+    let total_delta = 0, total_gamma = 0, total_theta = 0, total_vega = 0
+    let total_pnl = 0, realized_pnl = 0, unrealized_pnl = 0
+
+    // O(N) single-pass aggregation instead of O(7N) via reduce
+    for (const p of legs) {
+      const qty = p.net_qty
+      total_delta += (p.delta ?? 0) * qty
+      total_gamma += (p.gamma ?? 0) * qty
+      total_theta += (p.theta ?? 0) * qty
+      total_vega += (p.vega ?? 0) * qty
+      const pnl = p.realized_pnl + p.unrealized_pnl
+      total_pnl += pnl
+      realized_pnl += p.realized_pnl
+      unrealized_pnl += p.unrealized_pnl
+    }
+
+    return {
+      strategy_id,
+      positions: legs,
+      total_delta,
+      total_gamma,
+      total_theta,
+      total_vega,
+      total_pnl,
+      realized_pnl,
+      unrealized_pnl,
+    }
+  })
 }
 
 function LegRow({ pos }: { pos: Position }) {

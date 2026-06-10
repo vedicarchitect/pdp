@@ -2,12 +2,19 @@ import { describe, it, expect } from 'vitest'
 import type { PositionalLeg, StrategyGroup } from '../types/positional'
 
 function makeGroup(legs: PositionalLeg[]): StrategyGroup {
-  const netDelta = legs.reduce((s, l) => s + (l.greeks?.delta ?? 0) * l.net_qty, 0)
-  const netGamma = legs.reduce((s, l) => s + (l.greeks?.gamma ?? 0) * l.net_qty, 0)
-  const netTheta = legs.reduce((s, l) => s + (l.greeks?.theta ?? 0) * l.net_qty, 0)
-  const netVega = legs.reduce((s, l) => s + (l.greeks?.vega ?? 0) * l.net_qty, 0)
-  const unrealized = legs.reduce((s, l) => s + l.unrealized_pnl, 0)
-  const realized = legs.reduce((s, l) => s + l.realized_pnl, 0)
+  let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0
+  let unrealized = 0, realized = 0
+
+  for (const l of legs) {
+    const qty = l.net_qty
+    netDelta += (l.greeks?.delta ?? 0) * qty
+    netGamma += (l.greeks?.gamma ?? 0) * qty
+    netTheta += (l.greeks?.theta ?? 0) * qty
+    netVega += (l.greeks?.vega ?? 0) * qty
+    unrealized += l.unrealized_pnl
+    realized += l.realized_pnl
+  }
+
   return {
     strategy_id: legs[0]?.strategy_id ?? 'test',
     legs,
