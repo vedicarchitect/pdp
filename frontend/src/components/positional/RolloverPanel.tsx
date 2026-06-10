@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type { PositionalLeg, RolloverEstimate } from '../../types/positional'
 
 interface Props {
@@ -10,6 +10,7 @@ function mid(bid: number, ask: number) {
 }
 
 export function RolloverPanel({ leg }: Props) {
+  const inputId = useId()
   const [slippagePct, setSlippagePct] = useState(0.1)
   const [estimate, setEstimate] = useState<RolloverEstimate | null>(null)
   const [noNextExpiry, setNoNextExpiry] = useState(false)
@@ -135,17 +136,18 @@ export function RolloverPanel({ leg }: Props) {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-gray-500">Slippage buffer</span>
+              <label htmlFor={inputId} className="text-gray-500 cursor-pointer">Slippage buffer</label>
               <input
+                id={inputId}
                 type="number"
                 min="0"
                 max="5"
                 step="0.05"
                 value={slippagePct}
                 onChange={(e) => setSlippagePct(Number(e.target.value))}
-                className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-white font-mono text-xs"
+                className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-white font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
               />
-              <span className="text-gray-500">%</span>
+              <span className="text-gray-500" aria-hidden="true">%</span>
               <span className="ml-2 font-mono text-yellow-300">₹{slippageEst.toFixed(2)}</span>
             </div>
           </div>
