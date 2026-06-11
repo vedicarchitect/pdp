@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     DATABASE_SYNC_URL: str = Field(...)
     REDIS_URL: str = Field(...)
 
+    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
     DHAN_CLIENT_ID: str = ""
     DHAN_ACCESS_TOKEN: str = ""
     DHAN_SCRIPMASTER_URL: str = (
