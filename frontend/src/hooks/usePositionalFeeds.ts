@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FeedStatus, PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
+import type { PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
 import type { Position } from '../types/intraday'
 
 const WS_DISABLED = import.meta.env.VITE_WS_DISABLED === 'true'

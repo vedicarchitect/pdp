@@ -104,9 +104,20 @@ export function RolloverPanel({ leg }: Props) {
         <button
           onClick={handleEstimate}
           disabled={loading}
-          className="ml-auto px-3 py-1 bg-blue-800 hover:bg-blue-700 text-blue-100 rounded text-xs disabled:opacity-50"
+          aria-busy={loading}
+          className="ml-auto px-3 py-1 bg-blue-800 hover:bg-blue-700 text-blue-100 rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none flex items-center gap-1.5"
         >
-          {loading ? 'Fetching…' : 'Estimate Rollover'}
+          {loading ? (
+            <>
+              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Fetching…
+            </>
+          ) : (
+            'Estimate Rollover'
+          )}
         </button>
       </div>
 
@@ -135,17 +146,20 @@ export function RolloverPanel({ leg }: Props) {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-gray-500">Slippage buffer</span>
-              <input
-                type="number"
-                min="0"
-                max="5"
-                step="0.05"
-                value={slippagePct}
-                onChange={(e) => setSlippagePct(Number(e.target.value))}
-                className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-white font-mono text-xs"
-              />
-              <span className="text-gray-500">%</span>
+              <label htmlFor={`slippage-${leg.security_id}`} className="text-gray-500 cursor-pointer">Slippage buffer</label>
+              <div className="relative">
+                <input
+                  id={`slippage-${leg.security_id}`}
+                  type="number"
+                  min="0"
+                  max="5"
+                  step="0.05"
+                  value={slippagePct}
+                  onChange={(e) => setSlippagePct(Number(e.target.value))}
+                  className="w-16 bg-gray-800 border border-gray-700 rounded pl-2 pr-4 py-0.5 text-white font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 focus-visible:border-blue-500"
+                />
+                <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 text-[10px] pointer-events-none">%</span>
+              </div>
               <span className="ml-2 font-mono text-yellow-300">₹{slippageEst.toFixed(2)}</span>
             </div>
           </div>
