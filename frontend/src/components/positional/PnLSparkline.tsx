@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { createChart, ColorType, LineStyle } from 'lightweight-charts'
+import { createChart, ColorType, LineStyle, LineSeries } from 'lightweight-charts'
 import type { DayPnL } from '../../types/positional'
 
 interface Props {
@@ -27,7 +27,7 @@ export function PnLSparkline({ history }: Props) {
       height: 160,
     })
 
-    const series = chart.addLineSeries({
+    const series = chart.addSeries(LineSeries, {
       color: '#34d399',
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
@@ -44,8 +44,6 @@ export function PnLSparkline({ history }: Props) {
     // Color positive vs negative with baseline
     series.applyOptions({
       color: '#34d399',
-      topColor: 'rgba(52, 211, 153, 0.1)',
-      bottomColor: 'rgba(248, 113, 113, 0.1)',
     })
 
     chart.timeScale().fitContent()

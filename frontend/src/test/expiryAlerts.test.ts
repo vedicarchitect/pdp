@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { computeDTE } from '../lib/utils'
 
 function makeDateStr(daysFromNow: number): string {
