@@ -12,20 +12,39 @@ def compute_max_pain(strikes: list[dict]) -> int | None:
     if not strikes:
         return None
 
-    candidate_strikes = [s["strike"] for s in strikes]
-    ce_oi = {s["strike"]: s.get("ce", {}).get("oi", 0) for s in strikes}
-    pe_oi = {s["strike"]: s.get("pe", {}).get("oi", 0) for s in strikes}
+    sorted_strikes = sorted(strikes, key=lambda x: x["strike"])
+    n = len(sorted_strikes)
 
-    min_pain = None
-    max_pain_strike = None
-    for k in candidate_strikes:
-        pain = sum(max(0, s - k) * ce_oi.get(s, 0) for s in candidate_strikes) + sum(
-            max(0, k - s) * pe_oi.get(s, 0) for s in candidate_strikes
-        )
-        if min_pain is None or pain < min_pain:
+    strike_vals = [s["strike"] for s in sorted_strikes]
+    ce_ois = [s.get("ce", {}).get("oi", 0) for s in sorted_strikes]
+    pe_ois = [s.get("pe", {}).get("oi", 0) for s in sorted_strikes]
+
+    k0 = strike_vals[0]
+    pain = 0
+    for s, ce_oi in zip(strike_vals, ce_ois, strict=True):
+        if s > k0:
+            pain += (s - k0) * ce_oi
+
+    min_pain = pain
+    max_pain_strike = k0
+
+    pe_oi_sum = pe_ois[0]
+    ce_oi_sum = sum(ce_ois[1:])
+
+    for i in range(1, n):
+        dk = strike_vals[i] - strike_vals[i - 1]
+
+        pain += dk * pe_oi_sum
+        pain -= dk * ce_oi_sum
+
+        if pain < min_pain:
             min_pain = pain
-            max_pain_strike = k
-    return int(max_pain_strike) if max_pain_strike is not None else None
+            max_pain_strike = strike_vals[i]
+
+        pe_oi_sum += pe_ois[i]
+        ce_oi_sum -= ce_ois[i]
+
+    return int(max_pain_strike)
 
 
 def compute_pcr(strikes: list[dict]) -> float | None:
