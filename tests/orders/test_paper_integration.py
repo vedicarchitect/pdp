@@ -23,6 +23,7 @@ from pdp.orders.models import (
     Side,
 )
 from pdp.orders.paper import PaperBroker, _should_fill
+from pdp.orders.router import OrderRouter
 
 
 def _open_order(
@@ -160,6 +161,64 @@ class TestPositionMathDirect:
         assert pos.net_qty == 0
         assert pos.realized_pnl == Decimal("750.0000")
 
+    @pytest.mark.asyncio
+    async def test_short_multileg_weighted_avg(self) -> None:
+        """SELL 65 @ 83.63 added to existing short (-130 @ 86.13) → avg = 85.2967."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-130,
+            avg_price=Decimal("86.13"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+        )
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.SELL, qty=65)
+        await broker._upsert_position(session, order, Decimal("83.63"), datetime.now(UTC))
+
+        assert pos.net_qty == -195
+        assert pos.avg_price == Decimal("85.2967")
+
+    @pytest.mark.asyncio
+    async def test_short_close_realized_pnl(self) -> None:
+        """BUY 195 @ 96.52 closes short (-195 @ 85.2967) → realized_pnl = -2188.5435."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-195,
+            avg_price=Decimal("85.2967"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+        )
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.BUY, qty=195)
+        await broker._upsert_position(session, order, Decimal("96.52"), datetime.now(UTC))
+
+        assert pos.net_qty == 0
+        assert pos.realized_pnl == Decimal("-2188.5435")
+
 
 # ------------------------------------------------------------------ #
 # Charges                                                             #
@@ -183,3 +242,61 @@ class TestChargesIntegration:
         calc = ChargesCalculator(cost)
         charges = calc.compute(qty=50, fill_price=Decimal("200"), side=Side.SELL)
         assert charges > Decimal("0"), f"charges should be positive, got {charges}"
+
+
+# ------------------------------------------------------------------ #
+# cancel_open_entry_orders                                            #
+# ------------------------------------------------------------------ #
+
+def _make_settings(live: bool = False) -> MagicMock:
+    s = MagicMock()
+    s.LIVE = live
+    s.BROKER = "paper"
+    s.DHAN_CLIENT_ID = None
+    return s
+
+
+class TestCancelOpenEntryOrders:
+    @pytest.mark.asyncio
+    async def test_cancels_open_sell_and_removes_from_broker(self) -> None:
+        """OPEN SELL in broker watch list → status CANCELLED + removed from _open_orders."""
+        paper = PaperBroker.__new__(PaperBroker)
+        paper._open_orders = {}
+
+        order = _open_order(order_id=42, security_id="13", side=Side.SELL, qty=130)
+        order.strategy_id = "st_01"
+        paper._open_orders["13"] = [order]
+
+        router = OrderRouter(settings=_make_settings(), paper=paper)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [order]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=mock_result)
+        session.commit = AsyncMock()
+
+        cancelled = await router.cancel_open_entry_orders(session, "13", "st_01")
+
+        assert cancelled == [42]
+        assert order.status == OrderStatus.CANCELLED
+        assert order.cancelled_at is not None
+        assert paper._open_orders.get("13", []) == []
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_open_sells(self) -> None:
+        """No OPEN SELLs → returns empty list, no DB commit."""
+        paper = PaperBroker.__new__(PaperBroker)
+        paper._open_orders = {}
+
+        router = OrderRouter(settings=_make_settings(), paper=paper)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=mock_result)
+        session.commit = AsyncMock()
+
+        cancelled = await router.cancel_open_entry_orders(session, "13", "st_01")
+
+        assert cancelled == []
+        session.commit.assert_not_called()

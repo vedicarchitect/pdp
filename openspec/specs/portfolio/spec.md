@@ -30,6 +30,8 @@ The system SHALL expose:
 
 Both endpoints SHALL return HTTP 200 with an empty positions array if no positions exist. Both endpoints SHALL read from the PG `positions` table (not the in-memory cache) for consistency. Mode filtering is not supported as the `positions` table has no `mode` column; the `mode` field in the summary response is derived from the `LIVE` setting.
 
+`realized_pnl` values returned by these endpoints SHALL reflect the corrected short-position accounting: for any position closed from a multi-leg short, `realized_pnl` SHALL equal `(correct_weighted_avg - close_price) * closed_qty` with no sign inversion.
+
 #### Scenario: Positions endpoint returns open positions
 
 - **WHEN** `GET /api/v1/portfolio/positions` is called and two open positions exist
@@ -44,6 +46,11 @@ Both endpoints SHALL return HTTP 200 with an empty positions array if no positio
 
 - **WHEN** `GET /api/v1/portfolio/positions` is called and no positions exist
 - **THEN** HTTP 200 is returned with `{"positions": [], "count": 0}`
+
+#### Scenario: Short close realized P&L is correct
+
+- **WHEN** a 4-leg short (total 325 units, weighted avg ≈ 85.30) is closed by BUY 325 @ 96.52
+- **THEN** `GET /api/v1/portfolio/summary` returns `total_realized_pnl ≈ -3645` (not +37256 or any sign-inverted value)
 
 ## Requirement: Portfolio WebSocket endpoint
 

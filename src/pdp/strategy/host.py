@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pdp.settings import get_settings
 from pdp.strategy.abc import FillEvent, Strategy
 from pdp.strategy.context import (
     IndicatorReader,
@@ -15,9 +16,11 @@ from pdp.strategy.context import (
     StrategyContext,
     StrategyOrderClient,
 )
+from pdp.strategy.log import StrategyDailyLog
 from pdp.strategy.registry import StrategyConfig, import_strategy_class, load_all, load_one
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from pdp.indicators.engine import IndicatorEngine
@@ -96,6 +99,7 @@ class StrategyHost:
         self._running: dict[str, _StrategyState] = {}
         self._indicator_engine: IndicatorEngine | None = None
         self._market_adapter: DhanTickerAdapter | None = None
+        self._redis: Redis | None = None
 
     def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
         """Wire the universal indicator engine read by strategies via ctx.indicators."""
@@ -104,6 +108,10 @@ class StrategyHost:
     def set_market_adapter(self, adapter: DhanTickerAdapter | None) -> None:
         """Wire the live feed adapter so strategies can subscribe via ctx.market."""
         self._market_adapter = adapter
+
+    def set_redis(self, redis: Redis | None) -> None:
+        """Wire the Redis hot cache so strategies can read LTP via ctx.market.ltp."""
+        self._redis = redis
 
     # ------------------------------------------------------------------ #
     # Registry                                                             #
@@ -149,6 +157,8 @@ class StrategyHost:
         instance: Strategy = cls()
         instance.strategy_id = cfg.id
         instance.params = dict(cfg.params)
+        instance._mode = "live" if get_settings().LIVE else "paper"
+        instance._slog = StrategyDailyLog(cfg.id)
 
         order_client = StrategyOrderClient(
             strategy_id=cfg.id,
@@ -163,12 +173,21 @@ class StrategyHost:
             watchlist=list(cfg.watchlist),
             log=log.bind(strategy_id=cfg.id),
             indicators=IndicatorReader(self._indicator_engine),
-            market=MarketControl(self._market_adapter, self._session_maker),
+            market=MarketControl(self._market_adapter, self._session_maker, self._redis),
             session_maker=self._session_maker,
         )
 
         inbox: asyncio.Queue[_Event] = asyncio.Queue(maxsize=_INBOX_SIZE)
         await instance.on_init(ctx)
+
+        # Emit the run-start config header as the first lines of the day's log.
+        _tfs = sorted({tf for w in cfg.watchlist for tf in w.timeframes})
+        instance.log_config_header(
+            mode=instance._mode,
+            timeframe=", ".join(_tfs) or "unknown",
+            params=dict(cfg.params),
+            watchlist=[w.model_dump() for w in cfg.watchlist],
+        )
 
         task = asyncio.create_task(
             self._run_strategy(strategy_id, instance, inbox),
@@ -198,6 +217,9 @@ class StrategyHost:
             await state.task
         except asyncio.CancelledError:
             pass
+
+        if state.instance._slog is not None:
+            state.instance._slog.close()
 
         log.info("strategy_stopped", strategy_id=strategy_id)
 

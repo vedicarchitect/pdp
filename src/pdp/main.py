@@ -98,6 +98,7 @@ async def lifespan(app: FastAPI):
         session_maker=get_session_maker(),
     )
     strategy_host.load_registry()
+    strategy_host.set_redis(app.state.redis)
     app.state.strategy_host = strategy_host
 
     # Universal indicator engine — computes SuperTrend(3,1) once per (security, timeframe)

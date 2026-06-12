@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _ist_day_bounds() -> tuple[datetime, datetime]:
+    """Return (start, end) UTC datetimes spanning today in IST."""
+    now_ist = datetime.now(tz=_IST)
+    start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_ist = start_ist + timedelta(days=1)
+    return start_ist.astimezone(ZoneInfo("UTC")), end_ist.astimezone(ZoneInfo("UTC"))
 
 from pdp.db.session import get_db
 from pdp.orders.models import Order, OrderType, Position, Product, Side, Trade
@@ -100,11 +112,15 @@ async def list_orders(
     response: Response,
     request: Request,
     status: Annotated[str | None, Query()] = None,
+    today: Annotated[bool, Query()] = False,
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     stmt = select(Order).order_by(Order.placed_at.desc())
     if status:
         stmt = stmt.where(Order.status == status)
+    if today:
+        day_start, day_end = _ist_day_bounds()
+        stmt = stmt.where(Order.placed_at >= day_start, Order.placed_at < day_end)
     result = await db.execute(stmt)
     _add_mode_header(response, request)
     return [_order_out(o) for o in result.scalars().all()]
@@ -130,11 +146,15 @@ async def list_trades(
     response: Response,
     request: Request,
     security_id: Annotated[str | None, Query()] = None,
+    today: Annotated[bool, Query()] = False,
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     stmt = select(Trade).order_by(Trade.filled_at.desc())
     if security_id:
         stmt = stmt.where(Trade.security_id == security_id)
+    if today:
+        day_start, day_end = _ist_day_bounds()
+        stmt = stmt.where(Trade.filled_at >= day_start, Trade.filled_at < day_end)
     result = await db.execute(stmt)
     _add_mode_header(response, request)
     return [

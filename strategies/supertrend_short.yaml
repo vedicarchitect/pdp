@@ -26,6 +26,8 @@ params:
   max_lots: 5                 # scale-in cap
   start_ist: "09:30"          # no entries before this (IST)
   square_off_ist: "15:10"     # flatten everything at/after this (IST)
+  leg_stop_per_lot: 1000      # close the leg if MTM loss >= this x current lots
+  day_stop: 10000             # no more trades once day realized P&L <= -this
 
 risk:
   max_open_orders: 12          # transient OPEN orders during scale-in / cover

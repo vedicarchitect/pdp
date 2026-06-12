@@ -110,6 +110,28 @@ class TestPositionMath:
         assert realized == Decimal("750")
         # Remaining: net=50, avg=105 — verified above
 
+    def test_weighted_avg_short_multileg(self) -> None:
+        # SELL 130 @ 86.13 then SELL 65 @ 83.63 → avg uses abs(old_qty)
+        # First fill creates position: net=-130, avg=86.13
+        # Second fill: total_cost = 86.13 * 130 + 83.63 * 65 = 16632.85
+        old_avg = Decimal("86.13")
+        old_qty = 130  # abs value
+        fill2 = Decimal("83.63")
+        q2 = 65
+        total = old_avg * old_qty + fill2 * q2
+        new_qty = old_qty + q2
+        avg = total / new_qty
+        assert avg == Decimal("85.29666666666666666666666667")
+
+    def test_realize_on_close_short(self) -> None:
+        # Short position: net=-195, avg≈85.2967; close BUY 195 @ 96.52
+        # realized = (fill_price - old_avg) * old_qty where old_qty is negative
+        old_avg = Decimal("85.2967")
+        fill_price = Decimal("96.52")
+        old_qty = Decimal("-195")
+        realized = (fill_price - old_avg) * old_qty
+        assert realized == Decimal("-2188.5435")
+
 
 # ------------------------------------------------------------------ #
 # Charges calculator                                                  #

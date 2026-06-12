@@ -1,3 +1,8 @@
+# market-data Specification
+
+## Purpose
+Real-time market-data ingestion: Dhan WebSocket tick feed, Redis hot LTP cache, bar aggregation, MongoDB persistence, WebSocket fan-out, and REST snapshots.
+## Requirements
 ### Requirement: Dhan ticker WebSocket adapter
 
 The system SHALL maintain a single persistent WebSocket connection to Dhan's market-feed service, decoding binary tick frames into typed `Tick` records and pushing them into an internal asyncio queue.
@@ -81,3 +86,22 @@ The system SHALL achieve a tick-to-WebSocket-out p99 latency of 50ms or less whe
 
 - **WHEN** the `locust` load script is run with 200 simulated subscribers
 - **THEN** the recorded p99 of `(client_receive_ts - tick.publish_ts)` is ≤ 50ms
+
+### Requirement: Universal SuperTrend indicator
+The market engine SHALL compute a SuperTrend indicator once per `(security_id, timeframe)` on
+each closed bar and make its latest value and direction available to strategies, which consume
+it without recomputing.
+
+#### Scenario: Direction available after seeding
+- **WHEN** at least `period` bars have closed for a `(security_id, timeframe)`
+- **THEN** the latest SuperTrend exposes a direction of up (+1) or down (-1) and a line value
+
+#### Scenario: Direction undefined before seeding
+- **WHEN** fewer than `period` bars have closed
+- **THEN** the SuperTrend value is unavailable (no direction emitted)
+
+#### Scenario: Computed before strategy dispatch
+- **WHEN** a bar closes
+- **THEN** the SuperTrend is updated before the bar is dispatched to strategies, so strategies
+  read the value for that bar
+

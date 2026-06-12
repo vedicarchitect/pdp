@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import defaultdict
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -65,8 +66,9 @@ async def _show_dhan_portfolio(format_type: str, timestamp: str, settings: Any, 
                         total_invested += invested
                         total_current += current
                         total_pnl += pnl
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("dhan_holdings_fetch_failed", error=str(e))
+            print_message(f"Warning: could not fetch equity holdings: {e}", error=True)
 
         # Fetch F&O positions
         fno_count = 0
@@ -81,8 +83,9 @@ async def _show_dhan_portfolio(format_type: str, timestamp: str, settings: Any, 
                         fno_count += 1
                         # F&O P&L is directly provided
                         total_pnl += float(pos.get("unrealizedProfit", 0))
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("dhan_fno_positions_fetch_failed", error=str(e))
+            print_message(f"Warning: could not fetch F&O positions: {e}", error=True)
 
         positions_list = []  # Not used after this point in this function
 
@@ -129,9 +132,23 @@ async def _show_db_portfolio(format_type: str, timestamp: str, mode: str) -> Non
         total_unrealized = Decimal("0")
         total_realized = Decimal("0")
 
+        # Group by exchange_segment for the by-segment breakdown.
+        seg_unrealized: dict[str, Decimal] = defaultdict(Decimal)
+        seg_realized: dict[str, Decimal] = defaultdict(Decimal)
+        seg_open: dict[str, int] = defaultdict(int)
+
         for pos in positions:
-            total_unrealized += pos.unrealized_pnl or Decimal("0")
-            total_realized += pos.realized_pnl or Decimal("0")
+            u = pos.unrealized_pnl or Decimal("0")
+            r = pos.realized_pnl or Decimal("0")
+            total_unrealized += u
+            total_realized += r
+            seg = pos.exchange_segment or "UNKNOWN"
+            seg_unrealized[seg] += u
+            seg_realized[seg] += r
+            if pos.net_qty != 0:
+                seg_open[seg] += 1
+
+        open_count = sum(seg_open.values())
 
         if format_type == "json":
             json_data = {
@@ -141,19 +158,42 @@ async def _show_db_portfolio(format_type: str, timestamp: str, mode: str) -> Non
                     "total_unrealized_pnl": float(total_unrealized),
                     "total_realized_pnl": float(total_realized),
                     "total_pnl": float(total_unrealized + total_realized),
-                    "open_positions": len([p for p in positions if p.net_qty != 0]),
+                    "open_positions": open_count,
+                },
+                "by_segment": {
+                    seg: {
+                        "open_positions": seg_open.get(seg, 0),
+                        "unrealized_pnl": float(seg_unrealized[seg]),
+                        "realized_pnl": float(seg_realized[seg]),
+                    }
+                    for seg in sorted(seg_unrealized)
                 },
             }
             print(json.dumps(json_data, indent=2))
         else:
-            headers = ["Metric", "Value"]
-            rows = [
+            summary_rows = [
                 ["Mode", mode],
                 ["Total Unrealized P&L", format_number(float(total_unrealized))],
                 ["Total Realized P&L", format_number(float(total_realized))],
                 ["Total P&L", format_number(float(total_unrealized + total_realized))],
-                ["Open Positions", str(len([p for p in positions if p.net_qty != 0]))],
+                ["Open Positions", str(open_count)],
                 ["Timestamp", timestamp],
             ]
+            print_table("Portfolio Summary", ["Metric", "Value"], summary_rows, format_type)
 
-            print_table("Portfolio Summary", headers, rows, format_type)
+            if seg_unrealized:
+                seg_rows = [
+                    [
+                        seg,
+                        str(seg_open.get(seg, 0)),
+                        format_number(float(seg_unrealized[seg])),
+                        format_number(float(seg_realized[seg])),
+                    ]
+                    for seg in sorted(seg_unrealized)
+                ]
+                print_table(
+                    "By Segment",
+                    ["Segment", "Open Pos", "Unrealized P&L", "Realized P&L"],
+                    seg_rows,
+                    format_type,
+                )

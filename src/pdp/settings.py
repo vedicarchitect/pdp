@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     DHAN_SCRIPMASTER_URL: str = (
         "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
     )
+    # Daily filtered scrip-master snapshots: only these underlyings (+ their index rows)
+    # are persisted per day for historical (expired-contract) backtest lookups.
+    SNAPSHOT_UNDERLYINGS: str = '["NIFTY","BANKNIFTY","SENSEX"]'
+    MASTERS_DIR: str = "data/masters"
 
     PAPER_SLIPPAGE_BPS: float = 2.0
 

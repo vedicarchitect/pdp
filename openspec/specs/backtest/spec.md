@@ -21,19 +21,30 @@ The system SHALL provide a CLI command to run historical backtests against a spe
 ---
 
 ### Requirement: Historical bar replay
-The system SHALL replay historical market bars from MongoDB `market_bars` collection in chronological order, feeding them to the strategy via the same event-driven interface as live trading.
+The system SHALL replay historical market bars in chronological order, feeding them to the
+strategy via the same event-driven interface as live trading. Source bars SHALL be fetched at
+**1-minute** resolution and **resampled** to the strategy's signal timeframe in code, rather
+than fetching a native bar of the signal timeframe directly, so the replayed series is
+constructed by the same aggregation rule the live `BarAggregator` applies to the tick stream.
+Resampling SHALL aggregate 1-minute bars on aligned UTC boundaries as open = first, high = max,
+low = min, close = last, volume = sum.
 
 #### Scenario: Bars arrive in correct order
 - **WHEN** backtest processes historical bars for a security between two dates
 - **THEN** bars are processed in ascending timestamp order, one at a time
 
+#### Scenario: Signal timeframe is resampled from 1-minute bars
+- **WHEN** the strategy's signal timeframe is 5m (or any multiple of one minute)
+- **THEN** the backtest fetches 1-minute bars and aggregates them into the signal timeframe on
+  aligned boundaries (open=first, high=max, low=min, close=last, volume=sum) before dispatch
+
 #### Scenario: On-bar hook is invoked
-- **WHEN** a historical bar arrives during backtest replay
-- **THEN** the strategy's `on_bar()` hook is called with the bar data
+- **WHEN** a resampled signal-timeframe bar is produced during replay
+- **THEN** the strategy's `on_bar()` hook is called with that bar
 
 #### Scenario: Missing bars in history
-- **WHEN** backtest encounters a gap in market_bars history
-- **THEN** system logs a warning with the gap period and continues processing
+- **WHEN** backtest encounters a gap in 1-minute history
+- **THEN** the system logs a warning with the gap period and continues processing
 
 ---
 
@@ -133,6 +144,29 @@ The system SHALL export backtest results to CSV files in the `backtest/results/`
 #### Scenario: CSV files are readable
 - **WHEN** CSV files are created
 - **THEN** they follow standard CSV format with headers and can be opened in spreadsheet software
+
+---
+
+### Requirement: Leg-grouped trade summary
+The backtest SHALL, in addition to any per-order detail, produce a leg-grouped summary in which
+each open-through-cover leg is a single row. Scale-in orders SHALL be folded into their parent
+leg via a running average entry price and a cumulative lot count. Each leg row SHALL report the
+entry time (IST), the exit time (IST), the average entry price, the exit price, the lot count,
+the realized leg profit and loss, and the close reason (one of flip, leg_stop, day_stop, or
+square-off).
+
+#### Scenario: Scale-ins fold into one leg
+- **WHEN** a leg is opened and scaled in over several bars, then covered
+- **THEN** the summary shows a single row whose average entry reflects all entry fills and whose
+  lot count equals the total lots covered
+
+#### Scenario: Close reason is reported
+- **WHEN** a leg is closed by a flip, a per-leg stop, the daily loss cap, or end-of-day square-off
+- **THEN** the leg row's reason column states which of those caused the close
+
+#### Scenario: Leg P&L reconciles to the day total
+- **WHEN** all leg rows for a day are summed
+- **THEN** the total realized leg P&L equals the day's realized P&L reported by the per-order view
 
 ---
 

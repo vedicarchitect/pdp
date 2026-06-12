@@ -20,10 +20,12 @@ if python -m pdp strategy list &>/dev/null; then
   exit 0
 fi
 
-# Precheck: Port 8000 already in use?
-if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
-  echo "✗ Port 8000 already in use (API may be running elsewhere)"
-  exit 1
+# Precheck: Port 8000 already in use? Kill the stale process.
+STALE_PID=$(netstat -ano 2>/dev/null | grep '0.0.0.0:8000.*LISTENING' | awk '{print $NF}' | head -1)
+if [ -n "$STALE_PID" ]; then
+  echo "Port 8000 held by PID $STALE_PID — killing..."
+  taskkill //PID "$STALE_PID" //F >/dev/null 2>&1 || true
+  sleep 1
 fi
 
 echo "Starting PDP API server..."

@@ -40,10 +40,10 @@
 ## 8. Validation
 
 - [x] 8.1 `pytest` green for new unit tests (18 passing; 120 across affected suites)
-- [ ] 8.2 Backtest replay on a historical NIFTY 5m day
+- [x] 8.2 Backtest replay on a historical NIFTY 5m day (`backtest_multiday.py`, multi-day runs Jun 2026)
 - [x] 8.3 Paper smoke test with synthetic bars: signal -> strategy -> order -> fill -> journal
   (`tests/strategy/test_supertrend_smoke.py`)
-- [ ] 8.4 Archive change via `openspec archive add-supertrend-options-strategy`
+- [x] 8.4 Archive change via `openspec archive add-supertrend-options-strategy`
 
 ## Blockers (pre-existing, outside this change) — RESOLVED
 

@@ -13,7 +13,7 @@ from pdp.db.session import get_session_maker
 from pdp.instruments.service import get_by_id
 from pdp.options import greeks as greeks_engine
 from pdp.options.dhan_client import fetch_chain
-from pdp.options.poller import _parse_chain, _spot_of
+from pdp.options.poller import parse_chain, spot_of
 from pdp.orders.models import Position
 from pdp.settings import get_settings
 
@@ -81,11 +81,13 @@ async def _show_greeks_async(config: CLIConfig, format_type: str) -> None:
             log.warning("greeks_chain_fetch_failed", **dict(zip(("underlying", "expiry"), key)), error=str(e))
             groups[key] = {"spot": 0.0, "by_strike": {}}
             continue
-        spot = _spot_of(raw)
-        by_strike = {s["strike"]: s for s in _parse_chain(raw, leg["underlying"], rate)}
+        spot = spot_of(raw)
+        by_strike = {s["strike"]: s for s in parse_chain(raw, leg["underlying"], rate)}
         groups[key] = {"spot": spot, "by_strike": by_strike}
 
     # 3. Resolve greeks per leg (chain row if present, else vollib fallback).
+    # Position-level greeks are sign-adjusted: short positions (qty < 0) negate
+    # the theoretical option greeks so the table reflects actual exposure.
     timestamp = format_timestamp()
     greeks_data: list[dict] = []
     for leg in legs:
@@ -95,6 +97,7 @@ async def _show_greeks_async(config: CLIConfig, format_type: str) -> None:
             g = row[leg["side"]]
         else:
             g = _fallback_greeks(leg, grp["spot"], rate)
+        sign = -1 if leg["qty"] < 0 else 1
         greeks_data.append(
             {
                 "symbol": leg["symbol"],
@@ -103,10 +106,10 @@ async def _show_greeks_async(config: CLIConfig, format_type: str) -> None:
                 "qty": leg["qty"],
                 "avg_price": leg["avg_price"],
                 "iv": g["iv"],
-                "delta": g["delta"],
-                "gamma": g["gamma"],
-                "theta": g["theta"],
-                "vega": g["vega"],
+                "delta": sign * g["delta"],
+                "gamma": sign * g["gamma"],
+                "theta": sign * g["theta"],
+                "vega": sign * g["vega"],
             }
         )
 

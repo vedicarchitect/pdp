@@ -8,7 +8,7 @@ import structlog
 
 from pdp.cli.progress.formatter import format_number, format_timestamp, print_message, print_table
 from pdp.options.dhan_client import fetch_chain, fetch_expiries
-from pdp.options.poller import _parse_chain
+from pdp.options.poller import parse_chain
 from pdp.settings import get_settings
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ async def _show_option_chain_async(
             print_message(f"Failed to fetch option chain for {exp}: {e}", error=True)
             log.warning("option_chain_fetch_failed", symbol=symbol, expiry=exp, error=str(e))
             continue
-        chains.append((exp, _parse_chain(raw, symbol, rate)))
+        chains.append((exp, parse_chain(raw, symbol, rate)))
 
     timestamp = format_timestamp()
 

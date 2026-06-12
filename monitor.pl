@@ -23,7 +23,9 @@ my $NIFTY_SID   = '13';
 my $TF          = '5m';
 my $POLL_SEC    = 1;
 my $CHAIN_TTL   = 10;      # re-fetch chain every N seconds
-my $CHAIN_EXPIRY = '2026-06-09';   # nearest weekly
+my $LEG_STOP_PER_LOT_DEFAULT = 1000.0;  # fallback if strategy params unavailable
+my $DAY_STOP_DEFAULT         = 10000.0;
+my $STOP_ALERT_FRAC          = 0.30;    # warn when < 30% of stop budget remains
 
 # ── RESP mini-client ────────────────────────────────────────────────────────
 my $redis;
@@ -93,6 +95,31 @@ sub api_get {
     return eval { decode_json($r->decoded_content) };
 }
 
+# ── Expiry helpers ──────────────────────────────────────────────────────────
+sub next_weekly_expiry {
+    # NIFTY weekly expiry = Tuesday. Use today if Tuesday before market close
+    # (15:30 IST = 10:00 UTC); otherwise compute the next Tuesday.
+    my $now  = time();
+    my @t    = gmtime($now);
+    my $wday = $t[6];  # 0=Sun 2=Tue 6=Sat
+    my $days_ahead;
+    if ($wday == 2 && $t[2] < 10) {
+        $days_ahead = 0;
+    } else {
+        $days_ahead = (2 - $wday + 7) % 7;
+        $days_ahead = 7 if $days_ahead == 0;
+    }
+    my @exp = gmtime($now + $days_ahead * 86400);
+    return sprintf('%04d-%02d-%02d', $exp[5]+1900, $exp[4]+1, $exp[3]);
+}
+
+sub expiry_label {
+    my $exp = shift // '';
+    return 'Exp?' unless $exp =~ /^\d{4}-(\d{2})-(\d{2})$/;
+    my @MON = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+    return $MON[$1 - 1] . ($2 + 0);
+}
+
 # ── Formatting ───────────────────────────────────────────────────────────────
 my $R = "\e[0m";
 sub bold  { "\e[1m$_[0]$R" }
@@ -103,20 +130,12 @@ sub red   { "\e[31m$_[0]$R" }
 sub yel   { "\e[33m$_[0]$R" }
 
 sub fp { my $v = shift; my $f = shift // '%.2f'; return (defined $v && looks_like_number($v)) ? sprintf($f, $v) : '  --  ' }
+sub fdir { my $d = shift; return !defined($d) ? grey('  -- ') : $d > 0 ? green('▲ UP') : red('▼ DN') }
 sub fg { my $v = shift; my $f = shift // '%+.4f'; return (defined $v && looks_like_number($v)) ? sprintf($f, $v) : '  --  ' }
 sub fpnl {
     my $v = shift;
     return grey('   --  ') unless defined $v && looks_like_number($v);
     return $v >= 0 ? green(sprintf('%+9.2f', $v)) : red(sprintf('%+9.2f', $v));
-}
-sub fdir {
-    my $d = shift;
-    return grey(' ? ') unless defined $d;
-    return $d > 0 ? green('▲ UP') : red('▼ DN');
-}
-sub fstatus {
-    my $s = shift // 'UNKNOWN';
-    return $s eq 'RUNNING' ? green($s) : red($s);
 }
 
 sub cls  { print "\033[H\033[2J" }
@@ -153,6 +172,8 @@ sub bar_utc_to_ist {
 my %chain_cache;
 my $chain_ts     = 0;
 my $prev_dir     = undef;
+my $CHAIN_EXPIRY = next_weekly_expiry();
+my $last_date    = '';
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 redis_connect();
@@ -166,12 +187,23 @@ while (1) {
     my $t0 = time();
     $tick++;
 
+    # ── Date rollover: recompute expiry when the calendar day changes ────
+    {
+        my @td = gmtime($t0);
+        my $today = sprintf('%04d%02d%02d', $td[5]+1900, $td[4]+1, $td[3]);
+        if ($today ne $last_date) {
+            $last_date    = $today;
+            $CHAIN_EXPIRY = next_weekly_expiry();
+            $chain_ts     = 0;   # force chain refresh on new expiry
+        }
+    }
+
     # ── Redis reads ───────────────────────────────────────────────────────
     my $nifty_ltp_s = redis_get("ltp:$NIFTY_SID") // '0';
     my $st_raw      = redis_get("st:$NIFTY_SID:$TF");
 
-    # Reconnect on Redis drop
-    unless (defined $st_raw || defined redis_get("ltp:$NIFTY_SID")) {
+    # Reconnect on Redis drop (both the probe and reconnect wrapped in eval)
+    unless (defined $st_raw || defined eval { redis_get("ltp:$NIFTY_SID") }) {
         eval { redis_connect() };
     }
 
@@ -186,9 +218,9 @@ while (1) {
     my ($pos) = grep { ($_->{exchange_segment}//'') eq 'NSE_FNO' && ($_->{net_qty}//0) < 0 } @positions;
 
     # ── Orders + Trades (fill price per leg) ──────────────────────────────
-    my $orders_raw = api_get('/api/v1/orders') // [];
+    my $orders_raw = api_get('/api/v1/orders', today => 1) // [];
     my @orders = @$orders_raw;
-    my $trades_raw = api_get('/api/v1/trades') // [];
+    my $trades_raw = api_get('/api/v1/trades', today => 1) // [];
     # Build map: order_id -> fill_price
     my %fill_px;
     for my $t (@$trades_raw) {
@@ -311,10 +343,11 @@ while (1) {
     push @all_strats, { id => 'supertrend_short', status => 'UNKNOWN' } unless @all_strats;
 
     my $blotter_hdr = sub {
-        printf "  %-3s  %-22s  %-9s  %-13s  %-8s  %-8s  %-9s  %-10s  %-13s  %-8s  %s\n",
+        printf "  %-3s  %-22s  %-9s  %-13s  %-8s  %-8s  %-9s  %-10s  %-13s  %-8s  %-14s  %s\n",
             grey('#'), grey('Instrument'), grey('Lots'),
             grey('Entry IST'), grey('Entry ₹'), grey('Curr ₹'), grey('Diff/unit'),
-            grey('Open P&L'), grey('Close IST'), grey('Close ₹'), grey('Real P&L');
+            grey('Open P&L'), grey('Close IST'), grey('Close ₹'), grey('Real P&L'),
+            grey('Stop Dist');
     };
 
     for my $s (@all_strats) {
@@ -322,11 +355,19 @@ while (1) {
         my $sstatus  = $s->{status} // 'UNKNOWN';
         my $sdropped = $s->{dropped_ticks} // 0;
 
+        # Risk-stop params: prefer strategy API params, fall back to defaults
+        my $params       = ref($s->{params}) eq 'HASH' ? $s->{params} : {};
+        my $leg_stop_per_lot = looks_like_number($params->{leg_stop_per_lot})
+            ? $params->{leg_stop_per_lot} + 0 : $LEG_STOP_PER_LOT_DEFAULT;
+        my $day_stop = looks_like_number($params->{day_stop})
+            ? $params->{day_stop} + 0 : $DAY_STOP_DEFAULT;
+
         # Strategy group header
         my $status_badge = $sstatus eq 'RUNNING' ? green("[$sstatus]") : red("[$sstatus]");
         printf "\n  %s %s  %s  dropped:%s\n",
             bold("▶ $sid"), $status_badge,
-            grey("NIFTY ${\(uc $exp_type)} ${\($exp_strike||'--')}  expiry:$CHAIN_EXPIRY"),
+            grey("NIFTY ${\(uc $exp_type)} ${\($exp_strike||'--')}  expiry:$CHAIN_EXPIRY"
+                 . "  leg_stop:${leg_stop_per_lot}/lot  day_cap:${day_stop}"),
             $sdropped;
         print $SEP, "\n";
 
@@ -394,14 +435,33 @@ while (1) {
                 ? red(sprintf('%7.2f!', $entry_px))
                 : sprintf('%8.2f', $entry_px);
             my $curr_col  = $ltp_for_pnl ? sprintf('%8.2f', $ltp_for_pnl) : grey('    --  ');
-            my $instr     = sprintf('NIFTY%s%s Jun9', $exp_strike||'????', uc($exp_type));
+            my $exp_lbl   = expiry_label($CHAIN_EXPIRY);
+            my $instr     = sprintf('NIFTY%s%s %s', $exp_strike||'????', uc($exp_type), $exp_lbl);
 
-            printf "  %-3s  %-22s  %dL/%3dq  %-13s  %-8s  %-8s  %s  %s  %-13s  %-8s  %s\n",
+            # Per-leg stop distance (open legs only).
+            # Use aggregate position lots ($lots from $pos) so the distance matches
+            # what the strategy actually monitors, not the individual order's lot count.
+            my $stop_str = grey('    --    ');
+            if (!$close_o && !$bad_fill && $ltp_for_pnl > 0 && $entry_px > 0 && $lots > 0) {
+                my $pos_qty = $lots * 65;
+                my $mtm    = ($entry_px - $ltp_for_pnl) * $pos_qty;   # +ve = profit
+                my $slimit = $leg_stop_per_lot * $lots;                 # stop budget (aggregate)
+                my $dist   = $mtm + $slimit;    # ₹ room before stop fires
+                if ($dist <= 0) {
+                    $stop_str = red(sprintf('STOP! %+.0f', $dist));
+                } elsif ($dist < $STOP_ALERT_FRAC * $slimit) {
+                    $stop_str = yel(sprintf('near  %+.0f', $dist));
+                } else {
+                    $stop_str = grey(sprintf('ok   %+.0f', $dist));
+                }
+            }
+
+            printf "  %-3s  %-22s  %dL/%3dq  %-13s  %-8s  %-8s  %s  %s  %-13s  %-8s  %-14s  %s\n",
                 $oid, $instr, $leg_lots, $leg_qty,
                 $entry_ts, $entry_col, $curr_col, $diff_str,
                 $open_pnl_str, $close_ts,
                 $close_px > 0 ? sprintf('%8.2f', $close_px) : grey('    --  '),
-                $real_pnl_str;
+                $real_pnl_str, $stop_str;
         }
 
         # Strategy totals
@@ -414,12 +474,21 @@ while (1) {
                 ? green(sprintf('%+.2f', $tot_pnl))
                 : red(sprintf('%+.2f', $tot_pnl))));
 
-        # Greeks inline under strategy
-        printf "  Δ:%-7s  Γ:%-8s  Θ:%-9s  ν:%-7s  IV:%s%%   day P&L:%s\n",
+        # Greeks + day realized vs day cap
+        my $day_cap_str = do {
+            my $pct = ($day_stop > 0 && defined $tot_real_pnl)
+                ? abs($tot_real_pnl) / $day_stop * 100 : 0;
+            my $used = fpnl($tot_real_pnl);
+            my $cap  = sprintf('cap:-%s', fp($day_stop, '%.0f'));
+            $pct >= 80 ? red("realized:$used $cap  [!!!]")
+                       : $pct >= 50 ? yel("realized:$used $cap")
+                       :              grey("realized:$used $cap");
+        };
+        printf "  Δ:%-7s  Γ:%-8s  Θ:%-9s  ν:%-7s  IV:%s%%   %s\n",
             fg($g_delta,'%+.4f'), fg($g_gamma,'%.5f'),
             fg($g_theta,'%+.2f'), fg($g_vega,'%.4f'),
             defined($g_iv) ? sprintf('%.2f',$g_iv) : '--',
-            fpnl($day_pnl);
+            $day_cap_str;
         print $SEP, "\n";
     }
 

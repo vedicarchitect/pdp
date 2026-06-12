@@ -155,6 +155,12 @@ def _merge_side(side: dict, fallback_row: dict | None, prefix: str) -> dict:
     }
 
 
+# Public re-exports: CLI commands and other consumers should import these names
+# rather than relying on the underscore-prefixed originals.
+parse_chain = _parse_chain
+spot_of = _spot_of
+
+
 class OptionsChainPoller:
     def __init__(
         self,

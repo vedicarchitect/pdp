@@ -10,7 +10,7 @@ from pdp.cli.backtest_commands import backtest
 from pdp.cli.progress.main import progress
 from pdp.cli.strategy_commands import strategy
 from pdp.db.session import get_session_maker
-from pdp.instruments.loader import refresh_instruments
+from pdp.instruments.loader import download_dhan_master, parse_dhan_csv, refresh_instruments
 from pdp.settings import get_settings
 
 
@@ -52,6 +52,42 @@ def instruments_refresh() -> None:
                 rows_seen=stats.rows_seen,
                 rows_upserted=stats.rows_upserted,
             )
+
+    asyncio.run(_run())
+
+
+@instruments.command("snapshot")
+@click.option("--date", "date_str", default=None, help="Snapshot date (YYYY-MM-DD); defaults to today.")
+@click.option("--dir", "masters_dir", default=None, help="Output dir; defaults to settings.MASTERS_DIR.")
+def instruments_snapshot(date_str: str | None, masters_dir: str | None) -> None:
+    """Download the Dhan scrip master and write today's filtered snapshot CSV.
+
+    Filtered to settings.SNAPSHOT_UNDERLYINGS (default NIFTY/BANKNIFTY/SENSEX) so historical
+    backtests can resolve expired-contract security_ids.
+    """
+    from datetime import date as _date
+    from pathlib import Path
+
+    from pdp.instruments.snapshots import create_snapshot, parse_underlyings
+
+    log = structlog.get_logger()
+    settings = get_settings()
+    snap_date = _date.fromisoformat(date_str) if date_str else _date.today()
+    out_dir = Path(masters_dir) if masters_dir else Path(settings.MASTERS_DIR)
+    underlyings = parse_underlyings(settings.SNAPSHOT_UNDERLYINGS)
+
+    async def _run() -> None:
+        raw = await download_dhan_master(settings.DHAN_SCRIPMASTER_URL)
+        rows = parse_dhan_csv(raw)
+        path, kept = create_snapshot(rows, snap_date, out_dir, underlyings)
+        log.info(
+            "instruments_snapshot_done",
+            date=snap_date.isoformat(),
+            underlyings=list(underlyings),
+            rows_seen=len(rows),
+            rows_kept=kept,
+            path=str(path),
+        )
 
     asyncio.run(_run())
 

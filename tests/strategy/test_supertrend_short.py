@@ -1,13 +1,16 @@
 """Behavioural tests for the SuperTrend short strategy.
 
-The strategy is driven with a stubbed indicator, order client, market control, and a
-monkeypatched strike resolver, plus a controllable IST clock.
+The strategy is driven with a stubbed indicator, a faithful fake order ledger (which
+mirrors the short-side weighted-average / realize-on-reduce math of the real paper
+engine so leg- and day-stop logic can be exercised), a market control exposing LTP,
+a monkeypatched strike resolver, and a controllable IST clock.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,12 +21,60 @@ from pdp.strategies.supertrend_short import SuperTrendShort
 
 
 class _Orders:
+    """Fake ledger: fills market orders synchronously and tracks net/avg/realized.
+
+    Set ``price`` (or ``price_by_sid[sid]``) to control the fill price of the next
+    order, mirroring how the paper engine would fill on the prevailing LTP.
+    """
+
     def __init__(self):
         self.calls: list[dict] = []
+        self.price: Decimal = Decimal("100")
+        self.price_by_sid: dict[str, Decimal] = {}
+        self._pos: dict[str, dict] = {}  # sid -> {net, avg, realized}
 
-    async def place_order(self, **kw):
-        self.calls.append(kw)
+    def _p(self, sid: str) -> dict:
+        return self._pos.setdefault(
+            sid, {"net": 0, "avg": Decimal("0"), "realized": Decimal("0")}
+        )
+
+    async def place_order(self, *, security_id, side, qty, **kw):
+        self.calls.append({"security_id": security_id, "side": side, "qty": qty, **kw})
+        px = self.price_by_sid.get(security_id, self.price)
+        self._apply_fill(security_id, str(side), int(qty), Decimal(str(px)))
         return SimpleNamespace(id=len(self.calls), status="OPEN")
+
+    def _apply_fill(self, sid: str, side: str, qty: int, fill: Decimal) -> None:
+        p = self._p(sid)
+        signed = qty if side == "BUY" else -qty
+        old_qty, old_avg = p["net"], p["avg"]
+        new_qty = old_qty + signed
+        if new_qty == 0:
+            p["realized"] += (fill - old_avg) * Decimal(old_qty)
+            p["avg"] = Decimal("0")
+        elif (old_qty >= 0 and signed > 0) or (old_qty <= 0 and signed < 0):
+            total = old_avg * Decimal(abs(old_qty)) + fill * Decimal(qty)
+            p["avg"] = total / Decimal(abs(new_qty))
+        else:
+            reduce_qty = min(abs(signed), abs(old_qty))
+            if old_qty > 0:
+                p["realized"] += (fill - old_avg) * Decimal(reduce_qty)
+            else:
+                p["realized"] += (old_avg - fill) * Decimal(reduce_qty)
+        p["net"] = new_qty
+
+    async def cancel_open_entry_orders(self, security_id):
+        return []
+
+    async def get_net_qty(self, security_id):
+        return self._p(security_id)["net"]
+
+    async def get_position(self, security_id):
+        p = self._p(security_id)
+        return p["net"], p["avg"]
+
+    async def get_realized_pnl(self, security_id):
+        return self._p(security_id)["realized"]
 
 
 class _Indicators:
@@ -38,6 +89,7 @@ class _Market:
     def __init__(self):
         self.subs: list[tuple[str, str]] = []
         self.unsubs: list[tuple[str, str]] = []
+        self.ltp_by_sid: dict[str, Decimal | None] = {}
 
     async def subscribe(self, security_id, segment):
         self.subs.append((security_id, segment))
@@ -45,6 +97,9 @@ class _Market:
 
     async def unsubscribe(self, security_id, segment):
         self.unsubs.append((security_id, segment))
+
+    async def ltp(self, security_id):
+        return self.ltp_by_sid.get(security_id)
 
 
 class _SessionMaker:
@@ -77,12 +132,14 @@ def _ctx(orders, indicators, market):
             "max_lots": 5,
             "start_ist": "09:30",
             "square_off_ist": "15:10",
+            "leg_stop_per_lot": 1000,
+            "day_stop": 10000,
         },
     )
 
 
-def _bar(i: int, close: float = 22500.0) -> BarClosed:
-    base = datetime(2026, 6, 8, 4, 0, tzinfo=UTC)
+def _bar(i: int, close: float = 22500.0, day: int = 8) -> BarClosed:
+    base = datetime(2026, 6, day, 4, 0, tzinfo=UTC)
     return BarClosed(
         security_id="13",
         timeframe="5m",
@@ -109,8 +166,22 @@ def patched_resolver(monkeypatch):
     monkeypatch.setattr(mod, "resolve_otm_option", fake_resolve)
 
 
-def _set_clock(monkeypatch, hh, mm):
-    monkeypatch.setattr(mod, "_now_ist", lambda: time(hh, mm))
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _bar_ist(hh: int, mm: int, close: float = 22500.0, day: int = 8) -> BarClosed:
+    """Bar timestamped at a specific IST time (the strategy now gates on bar time)."""
+    return BarClosed(
+        security_id="13",
+        timeframe="5m",
+        bar_time=datetime(2026, 6, day, hh, mm, tzinfo=_IST),
+        open=Decimal(str(close)),
+        high=Decimal(str(close + 5)),
+        low=Decimal(str(close - 5)),
+        close=Decimal(str(close)),
+        volume=0,
+        oi=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -120,8 +191,7 @@ async def test_no_entry_before_start(patched_resolver, monkeypatch):
     strat = SuperTrendShort()
     await strat.on_init(_ctx(orders, ind, market))
 
-    _set_clock(monkeypatch, 9, 0)  # before 09:30
-    await strat.on_bar(_bar(1))
+    await strat.on_bar(_bar_ist(9, 0))  # bar timestamped before 09:30 IST
 
     assert orders.calls == []  # no trades before the window
 
@@ -133,7 +203,6 @@ async def test_opens_short_pe_on_uptrend(patched_resolver, monkeypatch):
     strat = SuperTrendShort()
     await strat.on_init(_ctx(orders, ind, market))
 
-    _set_clock(monkeypatch, 9, 35)
     await strat.on_bar(_bar(1))
 
     assert len(orders.calls) == 1
@@ -150,7 +219,6 @@ async def test_scale_in_up_to_cap(patched_resolver, monkeypatch):
     ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
     strat = SuperTrendShort()
     await strat.on_init(_ctx(orders, ind, market))
-    _set_clock(monkeypatch, 9, 35)
 
     for i in range(1, 8):  # 1 open (2 lots) + adds; cap at 5 lots
         await strat.on_bar(_bar(i))
@@ -167,7 +235,6 @@ async def test_flip_closes_and_reverses(patched_resolver, monkeypatch):
     ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
     strat = SuperTrendShort()
     await strat.on_init(_ctx(orders, ind, market))
-    _set_clock(monkeypatch, 9, 35)
 
     await strat.on_bar(_bar(1))  # open PE
     ind.state = SuperTrendState(direction=DOWN, value=Decimal("0"), flipped=True)
@@ -187,15 +254,128 @@ async def test_square_off_flattens_and_stops(patched_resolver, monkeypatch):
     strat = SuperTrendShort()
     await strat.on_init(_ctx(orders, ind, market))
 
-    _set_clock(monkeypatch, 9, 35)
-    await strat.on_bar(_bar(1))  # open PE
+    await strat.on_bar(_bar(1))  # open PE (09:35 IST)
     assert strat._current is not None
 
-    _set_clock(monkeypatch, 15, 12)  # past square-off
-    await strat.on_bar(_bar(2))  # close all, done for day
+    await strat.on_bar(_bar_ist(15, 12))  # bar past square-off -> close all, done
     assert strat._current is None
     assert strat._done_for_day is True
 
     n_before = len(orders.calls)
-    await strat.on_bar(_bar(3))  # no more trading
+    await strat.on_bar(_bar_ist(15, 13))  # no more trading
     assert len(orders.calls) == n_before
+
+
+# --------------------------------------------------------------------------- #
+# Risk controls                                                               #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_leg_stop_fires_and_no_reentry_same_bar(patched_resolver, monkeypatch):
+    orders, ind, market = _Orders(), _Indicators(), _Market()
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    strat = SuperTrendShort()
+    await strat.on_init(_ctx(orders, ind, market))
+
+    orders.price = Decimal("100")  # open PE at 100, 2 lots = 130 qty
+    await strat.on_bar(_bar(1))
+    assert strat._current is not None and strat._current["option_type"] == "PE"
+
+    # Price rises to 120: MTM = (100-120)*130 = -2600 <= -(1000*2) -> stop.
+    market.ltp_by_sid["OPT_PE"] = Decimal("120")
+    n_before = len(orders.calls)
+    await strat.on_bar(_bar(2))
+
+    buys = [c for c in orders.calls if c["side"] == "BUY"]
+    assert len(buys) == 1 and buys[0]["security_id"] == "OPT_PE"  # leg bought back
+    assert strat._current is None  # closed
+    # No new entry on the stop bar: exactly one new order (the cover) since.
+    assert len(orders.calls) == n_before + 1
+
+
+@pytest.mark.asyncio
+async def test_leg_stop_holds_below_threshold(patched_resolver, monkeypatch):
+    orders, ind, market = _Orders(), _Indicators(), _Market()
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    strat = SuperTrendShort()
+    await strat.on_init(_ctx(orders, ind, market))
+
+    orders.price = Decimal("100")
+    await strat.on_bar(_bar(1))  # open PE, 2 lots
+
+    # Price 110: MTM = (100-110)*130 = -1300 > -2000 -> no stop; scales instead.
+    market.ltp_by_sid["OPT_PE"] = Decimal("110")
+    await strat.on_bar(_bar(2))
+
+    assert strat._current is not None and strat._current["option_type"] == "PE"
+    assert not any(c["side"] == "BUY" for c in orders.calls)
+    assert strat._current["lots"] == 3  # scaled in, not stopped
+
+
+@pytest.mark.asyncio
+async def test_zero_ltp_does_not_trip_stop(patched_resolver, monkeypatch):
+    orders, ind, market = _Orders(), _Indicators(), _Market()
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    strat = SuperTrendShort()
+    await strat.on_init(_ctx(orders, ind, market))
+
+    orders.price = Decimal("100")
+    await strat.on_bar(_bar(1))  # open PE
+
+    market.ltp_by_sid["OPT_PE"] = None  # stale/missing quote
+    await strat.on_bar(_bar(2))
+    assert not any(c["side"] == "BUY" for c in orders.calls)  # no stop on bogus price
+    assert strat._current is not None
+
+
+@pytest.mark.asyncio
+async def test_day_stop_latches_and_blocks_entries(patched_resolver, monkeypatch):
+    orders, ind, market = _Orders(), _Indicators(), _Market()
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    strat = SuperTrendShort()
+    await strat.on_init(_ctx(orders, ind, market))
+
+    orders.price = Decimal("100")
+    await strat.on_bar(_bar(1))  # open PE at 100
+
+    # Flip with the cover filling at 200: realized = (200-100)*-130 = -13000 <= -10000.
+    orders.price = Decimal("200")
+    ind.state = SuperTrendState(direction=DOWN, value=Decimal("0"), flipped=True)
+    await strat.on_bar(_bar(2))  # close PE (big loss), open CE
+
+    # Next bar: day cap already breached -> flatten and stop, no further entries.
+    n_before = len(orders.calls)
+    await strat.on_bar(_bar(3))
+    assert strat._done_for_day is True
+    assert strat._current is None
+
+    n_after_stop = len(orders.calls)
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    await strat.on_bar(_bar(4))
+    assert len(orders.calls) == n_after_stop  # no new entries after the day stop
+    assert n_after_stop >= n_before  # at most the flatten cover
+
+
+@pytest.mark.asyncio
+async def test_day_accumulator_resets_next_day(patched_resolver, monkeypatch):
+    orders, ind, market = _Orders(), _Indicators(), _Market()
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    strat = SuperTrendShort()
+    await strat.on_init(_ctx(orders, ind, market))
+
+    # Day 1: realize a big loss and hit the day stop.
+    orders.price = Decimal("100")
+    await strat.on_bar(_bar(1, day=8))
+    orders.price = Decimal("200")
+    ind.state = SuperTrendState(direction=DOWN, value=Decimal("0"), flipped=True)
+    await strat.on_bar(_bar(2, day=8))
+    await strat.on_bar(_bar(3, day=8))
+    assert strat._done_for_day is True
+
+    # Day 2: a bar on the next IST day clears the latch and the accumulator.
+    orders.price = Decimal("100")
+    ind.state = SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
+    await strat.on_bar(_bar(1, day=9))
+    assert strat._done_for_day is False
+    assert strat._touched == {"OPT_PE"}  # baselines reset; fresh touch today
+    assert strat._current is not None and strat._current["option_type"] == "PE"

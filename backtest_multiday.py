@@ -22,6 +22,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--days",  type=int,  default=7)
 ap.add_argument("--start", type=str,  default=None,
                 help="End date YYYY-MM-DD (default: 2026-06-08)")
+ap.add_argument("--native5m", action="store_true", default=False,
+                help="Force native 5m bars (skip 1m resample); used for resample parity check")
 args = ap.parse_args()
 
 # ── Strategy constants ────────────────────────────────────────────────────────
@@ -39,12 +41,20 @@ SQOFF_H, SQOFF_M  = 15, 10
 LEG_STOP_PER_LOT = 1_000.0  # close if MTM loss >= this × current lots
 DAY_STOP_LOSS    = 10_000.0  # no more trades if realized day loss >= this
 IST = timedelta(hours=5, minutes=30)
+TF_MIN = 5   # signal timeframe in minutes; source bars are fetched at 1m and resampled
 
 # ── Imports ───────────────────────────────────────────────────────────────────
+from pathlib import Path
 from pymongo import MongoClient
 import psycopg
 from dhanhq import DhanContext, dhanhq
 from pdp.indicators.supertrend import SuperTrendTracker
+from pdp.instruments.snapshots import load_master_for_date
+from pdp.backtest.resample import (
+    resample_data_dict, resample_mongo_bars, resample_ohlcv,
+)
+
+_MASTERS_DIR = Path(os.environ.get("MASTERS_DIR", "data/masters"))
 
 mdb = MongoClient(os.environ.get("MONGO_URI", "mongodb://localhost:27017"))[
     os.environ.get("MONGO_DB_NAME", "pdp")]
@@ -79,17 +89,65 @@ def price_at(bars, target, prefer="open"):
     return best[1] if prefer == "open" else best[4]
 
 # ── Instrument / bar caches ───────────────────────────────────────────────────
-_inst:  dict[str, dict]   = {}
+_inst:  dict[tuple, dict] = {}
 _bars:  dict[tuple, list] = {}
+_snap:  dict[date, list | None] = {}
 
-def inst_map(expiry_str):
-    if expiry_str not in _inst:
-        cur = pg.execute("SELECT security_id,strike,option_type FROM instruments "
-                         "WHERE underlying='NIFTY' AND expiry=%s", (expiry_str,))
-        _inst[expiry_str] = {(int(r[1]), r[2]): int(r[0]) for r in cur.fetchall()}
-    return _inst[expiry_str]
+def _snapshot_nifty(trade_date: date | None):
+    """NIFTY rows from the date's instrument snapshot (latest ≤ trade_date), or None.
+
+    Lets the backtest resolve the expiry/strike/security_id that were active on a
+    historical date instead of relying on the live (currently-active) instruments table.
+    """
+    if trade_date is None:
+        return None
+    if trade_date in _snap:
+        return _snap[trade_date]
+    try:
+        rows = load_master_for_date(trade_date, _MASTERS_DIR)
+    except FileNotFoundError:
+        _snap[trade_date] = None
+        return None
+    nifty = [r for r in rows if (r.get("underlying") or "").upper() == "NIFTY"]
+    _snap[trade_date] = nifty or None
+    return _snap[trade_date]
+
+def inst_map(expiry_str, trade_date: date | None = None):
+    key = (expiry_str, trade_date)
+    if key in _inst:
+        return _inst[key]
+    # Snapshot-first: build the (strike, option_type) -> security_id map as of the date.
+    snap = _snapshot_nifty(trade_date)
+    if snap:
+        m = {}
+        for r in snap:
+            if r.get("expiry") != expiry_str:
+                continue
+            ot = (r.get("option_type") or "").upper()
+            stk = r.get("strike") or ""
+            if ot not in ("CE", "PE") or stk == "":
+                continue
+            try:
+                m[(int(float(stk)), ot)] = int(r["security_id"])
+            except (ValueError, TypeError):
+                continue
+        if m:
+            _inst[key] = m
+            return m
+    # Fallback: the live instruments table.
+    cur = pg.execute("SELECT security_id,strike,option_type FROM instruments "
+                     "WHERE underlying='NIFTY' AND expiry=%s", (expiry_str,))
+    _inst[key] = {(int(r[1]), r[2]): int(r[0]) for r in cur.fetchall()}
+    return _inst[key]
 
 def active_expiry(d: date):
+    # Snapshot-first: nearest expiry >= d among the date's NIFTY contracts.
+    snap = _snapshot_nifty(d)
+    if snap:
+        exps = sorted({r["expiry"] for r in snap
+                       if r.get("expiry") and r["expiry"] >= d.isoformat()})
+        if exps:
+            return exps[0]
     cur = pg.execute("SELECT DISTINCT expiry FROM instruments "
                      "WHERE underlying='NIFTY' AND expiry>=%s ORDER BY expiry LIMIT 1",
                      (d.isoformat(),))
@@ -122,7 +180,7 @@ def fetch_bars(sid, date_str, seg, itype):
     try:
         r = dhan.intraday_minute_data(security_id=str(sid), exchange_segment=seg,
                                       instrument_type=itype, from_date=date_str,
-                                      to_date=date_str, interval=5)
+                                      to_date=date_str, interval=1)
         time.sleep(0.4)
     except Exception as e:
         _bars[k] = []; return []
@@ -133,7 +191,8 @@ def fetch_bars(sid, date_str, seg, itype):
         data = data["data"]
     if not (isinstance(data, dict) and "open" in data):
         _bars[k] = []; return []
-    _bars[k] = _parse_dhan_bars(data)
+    # Source 1-minute bars and resample to the signal timeframe (matches live aggregation).
+    _bars[k] = resample_ohlcv(_parse_dhan_bars(data), TF_MIN)
     return _bars[k]
 
 def fetch_nifty(date_str):
@@ -146,7 +205,11 @@ def next_weekly_expiry(d: date) -> date:
     days_ahead = (NIFTY_EXPIRY_WEEKDAY - d.weekday()) % 7
     return d + timedelta(days=days_ahead)
 
-def expiry_in_db(expiry_str: str) -> bool:
+def expiry_available(expiry_str: str, trade_date: date | None = None) -> bool:
+    """True if the expiry's contracts are resolvable — snapshot first, then live table."""
+    snap = _snapshot_nifty(trade_date)
+    if snap and any(r.get("expiry") == expiry_str for r in snap):
+        return True
     cur = pg.execute("SELECT 1 FROM instruments WHERE underlying='NIFTY' AND expiry=%s LIMIT 1",
                      (expiry_str,))
     return cur.fetchone() is not None
@@ -211,7 +274,7 @@ def fetch_opt_expired(opt_type: str, trade_ds: str) -> list:
             required_data=["open", "high", "low", "close", "volume", "oi", "iv"],
             from_date=trade_ds,
             to_date=trade_ds,
-            interval=5,
+            interval=1,
         )
         time.sleep(0.4)
     except Exception:
@@ -229,6 +292,9 @@ def fetch_opt_expired(opt_type: str, trade_ds: str) -> list:
         data = data["data"]
     if not (isinstance(data, dict) and "open" in data):
         _bars[k] = []; return []
+    # Source 1-minute bars and resample to the signal timeframe; persist the resampled
+    # bars so the warehouse stays at the signal timeframe.
+    data = resample_data_dict(data, TF_MIN)
     _bars[k] = _parse_dhan_bars(data)
     _persist_expired(opt_type, data)
     return _bars[k]
@@ -281,9 +347,10 @@ class Position:
     opt_type:   str
     strike:     int
     sid:        int
-    total_qty:  int   = 0
-    total_cost: float = 0.0
-    lots:       int   = 0
+    total_qty:  int      = 0
+    total_cost: float    = 0.0
+    lots:       int      = 0
+    entry_ist:  datetime | None = None
 
     def add(self, qty, px):
         self.total_qty  += qty
@@ -294,6 +361,19 @@ class Position:
     def avg_entry(self): return self.total_cost / self.total_qty if self.total_qty else 0.0
 
     def mtm(self, current_px): return (self.avg_entry - current_px) * self.total_qty
+
+# ── Per-leg summary record ────────────────────────────────────────────────────
+@dataclass
+class LegRecord:
+    opt_type:  str
+    strike:    int
+    entry_ist: datetime
+    exit_ist:  datetime
+    lots:      int
+    avg_entry: float
+    exit_px:   float
+    leg_pnl:   float
+    reason:    str
 
 # ── Trade record ──────────────────────────────────────────────────────────────
 @dataclass
@@ -317,14 +397,22 @@ def simulate_day(trade_date: date):
     st_ut = datetime(trade_date.year, trade_date.month, trade_date.day, 3, 30, tzinfo=timezone.utc)
     en_ut = datetime(trade_date.year, trade_date.month, trade_date.day, 10, 5,  tzinfo=timezone.utc)
 
-    # NIFTY bars
-    raw = list(mdb["market_bars"].find(
-        {"metadata.security_id": "13", "metadata.timeframe": "5m",
+    # NIFTY bars — prefer 1m from Mongo and resample to the signal timeframe (matches
+    # the live aggregator); fall back to native 5m, then to the Dhan API (1m + resample).
+    # --native5m skips the 1m path to allow parity comparison against native 5m data.
+    raw1 = [] if args.native5m else list(mdb["market_bars"].find(
+        {"metadata.security_id": "13", "metadata.timeframe": "1m",
          "ts": {"$gte": st_ut, "$lte": en_ut}}).sort("ts", 1))
-    seen, nifty_bars = set(), []
-    for b in raw:
-        k = b["ts"].replace(second=0, microsecond=0)
-        if k not in seen: seen.add(k); nifty_bars.append(b)
+    if raw1:
+        nifty_bars = resample_mongo_bars(raw1, TF_MIN)
+    else:
+        raw5 = list(mdb["market_bars"].find(
+            {"metadata.security_id": "13", "metadata.timeframe": "5m",
+             "ts": {"$gte": st_ut, "$lte": en_ut}}).sort("ts", 1))
+        seen, nifty_bars = set(), []
+        for b in raw5:
+            k = b["ts"].replace(second=0, microsecond=0)
+            if k not in seen: seen.add(k); nifty_bars.append(b)
 
     if not nifty_bars:
         dhan_bars = fetch_nifty(ds)
@@ -337,14 +425,14 @@ def simulate_day(trade_date: date):
     nifty_close = float(nifty_bars[-1]["close"])
 
     correct_exp  = next_weekly_expiry(trade_date).isoformat()
-    use_expired  = not expiry_in_db(correct_exp)
+    use_expired  = not expiry_available(correct_exp, trade_date)
     if use_expired:
         exp  = correct_exp
         imap = {}
     else:
         exp  = active_expiry(trade_date)
         if not exp: return None
-        imap = inst_map(exp)
+        imap = inst_map(exp, trade_date)
 
     # Precompute ST series
     tracker = SuperTrendTracker(period=3, multiplier=1)
@@ -367,8 +455,9 @@ def simulate_day(trade_date: date):
             fetch_opt(sid, ds)
 
     # ── Bar-by-bar simulation ──────────────────────────────────────────────────
-    pos:       Position | None = None
-    trades:    list[Trade]     = []
+    pos:         Position | None  = None
+    trades:      list[Trade]      = []
+    leg_records: list[LegRecord]  = []
     day_pnl    = 0.0
     done       = False
     stop_reason = ""
@@ -389,6 +478,18 @@ def simulate_day(trade_date: date):
             leg_pnl=leg_pnl,
             day_pnl=day_pnl,
         ))
+        if pos.entry_ist is not None:
+            leg_records.append(LegRecord(
+                opt_type=pos.opt_type,
+                strike=pos.strike,
+                entry_ist=pos.entry_ist,
+                exit_ist=ist_dt,
+                lots=pos.lots,
+                avg_entry=pos.avg_entry,
+                exit_px=close_px,
+                leg_pnl=leg_pnl,
+                reason=reason,
+            ))
         if day_pnl <= -DAY_STOP_LOSS and not done:
             done = True
             stop_reason = f"day_stop ({day_pnl:+.0f})"
@@ -446,7 +547,7 @@ def simulate_day(trade_date: date):
             # New entry
             entry_px = price_at(opt_bars_n, ist_dt, prefer="open")
             if entry_px:
-                pos = Position(opt_type=desired, strike=k[0], sid=sid)
+                pos = Position(opt_type=desired, strike=k[0], sid=sid, entry_ist=ist_dt)
                 pos.add(START_LOTS * LOT, entry_px)
                 trades.append(Trade(
                     side="SELL", opt_type=desired, strike=k[0],
@@ -487,6 +588,7 @@ def simulate_day(trade_date: date):
         "nifty_close":  nifty_close,
         "nifty_chg":    nifty_close - nifty_open,
         "trades":       trades,
+        "leg_records":  leg_records,
         "day_pnl":      day_pnl,
         "charges":      charges,
         "realized":     day_pnl - charges,
@@ -527,6 +629,32 @@ def print_day(r):
     print(f"  Net premium: {r['day_pnl']:>+10.2f}   "
           f"Charges: -{r['charges']:.2f}   "
           f"Realized: {r['realized']:>+10.2f}")
+
+    leg_records: list[LegRecord] = r.get("leg_records", [])
+    if leg_records:
+        LW = 90
+        print()
+        print(f"  LEG SUMMARY")
+        print(f"  {'#':>3}  {'Type':<2} {'Strike':>7}  {'Entry':>5}  {'Exit':>5}  "
+              f"{'Lots':>4}  {'AvgEntry':>9}  {'Exit Rs':>8}  {'Leg P&L':>10}  Reason")
+        print(f"  {'-'*3}  {'-'*2} {'-'*7}  {'-'*5}  {'-'*5}  "
+              f"{'-'*4}  {'-'*9}  {'-'*8}  {'-'*10}  ------")
+        wins = losses = 0
+        for i, lr in enumerate(leg_records, 1):
+            pnl_s = f"{lr.leg_pnl:>+10.2f}"
+            print(f"  {i:>3}  {lr.opt_type:<2} {lr.strike:>7}  "
+                  f"{lr.entry_ist.strftime('%H:%M'):>5}  "
+                  f"{lr.exit_ist.strftime('%H:%M'):>5}  "
+                  f"{lr.lots:>4}L  {lr.avg_entry:>9.2f}  "
+                  f"{lr.exit_px:>8.2f}  {pnl_s}  {lr.reason}")
+            if lr.leg_pnl >= 0:
+                wins += 1
+            else:
+                losses += 1
+        total_leg_pnl = sum(lr.leg_pnl for lr in leg_records)
+        print(f"  {'-'*LW}")
+        print(f"  {len(leg_records)} leg(s)  |  Total P&L: {total_leg_pnl:>+.2f}  |  "
+              f"Win: {wins}  Loss: {losses}")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 end_date = date.fromisoformat(args.start) if args.start else date(2026, 6, 8)

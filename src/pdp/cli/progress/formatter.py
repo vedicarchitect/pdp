@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 try:
     from rich.console import Console
@@ -36,7 +39,7 @@ def print_table(title: str, headers: list[str], rows: list[list[str]], format_ty
 
 def format_timestamp(ts: datetime | None = None) -> str:
     if ts is None:
-        ts = datetime.now()
+        ts = datetime.now(tz=_IST)
     return ts.isoformat()
 
 
