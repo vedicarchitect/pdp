@@ -9,7 +9,7 @@ no DB is needed. This validates: signal -> strategy -> order -> fill -> journal.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -22,18 +22,55 @@ from pdp.market.bars import BarClosed
 from pdp.orders.ws import OrdersHub
 from pdp.strategy.host import StrategyHost
 
+# Column-key -> ledger-field mapping for the fake position reads.
+_COL_FIELD = {"net_qty": "net", "avg_price": "avg", "realized_pnl": "realized"}
+
+
+def _default_pos() -> dict:
+    return {"net": 0, "avg": Decimal("0"), "realized": Decimal("0")}
+
 
 class _Result:
+    def __init__(self, row=None) -> None:
+        self._row = row
+
+    def first(self):
+        return self._row
+
     def scalar_one(self):
         return 0
 
     def scalar_one_or_none(self):
         return None
 
+    def all(self):
+        return [] if self._row is None else [self._row]
+
+    def scalars(self):
+        return self  # allows result.scalars().all() → [] when no match
+
 
 class _FakeSession:
-    async def execute(self, *a, **k):
-        return _Result()
+    """Answers the strategy's position reads from a shared ledger.
+
+    Introspects the SQLAlchemy statement's selected columns + bound ``security_id`` so
+    ``get_net_qty`` / ``get_position`` / ``get_realized_pnl`` see real fill state.
+    """
+
+    def __init__(self, ledger: dict[str, dict]) -> None:
+        self._ledger = ledger
+
+    async def execute(self, stmt, *a, **k):
+        try:
+            cols = [c.key for c in stmt.selected_columns]
+            params = stmt.compile().params
+        except Exception:
+            return _Result(None)
+        sid = next((v for key, v in params.items() if "security_id" in key), None)
+        if sid is None or not all(c in _COL_FIELD for c in cols):
+            return _Result(None)  # e.g. the open-order count query
+        pos = self._ledger.get(sid, _default_pos())
+        return _Result(tuple(pos[_COL_FIELD[c]] for c in cols))
 
     async def __aenter__(self):
         return self
@@ -43,23 +80,53 @@ class _FakeSession:
 
 
 class _FakeSessionMaker:
+    def __init__(self, ledger: dict[str, dict]) -> None:
+        self._ledger = ledger
+
     def __call__(self):
-        return _FakeSession()
+        return _FakeSession(self._ledger)
 
 
 class _FakeRouter:
     """Stands in for OrderRouter+PaperBroker: records orders and simulates fills.
 
     SELL fills at 100, BUY (cover) fills at 60 — so any closed round-trip is profitable.
+    Maintains a shared ``ledger`` (net/avg/realized per security) using the same
+    short-side math as the real paper engine, so the strategy's position reads agree.
     """
 
     def __init__(self, hub: OrdersHub) -> None:
         self._hub = hub
         self.orders: list[dict] = []
+        self.ledger: dict[str, dict] = {}
+
+    def _fill_ledger(self, sid: str, side: str, qty: int, fill: Decimal) -> None:
+        p = self.ledger.setdefault(sid, _default_pos())
+        signed = qty if side == "BUY" else -qty
+        old_qty, old_avg = p["net"], p["avg"]
+        new_qty = old_qty + signed
+        if new_qty == 0:
+            p["realized"] += (fill - old_avg) * Decimal(old_qty)
+            p["avg"] = Decimal("0")
+        elif (old_qty >= 0 and signed > 0) or (old_qty <= 0 and signed < 0):
+            total = old_avg * Decimal(abs(old_qty)) + fill * Decimal(qty)
+            p["avg"] = total / Decimal(abs(new_qty))
+        else:
+            reduce_qty = min(abs(signed), abs(old_qty))
+            if old_qty > 0:
+                p["realized"] += (fill - old_avg) * Decimal(reduce_qty)
+            else:
+                p["realized"] += (old_avg - fill) * Decimal(reduce_qty)
+        p["net"] = new_qty
+
+    async def cancel_open_entry_orders(self, session, security_id, strategy_id):
+        return []
 
     async def place_order(self, session, *, security_id, side, qty, strategy_id, **kw):
         oid = len(self.orders) + 1
         self.orders.append({"security_id": security_id, "side": side, "qty": qty})
+        fill = Decimal("100") if side == "SELL" else Decimal("60")
+        self._fill_ledger(security_id, str(side), int(qty), fill)
         self._hub.publish(
             "trade",
             {
@@ -68,7 +135,7 @@ class _FakeRouter:
                 "security_id": security_id,
                 "side": side,
                 "qty": qty,
-                "fill_price": "100" if side == "SELL" else "60",
+                "fill_price": str(fill),
                 "charges": "5",
                 "filled_at": datetime.now(UTC).isoformat(),
                 "strategy_id": strategy_id,
@@ -104,8 +171,8 @@ async def test_pipeline_signal_to_journal(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(strat_mod, "resolve_otm_option", fake_resolve)
-    # Inside the trading window (09:30 - 15:10 IST).
-    monkeypatch.setattr(strat_mod, "_now_ist", lambda: time(10, 0))
+    # Bars are timestamped 09:30-10:25 IST (UTC base 04:00), inside the trading window;
+    # the strategy gates on bar time, so no clock patching is needed.
 
     # Strategy YAML.
     (tmp_path / "st_smoke.yaml").write_text(
@@ -136,7 +203,7 @@ async def test_pipeline_signal_to_journal(tmp_path, monkeypatch):
     journal = JournalService(mongo_db=None)
     journal.subscribe_fill_events(hub)
 
-    host = StrategyHost(tmp_path, router, _FakeSessionMaker())
+    host = StrategyHost(tmp_path, router, _FakeSessionMaker(router.ledger))
     host.set_indicator_engine(engine)
     host.set_market_adapter(None)  # no live feed -> ctx.market is a safe no-op
     host.load_registry()

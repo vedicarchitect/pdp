@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from pdp.orders.models import Order, OrderStatus, OrderType, Position, Product, Side
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from pdp.indicators.engine import IndicatorEngine
@@ -45,9 +46,11 @@ class MarketControl:
         self,
         adapter: DhanTickerAdapter | None,
         session_maker: async_sessionmaker[AsyncSession] | None,
+        redis: Redis | None = None,
     ) -> None:
         self._adapter = adapter
         self._session_maker = session_maker
+        self._redis = redis
 
     async def subscribe(self, security_id: str, segment: str) -> bool:
         if self._adapter is None or self._session_maker is None:
@@ -60,6 +63,23 @@ class MarketControl:
             return
         async with self._session_maker() as session:
             await self._adapter.unsubscribe(security_id, segment, session)
+
+    async def ltp(self, security_id: str) -> Decimal | None:
+        """Latest traded price from the Redis hot cache, or None if unavailable.
+
+        Returns None for a missing key or a non-positive price so callers (e.g. a
+        stop check) never act on a stale/zero quote.
+        """
+        if self._redis is None:
+            return None
+        raw = await self._redis.get(f"ltp:{security_id}")
+        if raw is None:
+            return None
+        try:
+            val = Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return None
+        return val if val > 0 else None
 
 
 @dataclass
@@ -138,6 +158,70 @@ class StrategyOrderClient:
             )
             row = result.first()
             return int(row[0]) if row else 0
+
+    async def get_position(self, security_id: str) -> tuple[int, Decimal]:
+        """Return ``(net_qty, avg_price)`` from the positions table (``(0, 0)`` if no row).
+
+        ``avg_price`` is the weighted-average fill price (a positive number even for a
+        short, per the ledger's convention), suitable for mark-to-market.
+        """
+        async with self._session_maker() as session:
+            result = await session.execute(
+                select(Position.net_qty, Position.avg_price).where(
+                    Position.security_id == security_id
+                )
+            )
+            row = result.first()
+            if row is None:
+                return 0, Decimal("0")
+            return int(row[0]), Decimal(str(row[1]))
+
+    async def get_realized_pnl(self, security_id: str) -> Decimal:
+        """Return cumulative realized P&L from the positions table (0 if no row)."""
+        async with self._session_maker() as session:
+            result = await session.execute(
+                select(Position.realized_pnl).where(Position.security_id == security_id)
+            )
+            row = result.first()
+            return Decimal(str(row[0])) if row else Decimal("0")
+
+    async def get_realized_pnl_per_security(self) -> dict[str, Decimal]:
+        """Realized P&L from positions for every security this strategy has filled orders on."""
+        async with self._session_maker() as session:
+            subq = (
+                select(Order.security_id)
+                .distinct()
+                .where(
+                    Order.strategy_id == self._strategy_id,
+                    Order.status == OrderStatus.FILLED,
+                )
+            )
+            result = await session.execute(
+                select(Position.security_id, Position.realized_pnl).where(
+                    Position.security_id.in_(subq)
+                )
+            )
+            return {row[0]: Decimal(str(row[1])) for row in result.all()}
+
+    async def get_positions(self) -> list[Position]:
+        """Positions with net_qty != 0 for securities this strategy has traded."""
+        async with self._session_maker() as session:
+            subq = (
+                select(Order.security_id)
+                .distinct()
+                .where(Order.strategy_id == self._strategy_id)
+            )
+            result = await session.execute(
+                select(Position).where(
+                    Position.security_id.in_(subq),
+                    Position.net_qty != 0,
+                )
+            )
+            return list(result.scalars().all())
+
+    @property
+    def strategy_id(self) -> str:
+        return self._strategy_id
 
     async def _check_risk(self, session: AsyncSession) -> None:
         open_count = await self._count_open_orders(session)
