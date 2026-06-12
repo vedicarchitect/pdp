@@ -36,7 +36,7 @@ function groupPositions(positions: Position[]): StrategyGroup[] {
   }))
 }
 
-function LegRow({ pos }: { pos: Position }) {
+const LegRow = React.memo(function LegRow({ pos }: { pos: Position }) {
   const totalPnl = pos.realized_pnl + pos.unrealized_pnl
   return (
     <tr className="bg-gray-850 border-t border-gray-800 text-xs text-gray-400">
@@ -51,17 +51,30 @@ function LegRow({ pos }: { pos: Position }) {
       <td className={`py-1.5 text-right font-mono ${pnlColor(totalPnl)}`}>{fmt(totalPnl)}</td>
     </tr>
   )
-}
+}, (prevProps, nextProps) => {
+  return prevProps.pos.ltp === nextProps.pos.ltp &&
+         prevProps.pos.realized_pnl === nextProps.pos.realized_pnl &&
+         prevProps.pos.unrealized_pnl === nextProps.pos.unrealized_pnl &&
+         prevProps.pos.net_qty === nextProps.pos.net_qty &&
+         prevProps.pos.avg_price === nextProps.pos.avg_price &&
+         prevProps.pos.security_id === nextProps.pos.security_id &&
+         prevProps.pos.delta === nextProps.pos.delta &&
+         prevProps.pos.gamma === nextProps.pos.gamma &&
+         prevProps.pos.theta === nextProps.pos.theta &&
+         prevProps.pos.vega === nextProps.pos.vega
+})
 
-function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expanded: boolean; onToggle: () => void }) {
+const StrategyRow = React.memo(function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expanded: boolean; onToggle: (id: string) => void }) {
+  const handleToggle = () => onToggle(group.strategy_id)
+
   return (
     <tr
       className="border-t border-gray-700 cursor-pointer hover:bg-gray-800 transition-colors focus-visible:outline-none focus-visible:bg-gray-700"
-      onClick={onToggle}
+      onClick={handleToggle}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          onToggle()
+          handleToggle()
         }
       }}
       tabIndex={0}
@@ -82,7 +95,16 @@ function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expa
       <td className={`py-2 text-right font-mono font-semibold ${pnlColor(group.total_pnl)}`}>{fmt(group.total_pnl)}</td>
     </tr>
   )
-}
+}, (prevProps, nextProps) => {
+  return prevProps.expanded === nextProps.expanded &&
+         prevProps.onToggle === nextProps.onToggle &&
+         prevProps.group.total_pnl === nextProps.group.total_pnl &&
+         prevProps.group.total_delta === nextProps.group.total_delta &&
+         prevProps.group.total_gamma === nextProps.group.total_gamma &&
+         prevProps.group.total_theta === nextProps.group.total_theta &&
+         prevProps.group.total_vega === nextProps.group.total_vega &&
+         prevProps.group.positions.length === nextProps.group.positions.length
+})
 
 const COLUMNS = ['Security / Strategy', 'Qty', 'Avg', 'LTP', 'Δ', 'Γ', 'Θ', 'Vega', 'P&L']
 
@@ -98,7 +120,8 @@ export function PositionTable({ positions }: Props) {
     )
   }
 
-  function toggle(id: string) {
+  // Stable toggle reference to pass to memoized children
+  const toggle = React.useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(id)) {
@@ -108,7 +131,7 @@ export function PositionTable({ positions }: Props) {
       }
       return next
     })
-  }
+  }, [])
 
   return (
     <div className="overflow-x-auto rounded border border-gray-800">
@@ -128,7 +151,7 @@ export function PositionTable({ positions }: Props) {
               <StrategyRow
                 group={group}
                 expanded={expanded.has(group.strategy_id)}
-                onToggle={() => toggle(group.strategy_id)}
+                onToggle={toggle}
               />
               {expanded.has(group.strategy_id) && group.positions.map((pos) => (
                 <LegRow key={`${pos.security_id}-${pos.product}`} pos={pos} />
