@@ -42,12 +42,14 @@ export function LegRow({ leg }: Props) {
             {hasExpiry && (
               <button
                 onClick={() => setShowRollover((v) => !v)}
-                className={`ml-auto text-xs px-1.5 py-0.5 rounded border transition-colors ${
+                className={`ml-auto text-xs px-1.5 py-0.5 rounded border transition-colors focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
                   showRollover
                     ? 'border-blue-600 text-blue-400 bg-blue-950'
                     : 'border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300'
                 }`}
                 title="Toggle rollover cost estimator"
+                aria-expanded={showRollover}
+                aria-controls={`rollover-panel-${leg.security_id}`}
               >
                 ⇄ Rollover
               </button>
@@ -92,7 +94,7 @@ export function LegRow({ leg }: Props) {
 
       {/* Rollover panel — inline, spans all columns */}
       {showRollover && (
-        <tr className="bg-gray-950">
+        <tr id={`rollover-panel-${leg.security_id}`} className="bg-gray-950">
           <td colSpan={COL_SPAN} className="px-4 pb-3">
             <RolloverPanel leg={leg} />
           </td>

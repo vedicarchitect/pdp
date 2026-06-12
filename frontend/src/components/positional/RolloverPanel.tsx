@@ -104,7 +104,8 @@ export function RolloverPanel({ leg }: Props) {
         <button
           onClick={handleEstimate}
           disabled={loading}
-          className="ml-auto px-3 py-1 bg-blue-800 hover:bg-blue-700 text-blue-100 rounded text-xs disabled:opacity-50"
+          className="ml-auto px-3 py-1 bg-blue-800 hover:bg-blue-700 text-blue-100 rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none"
+          aria-busy={loading}
         >
           {loading ? 'Fetching…' : 'Estimate Rollover'}
         </button>
@@ -135,15 +136,16 @@ export function RolloverPanel({ leg }: Props) {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-gray-500">Slippage buffer</span>
+              <label htmlFor={`slippage-${leg.security_id}`} className="text-gray-500">Slippage buffer</label>
               <input
+                id={`slippage-${leg.security_id}`}
                 type="number"
                 min="0"
                 max="5"
                 step="0.05"
                 value={slippagePct}
                 onChange={(e) => setSlippagePct(Number(e.target.value))}
-                className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-white font-mono text-xs"
+                className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-white font-mono text-xs focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none"
               />
               <span className="text-gray-500">%</span>
               <span className="ml-2 font-mono text-yellow-300">₹{slippageEst.toFixed(2)}</span>
