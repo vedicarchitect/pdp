@@ -135,16 +135,16 @@ def test_get_snapshot_returns_all_positions():
     assert sids == {"13", "25"}
 
 
-def test_broadcast_called_on_tick():
+def test_tick_flags_broadcast_needed():
     hub = MagicMock()
-    hub.broadcast = MagicMock()
     svc = _make_service(hub=hub)
     key = ("13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1)
+    svc._needs_broadcast = False
 
     svc._handle_tick({"security_id": "13", "ltp": "22500.0"})
 
-    hub.broadcast.assert_called_once()
+    assert svc._needs_broadcast is True
 
 
 @pytest.mark.asyncio

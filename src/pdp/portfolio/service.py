@@ -63,6 +63,9 @@ class PortfolioService:
         self._hard_cap_cb: Any = None
         self._hard_cap_inr: Decimal = Decimal("0")
         self._hard_cap_triggered: bool = False  # prevent repeated triggers
+        # Flag to batched broadcasts, ensuring we only broadcast max 10 times per sec
+        # Reduces JSON serialization and event loop blocking overhead during high tick rates
+        self._needs_broadcast: bool = True
 
     # ------------------------------------------------------------------ #
     # Risk cap integration                                                #
@@ -157,6 +160,7 @@ class PortfolioService:
                 updated_at=pos.updated_at,
             )
         self._subscribed_sids = {ps.security_id for ps in self._cache.values() if ps.net_qty != 0}
+        self._needs_broadcast = True
 
     def get_snapshot(self) -> list[dict]:
         return [ps.to_dict() for ps in self._cache.values()]
@@ -225,7 +229,8 @@ class PortfolioService:
                 changed = True
 
         if changed:
-            self._hub.broadcast(self.get_snapshot(), self._build_summary())
+            # Batch broadcast to reduce CPU load from tick processing
+            self._needs_broadcast = True
 
     # ------------------------------------------------------------------ #
     # Periodic flush + reload                                              #
@@ -397,4 +402,8 @@ class PortfolioService:
                 break
             if self._stop_event.is_set():
                 break
-            self._hub.broadcast(self.get_snapshot(), self._build_summary())
+            if self._needs_broadcast:
+                # Reset flag before broadcasting to avoid race condition where a tick
+                # arrives during broadcast and its flag gets wiped
+                self._needs_broadcast = False
+                self._hub.broadcast(self.get_snapshot(), self._build_summary())
