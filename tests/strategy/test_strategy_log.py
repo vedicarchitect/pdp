@@ -69,6 +69,7 @@ class _Market:
     async def subscribe(self, sid, seg): return True
     async def unsubscribe(self, sid, seg): pass
     async def ltp(self, sid): return None
+    async def ltp_with_age(self, sid): return None, None
 
 
 class _SessionMaker:

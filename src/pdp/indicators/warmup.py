@@ -82,7 +82,7 @@ async def _warm_one(
 
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
 
-    if len(bars) < MIN_BARS:
+    if len(bars) < MIN_BARS and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
             security_id=security_id,
@@ -103,14 +103,13 @@ async def _warm_one(
         log.warning("indicator_warmup_no_bars", security_id=security_id, timeframe=timeframe)
         return
 
-    for bar in bars:
-        engine.on_bar(bar)
+    fed = engine.seed_from_bars(bars)
 
     log.info(
         "indicator_warmup_done",
         security_id=security_id,
         timeframe=timeframe,
-        bars_fed=len(bars),
+        bars_fed=fed,
         direction=engine.get(security_id, timeframe).direction if engine.get(security_id, timeframe) else None,
     )
 

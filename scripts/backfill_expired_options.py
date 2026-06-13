@@ -1,4 +1,14 @@
 """
+DEPRECATED — writes to the ``expired_option_bars`` ATM-label collection which is
+no longer read by the backtest.  Use ``scripts/backfill_options_gap.py`` instead,
+which backfills fixed-strike bars into the ``option_bars`` warehouse.
+
+This script is retained for historical reference only.  Do NOT run it to populate
+new data; the ``expired_option_bars`` collection receives no new writes as part of
+the backtest pipeline.
+
+----
+
 Backfill expired-option OHLCV bars into MongoDB (`expired_option_bars`).
 
 Dhan drops expired weekly contracts from the security master, so their

@@ -6,9 +6,9 @@ interface Props {
 }
 
 function pnlColor(value: number): string {
-  if (value > 0) return 'text-green-400'
-  if (value < 0) return 'text-red-400'
-  return 'text-gray-400'
+  if (value > 0) return 'text-bullish'
+  if (value < 0) return 'text-bearish'
+  return 'text-text-muted'
 }
 
 function fmt(n: number, decimals = 2): string {
@@ -39,16 +39,16 @@ function groupPositions(positions: Position[]): StrategyGroup[] {
 function LegRow({ pos }: { pos: Position }) {
   const totalPnl = pos.realized_pnl + pos.unrealized_pnl
   return (
-    <tr className="bg-gray-850 border-t border-gray-800 text-xs text-gray-400">
-      <td className="pl-8 py-1.5 font-mono">{pos.security_id}</td>
-      <td className="py-1.5 text-center">{pos.net_qty}</td>
-      <td className="py-1.5 text-right font-mono">{fmt(pos.avg_price)}</td>
-      <td className="py-1.5 text-right font-mono">{pos.ltp != null ? fmt(pos.ltp) : '—'}</td>
-      <td className="py-1.5 text-right font-mono text-gray-500">{pos.delta != null ? fmt(pos.delta, 3) : '—'}</td>
-      <td className="py-1.5 text-right font-mono text-gray-500">{pos.gamma != null ? fmt(pos.gamma, 4) : '—'}</td>
-      <td className="py-1.5 text-right font-mono text-gray-500">{pos.theta != null ? fmt(pos.theta, 3) : '—'}</td>
-      <td className="py-1.5 text-right font-mono text-gray-500">{pos.vega != null ? fmt(pos.vega, 3) : '—'}</td>
-      <td className={`py-1.5 text-right font-mono ${pnlColor(totalPnl)}`}>{fmt(totalPnl)}</td>
+    <tr className="bg-surface/50 border-t border-surface-border text-xs text-text-muted hover:bg-surface-hover transition-colors">
+      <td className="pl-8 py-2 font-mono text-text-main">{pos.security_id}</td>
+      <td className="py-2 text-center text-text-main font-medium">{pos.net_qty}</td>
+      <td className="py-2 text-right font-mono">{fmt(pos.avg_price)}</td>
+      <td className="py-2 text-right font-mono">{pos.ltp != null ? fmt(pos.ltp) : '—'}</td>
+      <td className="py-2 text-right font-mono text-text-muted/70">{pos.delta != null ? fmt(pos.delta, 3) : '—'}</td>
+      <td className="py-2 text-right font-mono text-text-muted/70">{pos.gamma != null ? fmt(pos.gamma, 4) : '—'}</td>
+      <td className="py-2 text-right font-mono text-text-muted/70">{pos.theta != null ? fmt(pos.theta, 3) : '—'}</td>
+      <td className="py-2 text-right font-mono text-text-muted/70">{pos.vega != null ? fmt(pos.vega, 3) : '—'}</td>
+      <td className={`py-2 text-right font-mono ${pnlColor(totalPnl)}`}>{fmt(totalPnl)}</td>
     </tr>
   )
 }
@@ -56,7 +56,7 @@ function LegRow({ pos }: { pos: Position }) {
 function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expanded: boolean; onToggle: () => void }) {
   return (
     <tr
-      className="border-t border-gray-700 cursor-pointer hover:bg-gray-800 transition-colors focus-visible:outline-none focus-visible:bg-gray-700"
+      className="border-t border-surface-border cursor-pointer hover:bg-surface-hover transition-colors focus-visible:outline-none focus-visible:bg-surface-hover"
       onClick={onToggle}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -67,12 +67,12 @@ function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expa
       tabIndex={0}
       aria-expanded={expanded}
     >
-      <td className="px-4 py-2 font-medium flex items-center gap-2">
-        <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
+      <td className="px-4 py-3 font-medium flex items-center gap-2 text-text-main">
+        <span className="text-text-muted text-xs transition-transform duration-200" style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
         {group.strategy_id}
-        <span className="text-xs text-gray-600 ml-1">({group.positions.length} leg{group.positions.length !== 1 ? 's' : ''})</span>
+        <span className="text-xs text-text-muted/70 ml-1">({group.positions.length} leg{group.positions.length !== 1 ? 's' : ''})</span>
       </td>
-      <td className="py-2 text-center text-gray-500">—</td>
+      <td className="py-3 text-center text-text-muted">—</td>
       <td className="py-2" />
       <td className="py-2" />
       <td className={`py-2 text-right font-mono text-sm ${pnlColor(group.total_delta)}`}>{fmt(group.total_delta, 3)}</td>
@@ -111,18 +111,18 @@ export function PositionTable({ positions }: Props) {
   }
 
   return (
-    <div className="overflow-x-auto rounded border border-gray-800">
+    <div className="overflow-x-auto rounded-xl border border-surface-border glass-panel">
       <table className="w-full text-sm text-left">
-        <thead className="bg-gray-900 text-xs text-gray-500 uppercase tracking-wide">
+        <thead className="bg-surface text-xs text-text-muted uppercase tracking-wider font-semibold border-b border-surface-border">
           <tr>
             {COLUMNS.map((col) => (
-              <th key={col} className={`px-4 py-2 ${col === 'P&L' || col === 'Δ' || col === 'Γ' || col === 'Θ' || col === 'Vega' ? 'text-right' : ''}`}>
+              <th key={col} className={`px-4 py-3 ${col === 'P&L' || col === 'Δ' || col === 'Γ' || col === 'Θ' || col === 'Vega' ? 'text-right' : ''}`}>
                 {col}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-800">
+        <tbody className="divide-y divide-surface-border">
           {groups.map((group) => (
             <React.Fragment key={group.strategy_id}>
               <StrategyRow

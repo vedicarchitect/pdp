@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 import click
 import structlog
@@ -64,7 +65,7 @@ def run_backtest(
         # Get settings and clients
         settings = get_settings()
         session_maker = get_session_maker()
-        mongo_client = MongoClient(settings.MONGODB_URL)
+        mongo_client = MongoClient(settings.MONGO_URI)
 
         # Create engine
         engine = BacktestEngine(
@@ -75,11 +76,10 @@ def run_backtest(
             mongo_client=mongo_client,
             session_maker=session_maker,
             initial_equity=Decimal(str(initial_equity)),
+            mongo_db_name=settings.MONGO_DB_NAME,
         )
 
-        # Run backtest
         import asyncio
-        from decimal import Decimal
 
         asyncio.run(_run_backtest_async(engine, session_maker))
 
@@ -92,12 +92,14 @@ def run_backtest(
 
 async def _run_backtest_async(engine: BacktestEngine, session_maker) -> None:
     """Run backtest asynchronously."""
-    from decimal import Decimal
-
     try:
-        # Initialize strategy
-        from pdp.strategy.context import StrategyContext, StrategyOrderClient
+        from pdp.indicators.engine import IndicatorEngine
+        from pdp.strategy.context import IndicatorReader, StrategyContext, StrategyOrderClient
         from pdp.orders.router import OrderRouter
+
+        # Create indicator engine and attach it so bars update it before strategy dispatch.
+        indicator_engine = IndicatorEngine(st_period=3, st_multiplier=1, timeframes=["5m"])
+        engine.attach_indicator_engine(indicator_engine)
 
         async with session_maker() as session:
             # Create strategy context
@@ -114,6 +116,8 @@ async def _run_backtest_async(engine: BacktestEngine, session_maker) -> None:
                 orders=orders_client,
                 params=engine.strategy.params,
                 watchlist=[],
+                indicators=IndicatorReader(indicator_engine),
+                session_maker=session_maker,
             )
 
             await engine.strategy.on_init(ctx)

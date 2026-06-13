@@ -52,16 +52,16 @@ function IntradayPage() {
 
       {/* P&L summary strip */}
       {feeds.summary && (
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-4 gap-4">
           {[
             { label: 'Realized P&L', value: feeds.summary.total_realized_pnl },
             { label: 'Unrealized P&L', value: feeds.summary.total_unrealized_pnl },
             { label: 'Day P&L', value: feeds.summary.day_pnl },
             { label: 'Open Positions', value: feeds.summary.open_positions, isCount: true },
           ].map(({ label, value, isCount }) => (
-            <div key={label} className="bg-gray-900 border border-gray-800 rounded px-4 py-3">
-              <div className="text-xs text-gray-500 mb-1">{label}</div>
-              <div className={`text-lg font-mono font-semibold ${isCount ? 'text-white' : value > 0 ? 'text-green-400' : value < 0 ? 'text-red-400' : 'text-gray-400'}`}>
+            <div key={label} className="glass-panel rounded-xl px-5 py-4 transition-transform duration-300 hover:-translate-y-1 hover:shadow-lg">
+              <div className="text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">{label}</div>
+              <div className={`text-2xl font-mono font-bold ${isCount ? 'text-text-main' : value > 0 ? 'text-bullish' : value < 0 ? 'text-bearish' : 'text-text-muted'}`}>
                 {isCount ? value : `₹${value.toFixed(2)}`}
               </div>
             </div>

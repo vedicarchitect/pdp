@@ -1,5 +1,41 @@
 @import "tailwindcss";
 
+@theme {
+  /* Typography */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+
+  /* Colors - Premium Dark Mode Palette */
+  --color-background: #0a0b10;
+  --color-surface: #13151c;
+  --color-surface-hover: #1c1e27;
+  --color-surface-border: rgba(255, 255, 255, 0.08);
+
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  
+  --color-text-main: #f8fafc;
+  --color-text-muted: #94a3b8;
+
+  --color-bullish: #10b981;
+  --color-bullish-muted: rgba(16, 185, 129, 0.15);
+  
+  --color-bearish: #ef4444;
+  --color-bearish-muted: rgba(239, 68, 68, 0.15);
+
+  --color-warning: #f59e0b;
+
+  /* Border Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+:root {
+  --background: var(--color-background);
+  --foreground: var(--color-text-main);
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -7,15 +43,71 @@
 }
 
 body {
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
-  background: #0f1117;
-  color: #e5e7eb;
+  background-color: var(--color-background);
+  color: var(--color-text-main);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
   display: flex;
   flex-direction: column;
   min-height: 100svh;
+}
+
+/* Glassmorphism utility classes */
+.glass-panel {
+  background: var(--color-surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-surface-border);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+}
+
+.glass-panel-heavy {
+  background: rgba(10, 11, 16, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+}
+
+/* Animations */
+@keyframes flash-green {
+  0% { background-color: var(--color-bullish-muted); }
+  100% { background-color: transparent; }
+}
+
+@keyframes flash-red {
+  0% { background-color: var(--color-bearish-muted); }
+  100% { background-color: transparent; }
+}
+
+.animate-flash-bullish {
+  animation: flash-green 0.8s ease-out;
+}
+
+.animate-flash-bearish {
+  animation: flash-red 0.8s ease-out;
+}
+
+/* Base custom scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-hover);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
 }

@@ -5,17 +5,28 @@ Risk rules:
   - LEG STOP  : if current open position MTM loss >= 5,000  -> close at bar close price
   - DAY STOP  : if cumulative realized day loss >= 10,000   -> flat + no more trades today
 
+Option pricing:
+  - Reads from the unified ``option_bars`` warehouse keyed by the real fixed contract
+    (underlying, expiry_date, strike, option_type, timeframe).  The old
+    ``expired_option_bars`` ATM-label path has been retired.
+  - Target strike is derived from spot (ATM rounded to STRIKE_STEP grid + OTM offset).
+  - Expiry date is resolved from the NIFTY expiry calendar (WEEK, code=1).
+  - Nearest-strike fallback within ±WAREHOUSE_STRIKE_BAND × STRIKE_STEP when the exact
+    target has no bars for the day.
+  - A held position is priced as one stable fixed contract across all days it is held
+    (no strike drift).
+
 Usage:
   python backtest_multiday.py              # last 7 business days
   python backtest_multiday.py --days 14
   python backtest_multiday.py --days 3 --start 2026-06-01
 """
-import sys, os, time, argparse
+import sys, os, time, argparse, logging
 sys.path.insert(0, "src")
 from dotenv import load_dotenv; load_dotenv()
 
 from datetime import datetime, date, timedelta, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
@@ -34,14 +45,20 @@ MAX_LOTS     = 5
 STRIKE_STEP  = 50
 OTM_STEPS    = 1
 NIFTY_EXPIRY_WEEKDAY = 1   # Tuesday
-_EXP_CE_SID  = -1          # synthetic sid for expired CE fallback
-_EXP_PE_SID  = -2          # synthetic sid for expired PE fallback
 START_H, START_M  = 9,  30
 SQOFF_H, SQOFF_M  = 15, 10
 LEG_STOP_PER_LOT = 1_000.0  # close if MTM loss >= this × current lots
 DAY_STOP_LOSS    = 10_000.0  # no more trades if realized day loss >= this
 IST = timedelta(hours=5, minutes=30)
 TF_MIN = 5   # signal timeframe in minutes; source bars are fetched at 1m and resampled
+
+# ── Logging (script-level; matches backtest's use of stdlib logging) ──────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("backtest")
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 from pathlib import Path
@@ -50,9 +67,11 @@ import psycopg
 from dhanhq import DhanContext, dhanhq
 from pdp.indicators.supertrend import SuperTrendTracker
 from pdp.instruments.snapshots import load_master_for_date
+from pdp.instruments.expiry_calendar import NiftyExpiryCalendar
 from pdp.backtest.resample import (
-    resample_data_dict, resample_mongo_bars, resample_ohlcv,
+    resample_mongo_bars, resample_ohlcv,
 )
+from pdp.settings import get_settings
 
 _MASTERS_DIR = Path(os.environ.get("MASTERS_DIR", "data/masters"))
 
@@ -66,6 +85,19 @@ pg = psycopg.connect(pg_url)
 
 dhan = dhanhq(DhanContext(os.environ["DHAN_CLIENT_ID"],
                            os.environ["DHAN_ACCESS_TOKEN"]))
+
+# ── Expiry calendar (load once; reads data/expiry/nifty_expiries.json) ────────
+_settings = get_settings()
+try:
+    _cal = NiftyExpiryCalendar.load(_settings.EXPIRY_CACHE_PATH)
+    log.info("Expiry calendar loaded from %s", _settings.EXPIRY_CACHE_PATH)
+except Exception as _cal_err:
+    _cal = None
+    log.warning("Expiry calendar unavailable (%s); will fall back to next_weekly_expiry()", _cal_err)
+
+# Warehouse band for nearest-strike fallback (from settings, default 10 steps).
+_WAREHOUSE_STRIKE_BAND = _settings.WAREHOUSE_STRIKE_BAND
+_WAREHOUSE_STRIKE_STEP = _settings.WAREHOUSE_STRIKE_STEP
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def biz_days(end: date, n: int):
@@ -195,7 +227,7 @@ def fetch_bars(sid, date_str, seg, itype):
     _bars[k] = resample_ohlcv(_parse_dhan_bars(data), TF_MIN)
     return _bars[k]
 
-def fetch_nifty(date_str):
+def _dhan_nifty_fallback(date_str):
     return fetch_bars("13", date_str, "IDX_I", "INDEX")
 
 def fetch_opt(sid, date_str):
@@ -214,143 +246,227 @@ def expiry_available(expiry_str: str, trade_date: date | None = None) -> bool:
                      (expiry_str,))
     return cur.fetchone() is not None
 
-def _expired_meta(opt_type: str) -> dict:
-    strike_label = f"ATM+{OTM_STEPS}" if opt_type == "CE" else f"ATM-{OTM_STEPS}"
-    return {
-        "underlying":   "NIFTY",
-        "expiry_flag":  "WEEK",
-        "expiry_code":  1,
-        "strike_label": strike_label,
-        "option_type":  opt_type,
-        "timeframe":    "5m",
-    }
+# ── Expiry resolution via the empirical calendar ──────────────────────────────
 
-def _expired_from_mongo(opt_type: str, trade_ds: str) -> list:
-    """Read warehoused expired-option bars for trade_ds from MongoDB (IST-naive tuples)."""
-    d  = date.fromisoformat(trade_ds)
-    lo = datetime(d.year, d.month, d.day, 0, 0,  tzinfo=timezone.utc)
-    hi = datetime(d.year, d.month, d.day, 23, 59, tzinfo=timezone.utc)
-    meta = _expired_meta(opt_type)
-    q = {f"metadata.{k}": v for k, v in meta.items()}
-    q["ts"] = {"$gte": lo, "$lte": hi}
-    docs = list(mdb["expired_option_bars"].find(q).sort("ts", 1))
-    out = []
+def _resolve_expiry_from_calendar(trade_date: date) -> date | None:
+    """Use the expiry calendar to find the nearest WEEK code=1 expiry on or after trade_date."""
+    if _cal is None:
+        return None
+    return _cal.resolve_expiry(trade_date, "WEEK", 1)
+
+# ── Fixed-strike option_bars reader ──────────────────────────────────────────
+
+def _option_bars_cache_key(expiry_date: date, strike: float, opt_type: str, trade_date: date) -> tuple:
+    """Unique cache key for a fixed-contract day's bars."""
+    return ("option_bars", expiry_date.isoformat(), float(strike), opt_type.upper(), trade_date.isoformat())
+
+def _fetch_option_bars_for_day(
+    trade_date: date,
+    opt_type: str,
+    target_strike: float,
+    expiry_date: date,
+) -> list:
+    """Read bars for (expiry_date, strike, opt_type) on trade_date from option_bars.
+
+    Returns IST-naive (dt, o, h, lo, c) tuples resampled to TF_MIN, or [] if none found.
+    This is the primary reader; no fallback — call _fetch_opt_fixed() for fallback logic.
+    """
+    expiry_dt = datetime(expiry_date.year, expiry_date.month, expiry_date.day, tzinfo=timezone.utc)
+    # Trade day in UTC: IST 00:00 = UTC 18:30 prev day; IST 23:59 = UTC 18:29 same day.
+    # Use a wide UTC window covering the full IST trade day.
+    lo_utc = datetime(trade_date.year, trade_date.month, trade_date.day, 0, 0, tzinfo=timezone.utc)
+    hi_utc = datetime(trade_date.year, trade_date.month, trade_date.day, 23, 59, tzinfo=timezone.utc)
+
+    docs = list(mdb["option_bars"].find({
+        "underlying": "NIFTY",
+        "expiry_date": expiry_dt,
+        "strike": float(target_strike),
+        "option_type": opt_type.upper(),
+        "timeframe": "1m",
+        "ts": {"$gte": lo_utc, "$lte": hi_utc},
+    }).sort("ts", 1))
+
+    if not docs:
+        return []
+
+    # Convert UTC ts -> IST-naive tuples for resample_ohlcv.
+    raw = []
     for doc in docs:
         ts = doc["ts"]
-        if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         ist_dt = (ts + IST).replace(tzinfo=None)
-        out.append((ist_dt, float(doc["open"]), float(doc["high"]),
+        raw.append((ist_dt, float(doc["open"]), float(doc["high"]),
                     float(doc["low"]), float(doc["close"])))
-    return sorted(out)
 
-def fetch_opt_expired(opt_type: str, trade_ds: str) -> list:
-    """Expired weekly ATM±OTM_STEPS bars: MongoDB warehouse first, Dhan API fallback.
+    return resample_ohlcv(sorted(raw), TF_MIN)
 
-    On a cache miss the live API (expiry_code=1) is queried and the bars are
-    persisted into `expired_option_bars` so subsequent runs read from Mongo.
+
+def _nearest_strike_fallback(
+    trade_date: date,
+    opt_type: str,
+    target_strike: float,
+    expiry_date: date,
+) -> tuple[float | None, list]:
+    """Search outward ±WAREHOUSE_STRIKE_BAND steps from target_strike for a strike with bars.
+
+    Returns (actual_strike_used, bars) or (None, []) if nothing found in band.
     """
-    sid = _EXP_CE_SID if opt_type == "CE" else _EXP_PE_SID
-    k   = (sid, trade_ds)
-    if k in _bars: return _bars[k]
+    expiry_dt = datetime(expiry_date.year, expiry_date.month, expiry_date.day, tzinfo=timezone.utc)
+    lo_utc = datetime(trade_date.year, trade_date.month, trade_date.day, 0, 0, tzinfo=timezone.utc)
+    hi_utc = datetime(trade_date.year, trade_date.month, trade_date.day, 23, 59, tzinfo=timezone.utc)
 
-    # 1) MongoDB warehouse
-    mongo_bars = _expired_from_mongo(opt_type, trade_ds)
-    if mongo_bars:
-        _bars[k] = mongo_bars
-        return _bars[k]
+    # Build list of candidate strikes in outward order from target.
+    candidates = []
+    for step in range(1, _WAREHOUSE_STRIKE_BAND + 1):
+        candidates.append(target_strike + step * _WAREHOUSE_STRIKE_STEP)
+        candidates.append(target_strike - step * _WAREHOUSE_STRIKE_STEP)
 
-    # 2) Live API fallback (expiry_code=1 = nearest expiry from the from_date)
-    drv        = "CALL" if opt_type == "CE" else "PUT"
-    strike_str = f"ATM+{OTM_STEPS}" if opt_type == "CE" else f"ATM-{OTM_STEPS}"
-    try:
-        r = dhan.expired_options_data(
-            security_id=13,
-            exchange_segment="NSE_FNO",
-            instrument_type="OPTIDX",
-            expiry_flag="WEEK",
-            expiry_code=1,
-            strike=strike_str,
-            drv_option_type=drv,
-            required_data=["open", "high", "low", "close", "volume", "oi", "iv"],
-            from_date=trade_ds,
-            to_date=trade_ds,
-            interval=1,
+    for candidate in candidates:
+        docs = list(mdb["option_bars"].find({
+            "underlying": "NIFTY",
+            "expiry_date": expiry_dt,
+            "strike": float(candidate),
+            "option_type": opt_type.upper(),
+            "timeframe": "1m",
+            "ts": {"$gte": lo_utc, "$lte": hi_utc},
+        }).sort("ts", 1).limit(1))
+        if docs:
+            # Found bars at this candidate — fetch full day.
+            bars = _fetch_option_bars_for_day(trade_date, opt_type, candidate, expiry_date)
+            if bars:
+                return float(candidate), bars
+
+    return None, []
+
+
+def fetch_opt_fixed(
+    trade_date: date,
+    opt_type: str,
+    target_strike: float,
+    expiry_date: date,
+) -> tuple[float, list]:
+    """Fetch bars for a fixed-strike contract from the option_bars warehouse.
+
+    Flow:
+      1. Exact strike from option_bars (1m → resample TF_MIN).
+      2. Nearest available strike within ±WAREHOUSE_STRIKE_BAND if exact is missing (log substitution).
+      3. Live Dhan API fallback if warehouse has nothing (persists into option_bars for next run).
+
+    Returns (actual_strike_used, bars).  bars=[] if all paths fail.
+    """
+    cache_key = _option_bars_cache_key(expiry_date, target_strike, opt_type, trade_date)
+    if cache_key in _bars:
+        cached = _bars[cache_key]
+        # cache stores (actual_strike, bars)
+        return cached
+
+    # 1) Exact strike from warehouse.
+    bars = _fetch_option_bars_for_day(trade_date, opt_type, target_strike, expiry_date)
+    if bars:
+        log.debug("opt_bars_exact strike=%.0f %s expiry=%s date=%s bars=%d",
+                  target_strike, opt_type, expiry_date, trade_date, len(bars))
+        result = (target_strike, bars)
+        _bars[cache_key] = result
+        return result
+
+    # 2) Nearest-strike fallback within band.
+    fallback_strike, fallback_bars = _nearest_strike_fallback(
+        trade_date, opt_type, target_strike, expiry_date
+    )
+    if fallback_bars:
+        log.warning(
+            "opt_bars_nearest_strike_fallback  date=%s %s expiry=%s  "
+            "target=%.0f -> used=%.0f  bars=%d",
+            trade_date, opt_type, expiry_date,
+            target_strike, fallback_strike, len(fallback_bars),
         )
-        time.sleep(0.4)
-    except Exception:
-        _bars[k] = []; return []
-    if not (isinstance(r, dict) and r.get("status") == "success"):
-        _bars[k] = []; return []
-    data_key = "ce" if opt_type == "CE" else "pe"
-    data = r.get("data", {})
-    while (isinstance(data, dict) and "data" in data
-           and "ce" not in data and "pe" not in data and "open" not in data):
-        data = data["data"]
-    if isinstance(data, dict) and data_key in data:
-        data = data[data_key]
-    if isinstance(data, dict) and "data" in data and "open" not in data:
-        data = data["data"]
-    if not (isinstance(data, dict) and "open" in data):
-        _bars[k] = []; return []
-    # Source 1-minute bars and resample to the signal timeframe; persist the resampled
-    # bars so the warehouse stays at the signal timeframe.
-    data = resample_data_dict(data, TF_MIN)
-    _bars[k] = _parse_dhan_bars(data)
-    _persist_expired(opt_type, data)
-    return _bars[k]
+        result = (fallback_strike, fallback_bars)
+        _bars[cache_key] = result
+        return result
 
-def _persist_expired(opt_type: str, data: dict) -> None:
-    """Write API-fetched expired bars into the Mongo warehouse (UTC ts, idempotent)."""
-    meta  = _expired_meta(opt_type)
-    opens = data["open"]; highs = data["high"]; lows = data["low"]; closes = data["close"]
-    vols  = data.get("volume", []); ois = data.get("oi", []); ivs = data.get("iv", [])
-    tss   = data.get("timestamp", data.get("start_Time", []))
-    docs  = []
-    for i in range(len(closes)):
-        if not closes[i] or i >= len(tss): continue
-        ts = tss[i]
-        if isinstance(ts, (int, float)):
-            bar_ts = datetime.fromtimestamp(ts, tz=timezone.utc)
-        else:
-            try:
-                bar_ts = datetime.fromisoformat(str(ts))
-                bar_ts = bar_ts.replace(tzinfo=timezone.utc) if bar_ts.tzinfo is None \
-                         else bar_ts.astimezone(timezone.utc)
-            except ValueError:
-                continue
+    # 3) Live Dhan API fallback (requires live creds + expiry resolvable by Dhan).
+    log.warning("opt_bars_no_warehouse_data date=%s %s expiry=%s strike=%.0f -- trying Dhan API",
+                trade_date, opt_type, expiry_date, target_strike)
+    imap = inst_map(expiry_date.isoformat(), trade_date)
+    k_live = (int(target_strike), opt_type.upper())
+    sid = imap.get(k_live)
+    if sid:
+        ds = trade_date.isoformat()
+        live_bars = fetch_opt(sid, ds)
+        if live_bars:
+            _persist_to_option_bars(opt_type, target_strike, expiry_date, live_bars)
+            result = (target_strike, live_bars)
+            _bars[cache_key] = result
+            return result
+
+    result = (target_strike, [])
+    _bars[cache_key] = result
+    return result
+
+
+def _persist_to_option_bars(
+    opt_type: str,
+    strike: float,
+    expiry_date: date,
+    bars: list,      # IST-naive (dt, o, h, lo, c) tuples (already resampled to TF_MIN)
+) -> None:
+    """Upsert bars fetched from the live API into option_bars (idempotent, first-write-wins).
+
+    Bars from the live API arrive as IST-naive tuples; we convert them back to UTC for
+    storage.  Timeframe is stored as the signal TF_MIN string (e.g. "5m") since that is
+    what was persisted — the warehouse also holds 1m bars from backfill, but the API
+    path always produces TF_MIN-resampled bars.
+    """
+    if not bars:
+        return
+    expiry_dt = datetime(expiry_date.year, expiry_date.month, expiry_date.day, tzinfo=timezone.utc)
+    tf_label = f"{TF_MIN}m"
+    docs = []
+    for (ist_dt, o, h, lo, c) in bars:
+        if not isinstance(ist_dt, datetime):
+            log.warning("opt_bars_persist_bad_ts: expected datetime, got %s — skipping bar", type(ist_dt))
+            continue
+        # ist_dt is naive IST; convert to UTC aware.
+        utc_ts = (ist_dt - IST).replace(tzinfo=timezone.utc)
         docs.append({
-            "ts": bar_ts, "metadata": dict(meta),
-            "open": float(opens[i]), "high": float(highs[i]),
-            "low": float(lows[i]), "close": float(closes[i]),
-            "volume": int(vols[i]) if i < len(vols) and vols[i] is not None else 0,
-            "oi":     int(ois[i])  if i < len(ois)  and ois[i]  is not None else 0,
-            "iv":     float(ivs[i]) if i < len(ivs) and ivs[i] is not None else 0.0,
+            "underlying": "NIFTY",
+            "expiry_date": expiry_dt,
+            "strike": float(strike),
+            "option_type": opt_type.upper(),
+            "timeframe": tf_label,
+            "ts": utc_ts,
+            "open": float(o), "high": float(h), "low": float(lo), "close": float(c),
+            "volume": 0, "oi": 0, "iv": 0.0,
+            "expiry_flag": "WEEK",
+            "trading_symbol": "",
+            "security_id": None,
+            "strike_label": None,
+            "source": "dhan_api",
         })
-    if not docs: return
-    # Only write into an existing time-series collection; never auto-create a
-    # plain collection here (the app/backfill own time-series creation).
-    if "expired_option_bars" not in mdb.list_collection_names(): return
-    q = {f"metadata.{key}": v for key, v in meta.items()}
-    q["ts"] = {"$gte": docs[0]["ts"], "$lte": docs[-1]["ts"]}
-    have = {(d["ts"] if d["ts"].tzinfo else d["ts"].replace(tzinfo=timezone.utc))
-            for d in mdb["expired_option_bars"].find(q, {"ts": 1, "_id": 0})}
-    fresh = [d for d in docs if d["ts"] not in have]
-    if fresh:
-        try:
-            mdb["expired_option_bars"].insert_many(fresh, ordered=False)
-        except Exception:
-            pass
+    if not docs:
+        return
+    from pymongo import UpdateOne
+    KEY_FIELDS = ("underlying", "expiry_date", "strike", "option_type", "timeframe", "ts")
+    ops = [UpdateOne({k: d[k] for k in KEY_FIELDS}, {"$setOnInsert": d}, upsert=True)
+           for d in docs]
+    try:
+        mdb["option_bars"].bulk_write(ops, ordered=False)
+    except Exception as exc:
+        log.warning("opt_bars_persist_failed: %s", exc)
+
 
 # ── Position tracker ──────────────────────────────────────────────────────────
 @dataclass
 class Position:
-    opt_type:   str
-    strike:     int
-    sid:        int
-    total_qty:  int      = 0
-    total_cost: float    = 0.0
-    lots:       int      = 0
-    entry_ist:  datetime | None = None
+    opt_type:    str
+    strike:      float         # actual fixed strike used (may differ from target after fallback)
+    expiry_date: date          # fixed expiry for this position
+    sid:         int | None    # security_id if available (for Dhan leg lookup)
+    total_qty:   int      = 0
+    total_cost:  float    = 0.0
+    lots:        int      = 0
+    entry_ist:   datetime | None = None
 
     def add(self, qty, px):
         self.total_qty  += qty
@@ -366,7 +482,7 @@ class Position:
 @dataclass
 class LegRecord:
     opt_type:  str
-    strike:    int
+    strike:    float
     entry_ist: datetime
     exit_ist:  datetime
     lots:      int
@@ -380,7 +496,7 @@ class LegRecord:
 class Trade:
     side:        str     # SELL / BUY
     opt_type:    str
-    strike:      int
+    strike:      float
     bar_time:    datetime
     qty:         int
     price:       float
@@ -415,7 +531,7 @@ def simulate_day(trade_date: date):
             if k not in seen: seen.add(k); nifty_bars.append(b)
 
     if not nifty_bars:
-        dhan_bars = fetch_nifty(ds)
+        dhan_bars = _dhan_nifty_fallback(ds)
         nifty_bars = [{"ts": dt.replace(tzinfo=timezone.utc) - IST,
                        "open": o, "high": h, "low": l, "close": c}
                       for dt, o, h, l, c in dhan_bars]
@@ -424,15 +540,35 @@ def simulate_day(trade_date: date):
     nifty_open  = float(nifty_bars[0]["open"])
     nifty_close = float(nifty_bars[-1]["close"])
 
-    correct_exp  = next_weekly_expiry(trade_date).isoformat()
-    use_expired  = not expiry_available(correct_exp, trade_date)
-    if use_expired:
-        exp  = correct_exp
-        imap = {}
+    # ── Expiry resolution: calendar first, then snapshot/live table ──
+    # The calendar gives the real empirically-detected expiry for the trade day.
+    cal_expiry = _resolve_expiry_from_calendar(trade_date)
+    if cal_expiry is not None:
+        exp = cal_expiry.isoformat()
+        exp_date = cal_expiry
     else:
-        exp  = active_expiry(trade_date)
-        if not exp: return None
-        imap = inst_map(exp, trade_date)
+        # Fallback: nearest expiry from snapshot / live instruments.
+        correct_exp = next_weekly_expiry(trade_date).isoformat()
+        exp = correct_exp
+        exp_date = date.fromisoformat(exp)
+
+    # use_expired: True when the expiry is not in the live instruments table.
+    # With the fixed-strike warehouse, we can still price from option_bars even when
+    # the expiry is no longer active — so this flag mainly controls the Dhan API fallback.
+    use_expired = not expiry_available(exp, trade_date)
+    imap = {} if use_expired else inst_map(exp, trade_date)
+
+    # Pre-fetch option bars for the day: read the strike band for both CE and PE from
+    # option_bars so that the bar-by-bar loop can call price_at quickly.
+    # We pre-fetch a representative set; the bar-by-bar loop will call fetch_opt_fixed
+    # which has its own cache.
+    #
+    # Precompute spot to get a ballpark strike for pre-warm (optional; the bar-by-bar
+    # loop already caches results, so this just warms the cache once).
+    _approx_spot = nifty_open
+    for _ot in ("CE", "PE"):
+        _tgt = float(otm_strike(_approx_spot, _ot))
+        fetch_opt_fixed(trade_date, _ot, _tgt, exp_date)
 
     # Precompute ST series
     tracker = SuperTrendTracker(period=3, multiplier=1)
@@ -446,14 +582,6 @@ def simulate_day(trade_date: date):
     start_dt = datetime(trade_date.year, trade_date.month, trade_date.day, START_H, START_M)
     sqoff_dt = datetime(trade_date.year, trade_date.month, trade_date.day, SQOFF_H, SQOFF_M)
 
-    # Pre-fetch option bars
-    if use_expired:
-        fetch_opt_expired("CE", ds)
-        fetch_opt_expired("PE", ds)
-    else:
-        for sid in set(imap.values()):
-            fetch_opt(sid, ds)
-
     # ── Bar-by-bar simulation ──────────────────────────────────────────────────
     pos:         Position | None  = None
     trades:      list[Trade]      = []
@@ -461,6 +589,16 @@ def simulate_day(trade_date: date):
     day_pnl    = 0.0
     done       = False
     stop_reason = ""
+
+    def _pos_bars(p: Position) -> list:
+        """Retrieve the cached bars for the current position's fixed contract."""
+        k = _option_bars_cache_key(p.expiry_date, p.strike, p.opt_type, trade_date)
+        cached = _bars.get(k)
+        if cached is not None:
+            return cached[1]  # (actual_strike, bars) tuple
+        # Re-fetch (shouldn't be needed, but guard for safety).
+        _, bars = fetch_opt_fixed(trade_date, p.opt_type, p.strike, p.expiry_date)
+        return bars
 
     def close_position(ist_dt, nifty_px, close_px, reason):
         nonlocal day_pnl, done, stop_reason, pos
@@ -502,8 +640,8 @@ def simulate_day(trade_date: date):
         # Square-off
         if ist_dt >= sqoff_dt:
             if pos:
-                opt_bars_sq = _bars.get((pos.sid, ds), [])
-                sq_px = price_at(opt_bars_sq, ist_dt, prefer="open") or price_at(opt_bars_sq, ist_dt, prefer="close")
+                sq_bars = _pos_bars(pos)
+                sq_px = price_at(sq_bars, ist_dt, prefer="open") or price_at(sq_bars, ist_dt, prefer="close")
                 if sq_px:
                     close_position(ist_dt, bar_open, sq_px, "squareoff")
             break
@@ -514,8 +652,8 @@ def simulate_day(trade_date: date):
 
         # ── Check leg stop-loss at bar CLOSE (if position open) ──
         if pos:
-            opt_bars_p = _bars.get((pos.sid, ds), [])
-            bar_close_px = price_at(opt_bars_p, ist_dt, prefer="close")
+            pos_bars = _pos_bars(pos)
+            bar_close_px = price_at(pos_bars, ist_dt, prefer="close")
             if bar_close_px:
                 mtm = pos.mtm(bar_close_px)
                 if mtm <= -(LEG_STOP_PER_LOT * pos.lots):
@@ -525,45 +663,54 @@ def simulate_day(trade_date: date):
 
         # ── Flip: close current, open new ──
         if pos and pos.opt_type != desired:
-            opt_bars_f = _bars.get((pos.sid, ds), [])
-            flip_px = price_at(opt_bars_f, ist_dt, prefer="open")
+            flip_bars = _pos_bars(pos)
+            flip_px = price_at(flip_bars, ist_dt, prefer="open")
             if flip_px:
                 close_position(ist_dt, bar_open, flip_px, "flip")
             else:
                 pos = None   # can't price it; clear position
             if done: continue
 
-        # ── Open / scale-in ──
-        k = (otm_strike(bar_close, desired), desired)
-        if use_expired:
-            sid = _EXP_CE_SID if desired == "CE" else _EXP_PE_SID
-        else:
-            sid = imap.get(k)
-            if not sid: continue
+        # ── Compute target strike for the desired leg ──
+        target_stk = float(otm_strike(bar_close, desired))
 
-        opt_bars_n = _bars.get((sid, ds), [])
+        # If we already have an open position for the same type, check if the strike
+        # matches (positional: hold same contract, don't drift strikes intraday).
+        if pos is not None and pos.opt_type == desired:
+            # Positional path: continue pricing off the held contract, not a new target.
+            new_bars = _pos_bars(pos)
+            actual_strike = pos.strike
+        else:
+            # New or flipped leg: resolve the contract from the warehouse.
+            actual_strike, new_bars = fetch_opt_fixed(trade_date, desired, target_stk, exp_date)
+            if not new_bars:
+                continue
 
         if pos is None:
             # New entry
-            entry_px = price_at(opt_bars_n, ist_dt, prefer="open")
+            entry_px = price_at(new_bars, ist_dt, prefer="open")
             if entry_px:
-                pos = Position(opt_type=desired, strike=k[0], sid=sid, entry_ist=ist_dt)
+                pos = Position(
+                    opt_type=desired, strike=actual_strike, expiry_date=exp_date,
+                    sid=imap.get((int(actual_strike), desired.upper())),
+                    entry_ist=ist_dt,
+                )
                 pos.add(START_LOTS * LOT, entry_px)
                 trades.append(Trade(
-                    side="SELL", opt_type=desired, strike=k[0],
+                    side="SELL", opt_type=desired, strike=actual_strike,
                     bar_time=ist_dt, qty=START_LOTS * LOT, price=entry_px,
                     nifty=bar_close,
                     note=f"open {START_LOTS}L",
                     cum_lots=pos.lots, avg_entry=pos.avg_entry,
                     day_pnl=day_pnl,
                 ))
-        elif pos.sid == sid and pos.lots < MAX_LOTS:
-            # Scale in
-            add_px = price_at(opt_bars_n, ist_dt, prefer="open")
+        elif pos.sid == imap.get((int(actual_strike), desired.upper()), pos.sid) and pos.lots < MAX_LOTS:
+            # Scale in (same contract, same expiry)
+            add_px = price_at(new_bars, ist_dt, prefer="open")
             if add_px:
                 pos.add(ADD_LOTS * LOT, add_px)
                 trades.append(Trade(
-                    side="SELL", opt_type=desired, strike=k[0],
+                    side="SELL", opt_type=desired, strike=actual_strike,
                     bar_time=ist_dt, qty=ADD_LOTS * LOT, price=add_px,
                     nifty=bar_close,
                     note=f"scale +{ADD_LOTS}L -> {pos.lots}L",
@@ -573,9 +720,9 @@ def simulate_day(trade_date: date):
 
     # Unclosed position at end (rare — squareoff loop should handle)
     if pos:
-        opt_bars_e = _bars.get((pos.sid, ds), [])
-        end_px = (price_at(opt_bars_e, sqoff_dt, prefer="close") or
-                  price_at(opt_bars_e, sqoff_dt, prefer="open"))
+        end_bars = _pos_bars(pos)
+        end_px = (price_at(end_bars, sqoff_dt, prefer="close") or
+                  price_at(end_bars, sqoff_dt, prefer="open"))
         if end_px:
             close_position(sqoff_dt, nifty_close, end_px, "squareoff_end")
 
@@ -595,6 +742,7 @@ def simulate_day(trade_date: date):
         "done_reason":  stop_reason,
         "nifty_bars":   len(nifty_bars),
         "use_expired":  use_expired,
+        "expiry_source": "calendar" if cal_expiry else "fallback",
     }
 
 # ── Output helpers ────────────────────────────────────────────────────────────
@@ -604,10 +752,10 @@ def print_day(r):
     print(f"\n{'='*W}")
     sign = "+" if r["nifty_chg"] >= 0 else ""
     stop    = f"  [DAY STOP: {r['done_reason']}]" if r["done_reason"] else ""
-    approx  = "  [APPROX: expired_options_data]" if r.get("use_expired") else ""
+    exp_src = f"  [expiry:{r.get('expiry_source','?')}]"
     print(f"  {r['date']}  |  NIFTY {r['nifty_open']:.2f} -> {r['nifty_close']:.2f} "
-          f"({sign}{r['nifty_chg']:.2f})  |  Expiry: {r['expiry']}  "
-          f"|  Bars: {r['nifty_bars']}{stop}{approx}")
+          f"({sign}{r['nifty_chg']:.2f})  |  Expiry: {r['expiry']}{exp_src}  "
+          f"|  Bars: {r['nifty_bars']}{stop}")
     print(f"{'='*W}")
     print(f"  {'#':>3}  {'Side':<4}  {'Type':<2} {'Strike':>7}  {'Time':>5}  "
           f"{'Qty':>5}  {'Price':>7}  {'NIFTY':>9}  "
@@ -620,7 +768,7 @@ def print_day(r):
         leg_s = f"{t.leg_pnl:>+10.2f}" if t.leg_pnl is not None else f"{'':>10}"
         day_s = f"{t.day_pnl:>+10.2f}"
         avg_s = f"{t.avg_entry:>9.2f}"
-        print(f"  {i:>3}  {t.side:<4}  {t.opt_type:<2} {t.strike:>7}  "
+        print(f"  {i:>3}  {t.side:<4}  {t.opt_type:<2} {t.strike:>7.0f}  "
               f"{t.bar_time.strftime('%H:%M'):>5}  "
               f"{t.qty:>5}  {t.price:>7.2f}  {t.nifty:>9.2f}  "
               f"{t.cum_lots:>7}L  {avg_s}  {leg_s}  {day_s}  {t.note}")
@@ -642,7 +790,7 @@ def print_day(r):
         wins = losses = 0
         for i, lr in enumerate(leg_records, 1):
             pnl_s = f"{lr.leg_pnl:>+10.2f}"
-            print(f"  {i:>3}  {lr.opt_type:<2} {lr.strike:>7}  "
+            print(f"  {i:>3}  {lr.opt_type:<2} {lr.strike:>7.0f}  "
                   f"{lr.entry_ist.strftime('%H:%M'):>5}  "
                   f"{lr.exit_ist.strftime('%H:%M'):>5}  "
                   f"{lr.lots:>4}L  {lr.avg_entry:>9.2f}  "
@@ -663,6 +811,7 @@ days     = biz_days(end_date, args.days)
 print(f"\n{'*'*W}")
 print(f"  SuperTrend(3,1) NIFTY | {args.days} business days ending {end_date} "
       f"| Leg stop=1000/lot | Day stop={DAY_STOP_LOSS:,.0f}")
+print(f"  Option pricing: fixed-strike option_bars warehouse (nearest-strike fallback within ±{_WAREHOUSE_STRIKE_BAND} steps)")
 print(f"{'*'*W}")
 
 results = []

@@ -55,6 +55,24 @@ class Settings(BaseSettings):
     RISK_PER_STRATEGY_LOSS_CAP_INR: float = 20000.0
     RISK_SOFT_CAP_PCT: float = 80.0
 
+    # Options warehouse + historical migration (NIFTY options data pipeline).
+    # External, read-only "abi project" DuckDB source (PDP and Abi are siblings).
+    ABI_NIFTY_DUCKDB: str = "../Abi/data/historicaldata/nifty.db"
+    # Cached real expiry-date calendar (built via OI-reset detection from the source).
+    EXPIRY_CACHE_PATH: str = "data/expiry/nifty_expiries.json"
+    # Standalone warehouser band: current+next weekly (+optional monthly), ATM±N strikes.
+    WAREHOUSE_STRIKE_BAND: int = 10
+    WAREHOUSE_STRIKE_STEP: int = 50
+    WAREHOUSE_INCLUDE_MONTHLY: bool = False
+    # Self-healing gap backfill: the running warehouser periodically scans a rolling
+    # look-back window for missing option_bars trade-days and auto-backfills them from
+    # Dhan (first-write-wins keeps it non-duplicate). Needs Dhan creds at runtime.
+    WAREHOUSE_GAP_BACKFILL_ENABLED: bool = True
+    WAREHOUSE_GAP_CHECK_INTERVAL_HOURS: float = 4.0
+    WAREHOUSE_GAP_LOOKBACK_DAYS: int = 30
+    # NSE holiday calendar (JSON {"dates": ["YYYY-MM-DD", ...]}) for trading-day enumeration.
+    NSE_HOLIDAYS_JSON: str = "../Abi/data/nse_holidays_2026.json"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

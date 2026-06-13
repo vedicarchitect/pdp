@@ -41,10 +41,18 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
     chains_col.create_index = AsyncMock()
     portfolio_col = MagicMock()
     portfolio_col.create_index = AsyncMock()
+    option_bars_col = MagicMock()
+    option_bars_col.create_index = AsyncMock()
+    positional_col = MagicMock()
+    positional_col.create_index = AsyncMock()
 
     def _getitem(name: str):
         if name == "portfolio_snapshots":
             return portfolio_col
+        if name == "option_bars":
+            return option_bars_col
+        if name == "positional_eod_snapshots":
+            return positional_col
         return chains_col
 
     db = MagicMock()
@@ -69,6 +77,41 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
     )
     # Two indexes on portfolio_snapshots: TTL snapshot_ts, unique snapshot_date
     assert portfolio_col.create_index.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_init_collections_creates_option_bars_regular_with_unique_index() -> None:
+    from pymongo import ASCENDING
+
+    option_bars_col = MagicMock()
+    option_bars_col.create_index = AsyncMock()
+    other_col = MagicMock()
+    other_col.create_index = AsyncMock()
+
+    db = MagicMock()
+    db.create_collection = AsyncMock()
+    db.__getitem__ = MagicMock(
+        side_effect=lambda name: option_bars_col if name == "option_bars" else other_col
+    )
+    settings = Settings()  # type: ignore[call-arg]
+
+    await init_collections(db, settings)
+
+    # Regular collection — created WITHOUT a timeseries kwarg (time-series can't be unique-indexed).
+    db.create_collection.assert_any_call("option_bars")
+    # Unique contract+ts index makes duplicate bars structurally impossible.
+    option_bars_col.create_index.assert_any_call(
+        [
+            ("underlying", ASCENDING),
+            ("expiry_date", ASCENDING),
+            ("strike", ASCENDING),
+            ("option_type", ASCENDING),
+            ("timeframe", ASCENDING),
+            ("ts", ASCENDING),
+        ],
+        unique=True,
+        name="uq_contract_ts",
+    )
 
 
 @pytest.mark.asyncio

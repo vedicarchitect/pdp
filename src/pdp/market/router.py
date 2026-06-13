@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as _time
 from typing import TYPE_CHECKING
 
 import structlog
@@ -72,8 +73,9 @@ class TickRouter:
         ltp_str = str(tick.ltp)
         sid = tick.security_id
 
-        # 1 — hot LTP cache (TTL=5s so stale data auto-expires)
+        # 1 — hot LTP cache + timestamp (TTL=5s so stale data auto-expires)
         await redis.set(f"ltp:{sid}", ltp_str, ex=5)
+        await redis.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
 
         # 2 — pub/sub fan-out for downstream consumers
         tick_payload = json.dumps(

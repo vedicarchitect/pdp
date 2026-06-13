@@ -109,12 +109,14 @@ class BacktestEngine:
         session_maker: async_sessionmaker[AsyncSession],
         initial_equity: Decimal = Decimal("100000"),
         timeframes: list[str] | None = None,
+        mongo_db_name: str = "pdp",
     ) -> None:
         self.strategy = strategy
         self.strategy_id = strategy_id
         self.from_date = from_date
         self.to_date = to_date
         self.mongo_client = mongo_client
+        self.mongo_db_name = mongo_db_name
         self.session_maker = session_maker
         self.initial_equity = initial_equity
         self.timeframes = timeframes or ["1m", "5m", "15m"]
@@ -127,20 +129,26 @@ class BacktestEngine:
         self._bars_processed = 0
         self._max_equity = initial_equity
         self._daily_start_equity = initial_equity
+        self._indicator_engine: Any = None  # set via attach_indicator_engine()
+
+    def attach_indicator_engine(self, engine: Any) -> None:
+        """Wire in the indicator engine so each bar updates indicators before strategy dispatch."""
+        self._indicator_engine = engine
 
     async def load_market_history(self) -> list[BacktestBar]:
         """Fetch historical bars from MongoDB market_bars collection."""
-        db = self.mongo_client.get_database("trading")
+        db = self.mongo_client.get_database(self.mongo_db_name)
         collection = db.get_collection("market_bars")
 
+        # Bars are stored with ts + metadata.{security_id, timeframe} schema
         query = {
-            "bar_time": {
+            "ts": {
                 "$gte": self.from_date,
                 "$lte": self.to_date,
             }
         }
 
-        bars = list(collection.find(query).sort("bar_time", 1))
+        bars = list(collection.find(query).sort("ts", 1))
         log.info(
             "loaded_market_history",
             from_date=self.from_date.isoformat(),
@@ -150,9 +158,9 @@ class BacktestEngine:
 
         return [
             BacktestBar(
-                security_id=bar["security_id"],
-                timeframe=bar["timeframe"],
-                bar_time=bar["bar_time"],
+                security_id=bar["metadata"]["security_id"],
+                timeframe=bar["metadata"]["timeframe"],
+                bar_time=bar["ts"],
                 open=Decimal(str(bar["open"])),
                 high=Decimal(str(bar["high"])),
                 low=Decimal(str(bar["low"])),
@@ -201,9 +209,13 @@ class BacktestEngine:
         )
 
     async def _process_bar(self, bar: BacktestBar) -> None:
-        """Process a single bar: call strategy hooks and update state."""
+        """Process a single bar: update indicator engine then call strategy hook."""
         async with SimulatedClock(bar.bar_time):
             bar_closed = bar.to_bar_closed()
+            # Update universal indicators before dispatching to the strategy so
+            # ctx.indicators.supertrend() returns the value for the current bar.
+            if self._indicator_engine is not None:
+                self._indicator_engine.on_bar(bar_closed)
             await self.strategy.on_bar(bar_closed)
             self._bars_processed += 1
 

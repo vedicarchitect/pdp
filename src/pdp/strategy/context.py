@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pdp.indicators.engine import IndicatorEngine
     from pdp.indicators.supertrend import SuperTrendState
     from pdp.market.dhan_ws import DhanTickerAdapter
+    from pdp.orders.paper import PaperBroker
     from pdp.orders.router import OrderRouter
     from pdp.strategy.registry import WatchlistEntry
 
@@ -47,12 +48,18 @@ class MarketControl:
         adapter: DhanTickerAdapter | None,
         session_maker: async_sessionmaker[AsyncSession] | None,
         redis: Redis | None = None,
+        paper_broker: PaperBroker | None = None,
     ) -> None:
         self._adapter = adapter
         self._session_maker = session_maker
         self._redis = redis
+        self._paper_broker = paper_broker
 
     async def subscribe(self, security_id: str, segment: str) -> bool:
+        # Pre-register with paper broker before the Dhan subscription so the first
+        # tick after place_order() fills the MARKET order without being missed.
+        if self._paper_broker is not None:
+            self._paper_broker.notify_subscribe(security_id)
         if self._adapter is None or self._session_maker is None:
             return False
         async with self._session_maker() as session:
@@ -80,6 +87,33 @@ class MarketControl:
         except (InvalidOperation, ValueError):
             return None
         return val if val > 0 else None
+
+    async def ltp_with_age(self, security_id: str) -> tuple[Decimal | None, float | None]:
+        """Return (ltp, age_seconds) from Redis. age_seconds is None when timestamp absent.
+
+        Uses ltp_ts:{sid} written by the tick router on every tick. Callers use the age
+        to decide whether the price is fresh enough to act on (e.g. for leg-stop checks).
+        """
+        import time as _time
+
+        if self._redis is None:
+            return None, None
+        raw_ltp, raw_ts = await self._redis.mget(f"ltp:{security_id}", f"ltp_ts:{security_id}")
+        if raw_ltp is None:
+            return None, None
+        try:
+            val = Decimal(str(raw_ltp))
+        except (InvalidOperation, ValueError):
+            return None, None
+        if val <= 0:
+            return None, None
+        age: float | None = None
+        if raw_ts is not None:
+            try:
+                age = _time.time() - float(raw_ts)
+            except (ValueError, TypeError):
+                pass
+        return val, age
 
 
 @dataclass

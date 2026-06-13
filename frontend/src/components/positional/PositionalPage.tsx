@@ -78,15 +78,15 @@ export function PositionalPage() {
 
       {/* P&L summary strip */}
       {hasPositions && (
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-3 gap-4">
           {[
             { label: 'Day P&L', value: totalPnl },
             { label: 'Unrealized', value: totalUnrealized },
             { label: 'Realized', value: totalRealized },
           ].map(({ label, value }) => (
-            <div key={label} className="bg-gray-900 border border-gray-800 rounded px-4 py-3">
-              <div className="text-xs text-gray-500 mb-1">{label}</div>
-              <div className={`text-lg font-mono font-semibold ${value > 0 ? 'text-green-400' : value < 0 ? 'text-red-400' : 'text-gray-400'}`}>
+            <div key={label} className="glass-panel rounded-xl px-5 py-4 transition-transform duration-300 hover:-translate-y-1 hover:shadow-lg">
+              <div className="text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">{label}</div>
+              <div className={`text-2xl font-mono font-bold ${value > 0 ? 'text-bullish' : value < 0 ? 'text-bearish' : 'text-text-muted'}`}>
                 ₹{value.toFixed(2)}
               </div>
             </div>
@@ -105,18 +105,18 @@ export function PositionalPage() {
           </Link>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto rounded-xl border border-surface-border glass-panel">
           <table className="w-full text-sm">
-            <thead>
-              <tr className="text-xs text-gray-500 border-b border-gray-700">
-                <th className="px-3 py-2 text-left">Strategy / Leg</th>
-                <th className="px-3 py-2 text-right">Δ Delta</th>
-                <th className="px-3 py-2 text-right">Γ Gamma</th>
-                <th className="px-3 py-2 text-right">Θ Theta</th>
-                <th className="px-3 py-2 text-right">V Vega</th>
-                <th className="px-3 py-2 text-right">Total P&L</th>
-                <th className="px-3 py-2 text-right">Unrealized</th>
-                <th className="px-3 py-2 text-right">Realized</th>
+            <thead className="bg-surface text-xs text-text-muted uppercase tracking-wider font-semibold border-b border-surface-border">
+              <tr>
+                <th className="px-4 py-3 text-left">Strategy / Leg</th>
+                <th className="px-4 py-3 text-right">Δ Delta</th>
+                <th className="px-4 py-3 text-right">Γ Gamma</th>
+                <th className="px-4 py-3 text-right">Θ Theta</th>
+                <th className="px-4 py-3 text-right">V Vega</th>
+                <th className="px-4 py-3 text-right">Total P&L</th>
+                <th className="px-4 py-3 text-right">Unrealized</th>
+                <th className="px-4 py-3 text-right">Realized</th>
               </tr>
             </thead>
             <tbody>
@@ -129,10 +129,10 @@ export function PositionalPage() {
       )}
 
       {/* EOD P&L history chart */}
-      <div className="mt-2">
-        <div className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wide">Daily P&L History</div>
+      <div className="mt-4">
+        <div className="text-xs font-medium text-text-muted mb-2 uppercase tracking-wide">Daily P&L History</div>
         {histLoading ? (
-          <div className="h-40 bg-gray-900 rounded border border-gray-800 flex items-center justify-center text-gray-600 text-sm">
+          <div className="h-40 glass-panel bg-surface/50 rounded-xl flex items-center justify-center text-text-muted text-sm font-medium">
             Loading…
           </div>
         ) : (

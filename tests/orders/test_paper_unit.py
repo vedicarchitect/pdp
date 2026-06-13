@@ -6,6 +6,7 @@ from decimal import Decimal
 from pdp.orders.models import BrokerCost, Order, OrderStatus, OrderType, Product, Side
 from pdp.orders.paper import (
     ChargesCalculator,
+    PaperBroker,
     _fill_price,
     _should_fill,
 )
@@ -171,3 +172,26 @@ def test_charges_stamp_duty_on_buy_only() -> None:
     charges_buy = calc.compute(qty=1, fill_price=Decimal("100"), side=Side.BUY)
     charges_sell = calc.compute(qty=1, fill_price=Decimal("100"), side=Side.SELL)
     assert charges_buy > charges_sell
+
+
+# ------------------------------------------------------------------ #
+# GAP 4 — subscription race: notify_subscribe pre-registers a sid     #
+# ------------------------------------------------------------------ #
+
+def test_notify_subscribe_registers_sid_for_monitoring() -> None:
+    """A pre-registered security_id appears in the run-loop's watch set so the first
+    tick after order placement can fill, instead of being missed until the second."""
+    pb = PaperBroker(session_maker=None, slippage_bps=0.0)
+    assert "OPT_PE" not in pb._open_orders
+    pb.notify_subscribe("OPT_PE")
+    assert "OPT_PE" in pb._open_orders
+    assert pb._open_orders["OPT_PE"] == []
+
+
+def test_notify_subscribe_is_idempotent_and_preserves_orders() -> None:
+    """Re-registering a sid that already has tracked orders must not clobber them."""
+    pb = PaperBroker(session_maker=None, slippage_bps=0.0)
+    sentinel = object()
+    pb._open_orders["OPT_CE"] = [sentinel]
+    pb.notify_subscribe("OPT_CE")
+    assert pb._open_orders["OPT_CE"] == [sentinel]

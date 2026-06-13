@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
     from pdp.market.dhan_ws import DhanTickerAdapter
     from pdp.market.models import Tick
+    from pdp.orders.paper import PaperBroker
     from pdp.orders.router import OrderRouter
     from pdp.orders.ws import OrdersHub
 
@@ -100,6 +101,7 @@ class StrategyHost:
         self._indicator_engine: IndicatorEngine | None = None
         self._market_adapter: DhanTickerAdapter | None = None
         self._redis: Redis | None = None
+        self._paper_broker: PaperBroker | None = None
 
     def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
         """Wire the universal indicator engine read by strategies via ctx.indicators."""
@@ -112,6 +114,10 @@ class StrategyHost:
     def set_redis(self, redis: Redis | None) -> None:
         """Wire the Redis hot cache so strategies can read LTP via ctx.market.ltp."""
         self._redis = redis
+
+    def set_paper_broker(self, broker: PaperBroker | None) -> None:
+        """Wire the paper broker so MarketControl.subscribe() pre-registers the sid."""
+        self._paper_broker = broker
 
     # ------------------------------------------------------------------ #
     # Registry                                                             #
@@ -173,7 +179,7 @@ class StrategyHost:
             watchlist=list(cfg.watchlist),
             log=log.bind(strategy_id=cfg.id),
             indicators=IndicatorReader(self._indicator_engine),
-            market=MarketControl(self._market_adapter, self._session_maker, self._redis),
+            market=MarketControl(self._market_adapter, self._session_maker, self._redis, self._paper_broker),
             session_maker=self._session_maker,
         )
 

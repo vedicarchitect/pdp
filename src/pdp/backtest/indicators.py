@@ -26,6 +26,7 @@ class IndicatorCache:
         timeframe: str,
         from_date: datetime,
         to_date: datetime,
+        mongo_db_name: str = "pdp",
     ) -> dict:
         """Pre-compute all indicators for (security, timeframe) over date range."""
         cache_key = (security_id, timeframe)
@@ -34,19 +35,20 @@ class IndicatorCache:
             log.debug("indicator_cache_hit", security_id=security_id, timeframe=timeframe)
             return self._cache[cache_key]
 
-        db = self.mongo_client.get_database("trading")
+        db = self.mongo_client.get_database(mongo_db_name)
         collection = db.get_collection("market_bars")
 
+        # Bars use ts + metadata.{security_id, timeframe} schema (written by BarWriter)
         query = {
-            "security_id": security_id,
-            "timeframe": timeframe,
-            "bar_time": {
+            "metadata.security_id": security_id,
+            "metadata.timeframe": timeframe,
+            "ts": {
                 "$gte": from_date,
                 "$lte": to_date,
             },
         }
 
-        bars = list(collection.find(query).sort("bar_time", 1))
+        bars = list(collection.find(query).sort("ts", 1))
 
         if not bars:
             log.warning(
@@ -59,7 +61,7 @@ class IndicatorCache:
         # Convert to Polars DataFrame for vectorized computation
         df = pl.DataFrame(
             {
-                "bar_time": [bar["bar_time"] for bar in bars],
+                "bar_time": [bar["ts"] for bar in bars],
                 "open": [Decimal(str(bar["open"])) for bar in bars],
                 "high": [Decimal(str(bar["high"])) for bar in bars],
                 "low": [Decimal(str(bar["low"])) for bar in bars],

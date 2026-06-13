@@ -133,6 +133,15 @@ class PaperBroker:
             self._open_orders[sid] = []
         self._open_orders[sid].append(order)
 
+    def notify_subscribe(self, security_id: str) -> None:
+        """Pre-register security_id so the run-loop subscribes tick.{sid} immediately.
+
+        Called from MarketControl.subscribe() before place_order() so the first tick
+        after order placement fills the order rather than being missed.
+        """
+        if security_id not in self._open_orders:
+            self._open_orders[security_id] = []
+
     async def cancel_order(self, order_id: int) -> None:
         """Remove an order from the in-memory watch list."""
         for orders in self._open_orders.values():

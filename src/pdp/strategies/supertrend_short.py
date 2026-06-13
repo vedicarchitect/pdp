@@ -51,6 +51,7 @@ class SuperTrendShort(Strategy):
         # Risk controls (mirror backtest_multiday.py LEG_STOP_PER_LOT / DAY_STOP_LOSS).
         self.leg_stop_per_lot: Decimal = Decimal(str(p.get("leg_stop_per_lot", 1000)))
         self.day_stop: Decimal = Decimal(str(p.get("day_stop", 10000)))
+        self.leg_stop_ltp_staleness_secs: float = float(p.get("leg_stop_ltp_staleness_secs", 30))
 
         self._direction: int | None = None
         self._current: dict[str, Any] | None = None
@@ -136,6 +137,15 @@ class SuperTrendShort(Strategy):
         # Heartbeat: one per bar inside the trading window, before decisions.
         self.log_heartbeat(bar.bar_time)
 
+        # Sync in-memory lots count from positions table to survive restarts / partial fills.
+        if self._current is not None:
+            _net_qty = await self.ctx.orders.get_net_qty(self._current["security_id"])
+            if _net_qty == 0:
+                self.ctx.log.info("lots_sync_position_flat", security_id=self._current["security_id"])
+                self._current = None
+            else:
+                self._current["lots"] = abs(_net_qty) // self.lot_size
+
         # Daily loss cap: once cumulative realized P&L has reached -day_stop, flatten any
         # open leg and trade no more today. Realized P&L from a stop-driven close lands in
         # the ledger after its cover fills, so this is caught at the start of a later bar.
@@ -158,7 +168,12 @@ class SuperTrendShort(Strategy):
         if self._current is None:
             await self._open(bar, desired, self.start_lots)
         elif self._current["option_type"] != desired:
+            old_sid = self._current["security_id"]
             await self._close_current("flip")
+            remaining = await self.ctx.orders.get_net_qty(old_sid)
+            if remaining != 0:
+                self.ctx.log.info("flip_open_deferred", security_id=old_sid, net_qty=remaining)
+                return
             await self._open(bar, desired, self.start_lots)
         elif self._current["lots"] < self.max_lots:
             await self._add(self.add_lots)
@@ -189,17 +204,34 @@ class SuperTrendShort(Strategy):
         return total
 
     async def _leg_stop_hit(self) -> bool:
-        """True when the open leg's unrealized MTM loss has reached the per-lot stop."""
+        """True when the open leg's unrealized MTM loss has reached the per-lot stop.
+
+        Marks the open option leg against its own fresh Redis LTP. When that LTP is
+        absent or stale (older than ``leg_stop_ltp_staleness_secs``) the stop is *not*
+        evaluated on this bar: ``on_bar`` is driven by the NIFTY *index* bar, so the
+        bar's close is the spot level — never a valid mark for the option premium.
+        The skip is logged as ``leg_stop_ltp_stale_fallback`` and the next fresh tick
+        (within the staleness window) catches the move.
+        """
         c = self._current
         if c is None:
             return False
         net_qty, avg = await self.ctx.orders.get_position(c["security_id"])
         if net_qty >= 0 or avg <= 0:
             return False  # not (yet) short, or no average to mark against
-        ltp = await self.ctx.market.ltp(c["security_id"]) if self.ctx.market else None
-        if ltp is None or ltp <= 0:
-            return False  # stale/zero price — never stop on a bogus quote
-        mtm = (avg - ltp) * Decimal(abs(net_qty))  # loss is negative when ltp > avg
+        if self.ctx.market is None:
+            return False
+
+        ltp, age = await self.ctx.market.ltp_with_age(c["security_id"])
+        if ltp is None or ltp <= 0 or (age is not None and age > self.leg_stop_ltp_staleness_secs):
+            self.ctx.log.info(
+                "leg_stop_ltp_stale_fallback",
+                security_id=c["security_id"],
+                age_secs=round(age, 1) if age is not None else None,
+            )
+            return False  # no fresh option price — skip rather than mark against the index
+
+        mtm = (avg - ltp) * Decimal(abs(net_qty))  # loss is negative when price > avg
         limit = self.leg_stop_per_lot * Decimal(int(c["lots"]))
         return mtm <= -limit
 

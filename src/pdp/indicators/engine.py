@@ -49,3 +49,15 @@ class IndicatorEngine:
     def get(self, security_id: str, timeframe: str) -> SuperTrendState | None:
         """Latest computed SuperTrend for the pair, or None if not yet seeded."""
         return self._latest.get((security_id, timeframe))
+
+    def seed_from_bars(self, bars: list[BarClosed]) -> int:
+        """Feed a chronologically-ordered list of historical bars through on_bar().
+
+        Returns the number of bars processed. Callers are responsible for sorting
+        and fetching bars; this method only drives the tracker state forward.
+        """
+        count = 0
+        for bar in bars:
+            self.on_bar(bar)
+            count += 1
+        return count

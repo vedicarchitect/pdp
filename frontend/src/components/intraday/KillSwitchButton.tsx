@@ -59,7 +59,7 @@ export function KillSwitchButton() {
       <button
         onClick={() => setUiState('confirming')}
         disabled={isBusy}
-        className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:bg-red-900 disabled:cursor-not-allowed text-white font-bold text-sm rounded border border-red-500 flex items-center gap-2 transition-colors"
+        className="px-4 py-2 bg-bearish/90 hover:bg-bearish disabled:bg-bearish/30 disabled:cursor-not-allowed text-white font-bold text-sm rounded-lg border border-bearish/50 shadow-md shadow-bearish/20 flex items-center gap-2 transition-all duration-200"
         aria-label="Kill switch — cancel all orders and flatten all positions"
       >
         {isBusy ? (
@@ -75,22 +75,22 @@ export function KillSwitchButton() {
 
       {/* Confirmation modal */}
       {uiState === 'confirming' && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" role="dialog" aria-modal>
-          <div className="bg-gray-900 border border-red-700 rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl">
-            <h2 className="text-lg font-bold text-red-400 mb-2">⚠ Confirm Kill Switch</h2>
-            <p className="text-gray-300 text-sm mb-6">
-              Are you sure? This will <strong>cancel all open orders</strong> and <strong>flatten all intraday positions</strong> at market price immediately. This action cannot be undone.
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 transition-opacity" role="dialog" aria-modal>
+          <div className="glass-panel border-bearish/50 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl shadow-bearish/10 transform scale-100 transition-transform">
+            <h2 className="text-lg font-bold text-bearish mb-2">⚠ Confirm Kill Switch</h2>
+            <p className="text-text-muted text-sm mb-6 leading-relaxed">
+              Are you sure? This will <strong className="text-text-main">cancel all open orders</strong> and <strong className="text-text-main">flatten all intraday positions</strong> at market price immediately. This action cannot be undone.
             </p>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setUiState('idle')}
-                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded transition-colors"
+                className="px-4 py-2 bg-surface hover:bg-surface-hover text-text-main text-sm font-medium rounded-lg border border-surface-border transition-all duration-200"
               >
                 Cancel
               </button>
               <button
                 onClick={execute}
-                className="px-4 py-2 bg-red-700 hover:bg-red-600 text-white font-bold text-sm rounded transition-colors"
+                className="px-4 py-2 bg-bearish hover:bg-bearish/90 text-white font-bold text-sm rounded-lg shadow-md shadow-bearish/20 transition-all duration-200"
               >
                 Yes, Execute Kill Switch
               </button>
@@ -102,10 +102,10 @@ export function KillSwitchButton() {
       {/* Toast notification */}
       {toast && (
         <div
-          className={`fixed bottom-4 right-4 max-w-sm px-4 py-3 rounded border text-sm z-50 shadow-lg ${
+          className={`fixed bottom-4 right-4 max-w-sm px-5 py-3.5 rounded-lg border text-sm font-medium z-50 shadow-xl transition-all duration-300 translate-y-0 ${
             uiState === 'error' || uiState === 'idle' && toast.includes('failed')
-              ? 'bg-red-900 border-red-600 text-red-200'
-              : 'bg-gray-800 border-gray-600 text-gray-200'
+              ? 'glass-panel bg-bearish/10 border-bearish/40 text-bearish'
+              : 'glass-panel bg-surface border-surface-border text-text-main'
           }`}
         >
           {toast}

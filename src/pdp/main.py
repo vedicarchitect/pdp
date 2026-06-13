@@ -99,6 +99,7 @@ async def lifespan(app: FastAPI):
     )
     strategy_host.load_registry()
     strategy_host.set_redis(app.state.redis)
+    strategy_host.set_paper_broker(paper_broker)
     app.state.strategy_host = strategy_host
 
     # Universal indicator engine — computes SuperTrend(3,1) once per (security, timeframe)
@@ -119,8 +120,11 @@ async def lifespan(app: FastAPI):
         for cfg in _all_configs
         for w in cfg.watchlist
     ]
-    if _watchlist_dicts and settings.DHAN_CLIENT_ID:
-        await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
+    if _watchlist_dicts:
+        try:
+            await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
+        except Exception as exc:
+            log.warning("indicator_warmup_failed", exc=str(exc))
 
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None

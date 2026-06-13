@@ -13,6 +13,7 @@ log = structlog.get_logger()
 async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
     await _ensure_market_bars(db)
     await _ensure_expired_option_bars(db)
+    await _ensure_option_bars(db)
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
     await _ensure_portfolio_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
@@ -52,6 +53,47 @@ async def _ensure_expired_option_bars(db: AsyncIOMotorDatabase) -> None:  # type
         log.info("mongo_collection_created", collection="expired_option_bars")
     except CollectionInvalid:
         log.debug("mongo_collection_exists", collection="expired_option_bars")
+
+
+async def _ensure_option_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Unified options warehouse keyed by the real fixed contract.
+
+    A **regular** (non-time-series) collection — Mongo time-series collections cannot carry a
+    unique index, and we need DB-enforced dedup so the live feed and backfill can both write
+    without ever creating duplicate bars. Keyed by
+    ``(underlying, expiry_date, strike, option_type, timeframe, ts)``.
+    """
+    try:
+        await db.create_collection("option_bars")
+        log.info("mongo_collection_created", collection="option_bars")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="option_bars")
+
+    col = db["option_bars"]
+    # Unique contract+ts key: makes duplicate bars structurally impossible across producers.
+    await col.create_index(
+        [
+            ("underlying", ASCENDING),
+            ("expiry_date", ASCENDING),
+            ("strike", ASCENDING),
+            ("option_type", ASCENDING),
+            ("timeframe", ASCENDING),
+            ("ts", ASCENDING),
+        ],
+        unique=True,
+        name="uq_contract_ts",
+    )
+    # Read paths: by expiry (whole chain for a day) and by strike (a fixed-strike series).
+    await col.create_index(
+        [("underlying", ASCENDING), ("expiry_date", ASCENDING), ("option_type", ASCENDING),
+         ("ts", ASCENDING)],
+        name="idx_expiry_optype_ts",
+    )
+    await col.create_index(
+        [("underlying", ASCENDING), ("strike", ASCENDING), ("option_type", ASCENDING),
+         ("ts", ASCENDING)],
+        name="idx_strike_optype_ts",
+    )
 
 
 async def _ensure_option_chains(
@@ -122,6 +164,10 @@ def get_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # 
 
 def get_expired_option_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["expired_option_bars"]
+
+
+def get_option_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["option_bars"]
 
 
 def get_chains_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
