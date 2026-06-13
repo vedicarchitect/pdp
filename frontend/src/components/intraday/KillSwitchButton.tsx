@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface KillResult {
   status: string
@@ -53,13 +53,27 @@ export function KillSwitchButton() {
 
   const isBusy = uiState === 'calling'
 
+  useEffect(() => {
+    if (uiState === 'confirming') {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          setUiState('idle')
+        }
+      }
+      // Use capture phase to ensure it runs before other handlers might stop propagation
+      document.addEventListener('keydown', handleKeyDown, true)
+      return () => document.removeEventListener('keydown', handleKeyDown, true)
+    }
+  }, [uiState])
+
   return (
     <div className="relative">
       {/* Main kill-switch button */}
       <button
         onClick={() => setUiState('confirming')}
         disabled={isBusy}
-        className="px-4 py-2 bg-bearish/90 hover:bg-bearish disabled:bg-bearish/30 disabled:cursor-not-allowed text-white font-bold text-sm rounded-lg border border-bearish/50 shadow-md shadow-bearish/20 flex items-center gap-2 transition-all duration-200"
+        aria-busy={isBusy}
+        className="px-4 py-2 bg-bearish/90 hover:bg-bearish disabled:bg-bearish/30 disabled:cursor-not-allowed text-white font-bold text-sm rounded-lg border border-bearish/50 shadow-md shadow-bearish/20 flex items-center gap-2 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-bearish focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
         aria-label="Kill switch — cancel all orders and flatten all positions"
       >
         {isBusy ? (
@@ -83,14 +97,15 @@ export function KillSwitchButton() {
             </p>
             <div className="flex gap-3 justify-end">
               <button
+                autoFocus
                 onClick={() => setUiState('idle')}
-                className="px-4 py-2 bg-surface hover:bg-surface-hover text-text-main text-sm font-medium rounded-lg border border-surface-border transition-all duration-200"
+                className="px-4 py-2 bg-surface hover:bg-surface-hover text-text-main text-sm font-medium rounded-lg border border-surface-border transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-main"
               >
                 Cancel
               </button>
               <button
                 onClick={execute}
-                className="px-4 py-2 bg-bearish hover:bg-bearish/90 text-white font-bold text-sm rounded-lg shadow-md shadow-bearish/20 transition-all duration-200"
+                className="px-4 py-2 bg-bearish hover:bg-bearish/90 text-white font-bold text-sm rounded-lg shadow-md shadow-bearish/20 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-bearish focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
               >
                 Yes, Execute Kill Switch
               </button>
