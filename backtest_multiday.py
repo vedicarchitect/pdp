@@ -56,6 +56,14 @@ DAY_STOP_LOSS    = 10_000.0  # no more trades if realized day loss >= this
 IST = timedelta(hours=5, minutes=30)
 TF_MIN = 5   # signal timeframe in minutes; source bars are fetched at 1m and resampled
 
+# ── Input-data completeness gate ──────────────────────────────────────────────
+# A trade day is only simulated when its NIFTY 1m spot series is materially complete:
+# ≥ MIN_BARS_FRAC of the expected full-session count AND no intraday hole ≥ MAX_GAP_MIN.
+# Incomplete days are reported as data_incomplete (no trades) rather than silently traded —
+# SuperTrend on a gapped series freezes and cannot flip when it should. Backfill is an
+# explicit step (scripts/backfill_nifty_spot.py), never a hidden hot-path fetch.
+# The gate logic lives in pdp.backtest.completeness so it is unit-testable in isolation.
+
 # ── Logging (script-level; matches backtest's use of stdlib logging) ──────────
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +87,7 @@ from pdp.backtest.chain_loader import load_expiry_chain, lookup_strike
 from pdp.options.gap_backfill import backfill_gaps
 from pdp.settings import get_settings
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
+from pdp.backtest.completeness import spot_completeness
 from decimal import Decimal
 
 _MASTERS_DIR = Path(os.environ.get("MASTERS_DIR", "data/masters"))
@@ -320,6 +329,27 @@ def preload_spot(days: list[date]) -> None:
         _spot_raw_by_day.setdefault((ts + IST).date(), []).append(b)
     _spot_queries += 1
     log.info("spot_preload  spot_queries=%d  days_with_spot=%d", _spot_queries, len(_spot_raw_by_day))
+
+def _prior_session_5m(trade_date: date, max_lookback: int = 7) -> list:
+    """Resampled 5m bars for the most recent trading day before ``trade_date``.
+
+    Used to warm the SuperTrend tracker so each day inherits the prior day's direction —
+    matching how TradingView/Kite computes a continuous ST line across the day boundary
+    (e.g. 06-12 enters GREEN from 06-11's uptrend, the gap-up holds GREEN, then the morning
+    fall flips RED ~09:50). Walks back over weekends/holidays (no-data days) up to
+    ``max_lookback`` calendar days. Returns [] if no prior session is found.
+    """
+    d = trade_date - timedelta(days=1)
+    for _ in range(max_lookback):
+        if d.weekday() < 5:
+            st_ut = datetime(d.year, d.month, d.day, 3, 30, tzinfo=timezone.utc)
+            en_ut = datetime(d.year, d.month, d.day, 10, 5, tzinfo=timezone.utc)
+            raw1 = _spot_1m_for_day(d, st_ut, en_ut)
+            if len(raw1) >= 60:  # a usable prior session (well over the ST warmup need)
+                return resample_mongo_bars(raw1, TF_MIN)
+        d -= timedelta(days=1)
+    return []
+
 
 def _spot_1m_for_day(trade_date: date, st_ut: datetime, en_ut: datetime) -> list:
     """NIFTY 1m bars for a day from the pre-loaded cache (filtered to the session window).
@@ -598,6 +628,33 @@ def simulate_day(trade_date: date):
     # the live aggregator); fall back to native 5m, then to the Dhan API (1m + resample).
     # --native5m skips the 1m path to allow parity comparison against native 5m data.
     raw1 = [] if args.native5m else _spot_1m_for_day(trade_date, st_ut, en_ut)
+
+    # ── Completeness gate (1m path only) ──
+    # Refuse to trade a day whose NIFTY 1m spot series is incomplete; SuperTrend on a
+    # gapped series freezes and cannot flip when it should, so any P&L would be fiction.
+    # --native5m intentionally bypasses the 1m path (parity tooling) and is not gated.
+    if not args.native5m:
+        completeness = spot_completeness(raw1)
+        log.info("spot_completeness  date=%s  bars=%d  max_gap_min=%.0f  ok=%s",
+                 ds, completeness["bars"], completeness["max_gap_min"], completeness["ok"])
+        if not completeness["ok"]:
+            return {
+                "date": ds,
+                "status": "data_incomplete",
+                "reason": completeness["reason"],
+                "nifty_bars": completeness["bars"],
+                "max_gap_min": completeness["max_gap_min"],
+                "trades": [],
+                "leg_records": [],
+                "gross_pnl": 0.0,
+                "commission": 0.0,
+                "realized": 0.0,
+                "done_reason": "",
+                "nifty_open": 0.0,
+                "nifty_close": 0.0,
+                "nifty_chg": 0.0,
+            }
+
     if raw1:
         nifty_bars = resample_mongo_bars(raw1, TF_MIN)
     else:
@@ -649,8 +706,16 @@ def simulate_day(trade_date: date):
         _tgt = float(otm_strike(_approx_spot, _ot))
         fetch_opt_fixed(trade_date, _ot, _tgt, exp_date)
 
-    # Precompute ST series
+    # Precompute ST series — warm the tracker with the prior session first so the line is
+    # continuous across the day boundary (matches Kite/TradingView). Warmup bars are fed
+    # but NOT emitted into `series`, so the day's first `st.flipped` reflects a real
+    # carried-over-direction change (e.g. the 06-12 GREEN gap-up flipping RED ~09:50),
+    # not a cold-start seed artifact. Without prior data the tracker cold-starts as before.
     tracker = SuperTrendTracker(period=3, multiplier=1)
+    for wb in _prior_session_5m(trade_date):
+        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=timezone.utc)
+        tracker.update(wb["high"], wb["low"], wb["close"], bar_time=wts)
+
     series  = []
     for b in nifty_bars:
         ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
@@ -668,6 +733,10 @@ def simulate_day(trade_date: date):
     day_pnl    = 0.0
     done       = False
     stop_reason = ""
+    # Wait-for-first-flip: suppress all new-position entries (open + scale-in) until the
+    # first genuine SuperTrend flip after session start. Anchors entries to a real momentum
+    # change, not the cold-start direction. Resets each day (this flag is per simulate_day).
+    first_flip_seen = False
 
     def _pos_bars(p: Position) -> list:
         """Retrieve the cached bars for the current position's fixed contract."""
@@ -719,6 +788,10 @@ def simulate_day(trade_date: date):
         if st is None: continue
         if ist_dt < start_dt: continue
 
+        # First genuine flip after session start arms entries for the rest of the day.
+        if not first_flip_seen and getattr(st, "flipped", False):
+            first_flip_seen = True
+
         # Square-off
         if ist_dt >= sqoff_dt:
             if pos:
@@ -752,6 +825,11 @@ def simulate_day(trade_date: date):
             else:
                 pos = None   # can't price it; clear position
             if done: continue
+
+        # ── Wait-for-first-flip: no new entry or scale-in until the first flip ──
+        # Stops, flip-close, and square-off above still run; only opening/adding is gated.
+        if not first_flip_seen:
+            continue
 
         # ── Compute target strike for the desired leg ──
         target_stk = float(otm_strike(bar_close, desired))
@@ -835,6 +913,12 @@ def simulate_day(trade_date: date):
 W = 130
 
 def print_day(r):
+    if r.get("status") == "data_incomplete":
+        print(f"\n{'='*W}")
+        print(f"  {r['date']}  |  DATA INCOMPLETE - skipped (no trades)  |  "
+              f"Bars: {r.get('nifty_bars', 0)}  |  {r.get('reason', '')}")
+        print(f"{'='*W}")
+        return
     print(f"\n{'='*W}")
     sign = "+" if r["nifty_chg"] >= 0 else ""
     stop    = f"  [DAY STOP: {r['done_reason']}]" if r["done_reason"] else ""
@@ -952,7 +1036,10 @@ for d in days:
     if r is None:
         print("SKIPPED (no data)")
         continue
-    print(f"OK  ({len(r['trades'])} trades)")
+    if r.get("status") == "data_incomplete":
+        print(f"DATA INCOMPLETE ({r.get('reason', '')})")
+    else:
+        print(f"OK  ({len(r['trades'])} trades)")
     print_day(r)
     results.append(r)
 
@@ -961,8 +1048,11 @@ log.info("backtest_complete  elapsed_s=%.2f  days=%d  option_queries=%d  spot_qu
          _elapsed, len(days), _chain_queries, _spot_queries)
 
 # ── Final summary ──────────────────────────────────────────────────────────────
+_n_traded = sum(1 for r in results if r.get("status") != "data_incomplete")
+_n_incomplete = sum(1 for r in results if r.get("status") == "data_incomplete")
 print(f"\n\n{'*'*W}")
-print(f"  FINAL SUMMARY  ({len(results)} days with data)")
+print(f"  FINAL SUMMARY  ({_n_traded} days simulated"
+      + (f", {_n_incomplete} skipped data-incomplete" if _n_incomplete else "") + ")")
 print(f"{'*'*W}")
 print(f"  {'Date':<12}  {'NIFTY Open':>10}  {'NIFTY Close':>11}  {'Chg':>7}  "
       f"{'Trades':>6}  {'Gross':>11}  {'Comm':>8}  {'Net':>11}  Status")
@@ -971,7 +1061,14 @@ print(f"  {'-'*12}  {'-'*10}  {'-'*11}  {'-'*7}  "
 
 gp = gl = 0.0
 pd_ = ld = 0
+incomplete = 0
+traded = [r for r in results if r.get("status") != "data_incomplete"]
 for r in results:
+    if r.get("status") == "data_incomplete":
+        incomplete += 1
+        print(f"  {r['date']:<12}  {'':>10}  {'':>11}  {'':>7}  "
+              f"{'-':>6}  {'':>11}  {'':>8}  {'':>11}  [DATA INCOMPLETE: {r.get('reason','')}]")
+        continue
     s = "P" if r["realized"] >= 0 else "L"
     st = f"[{s}]" + (f" STOPPED" if r["done_reason"] else "")
     if r["realized"] >= 0: gp += r["realized"]; pd_ += 1
@@ -981,10 +1078,10 @@ for r in results:
           f"{r['gross_pnl']:>+11.2f}  {r['commission']:>8.2f}  "
           f"{r['realized']:>+11.2f}  {st}")
 
-tot_pnl  = sum(r["realized"] for r in results)
-tot_chg  = sum(r["commission"]  for r in results)
-tot_raw  = sum(r["gross_pnl"]  for r in results)
-tot_trades = sum(len(r["trades"]) for r in results)
+tot_pnl  = sum(r["realized"] for r in traded)
+tot_chg  = sum(r["commission"]  for r in traded)
+tot_raw  = sum(r["gross_pnl"]  for r in traded)
+tot_trades = sum(len(r["trades"]) for r in traded)
 
 print(f"  {'-'*12}  {'-'*10}  {'-'*11}  {'-'*7}  "
       f"{'-'*6}  {'-'*11}  {'-'*8}  {'-'*11}  ------")
@@ -992,7 +1089,9 @@ print(f"  {'TOTAL':<12}  {'':>10}  {'':>11}  {'':>7}  "
       f"{tot_trades:>6}  {tot_raw:>+11.2f}  {tot_chg:>8.2f}  "
       f"{tot_pnl:>+11.2f}")
 print()
-n = len(results)
+if incomplete:
+    print(f"  Data-incomplete days (skipped, excluded from stats): {incomplete}")
+n = len(traded)
 if n:
     win_rate = pd_ / n * 100
     print(f"  Profit days: {pd_}   Loss days: {ld}   Win rate: {win_rate:.0f}%")
