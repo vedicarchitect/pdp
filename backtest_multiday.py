@@ -32,9 +32,13 @@ from dataclasses import dataclass
 ap = argparse.ArgumentParser()
 ap.add_argument("--days",  type=int,  default=7)
 ap.add_argument("--start", type=str,  default=None,
-                help="End date YYYY-MM-DD (default: 2026-06-08)")
+                help="End date YYYY-MM-DD (default: last business day)")
 ap.add_argument("--native5m", action="store_true", default=False,
                 help="Force native 5m bars (skip 1m resample); used for resample parity check")
+ap.add_argument("--no-commission", action="store_true", default=False,
+                help="Simulate with zero commissions")
+ap.add_argument("--no-heal", action="store_true", default=False,
+                help="Skip the pre-run Dhan auto-heal of missing days in the backtest window")
 args = ap.parse_args()
 
 # ── Strategy constants ────────────────────────────────────────────────────────
@@ -71,7 +75,11 @@ from pdp.instruments.expiry_calendar import NiftyExpiryCalendar
 from pdp.backtest.resample import (
     resample_mongo_bars, resample_ohlcv,
 )
+from pdp.backtest.chain_loader import load_expiry_chain, lookup_strike
+from pdp.options.gap_backfill import backfill_gaps
 from pdp.settings import get_settings
+from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
+from decimal import Decimal
 
 _MASTERS_DIR = Path(os.environ.get("MASTERS_DIR", "data/masters"))
 
@@ -88,6 +96,13 @@ dhan = dhanhq(DhanContext(os.environ["DHAN_CLIENT_ID"],
 
 # ── Expiry calendar (load once; reads data/expiry/nifty_expiries.json) ────────
 _settings = get_settings()
+
+if args.no_commission:
+    calc = NullCommissionCalculator(_settings.backtest_commission)
+    print("  [commissions disabled — gross P&L = net P&L]")
+else:
+    calc = CommissionCalculator(_settings.backtest_commission)
+
 try:
     _cal = NiftyExpiryCalendar.load(_settings.EXPIRY_CACHE_PATH)
     log.info("Expiry calendar loaded from %s", _settings.EXPIRY_CACHE_PATH)
@@ -124,6 +139,16 @@ def price_at(bars, target, prefer="open"):
 _inst:  dict[tuple, dict] = {}
 _bars:  dict[tuple, list] = {}
 _snap:  dict[date, list | None] = {}
+
+# ── Batch pre-loaded data (filled once in main, before the day loop) ───────────
+# Option chains keyed by (trade_date, option_type) -> {strike: resampled bars}; built by
+# load_expiry_chain with one Mongo query per expiry. NIFTY 1m spot raw docs keyed by IST
+# trade-date, loaded for the whole range in one query. fetch_opt_fixed and the spot reader
+# serve from these so the bar-by-bar loop issues zero MongoDB round-trips.
+_chain_store: dict[tuple, dict] = {}
+_spot_raw_by_day: dict[date, list] = {}
+_chain_queries = 0   # option_bars queries (≈ number of distinct expiries)
+_spot_queries  = 0   # market_bars queries for NIFTY spot
 
 def _snapshot_nifty(trade_date: date | None):
     """NIFTY rows from the date's instrument snapshot (latest ≤ trade_date), or None.
@@ -254,6 +279,65 @@ def _resolve_expiry_from_calendar(trade_date: date) -> date | None:
         return None
     return _cal.resolve_expiry(trade_date, "WEEK", 1)
 
+# ── Batch pre-loaders (one query per expiry / one query for spot) ─────────────
+
+def _resolve_exp_for(trade_date: date) -> date | None:
+    """The expiry simulate_day will price against: calendar first, else next weekly Tuesday."""
+    e = _resolve_expiry_from_calendar(trade_date)
+    if e is not None:
+        return e
+    try:
+        return next_weekly_expiry(trade_date)
+    except Exception:  # noqa: BLE001 — mirror simulate_day's tolerance; skip preloading this day
+        return None
+
+def preload_chains(days: list[date]) -> None:
+    """Group backtest days by resolved expiry and pre-load each expiry's chain in one query."""
+    global _chain_queries
+    by_exp: dict[date, list[date]] = {}
+    for d in days:
+        e = _resolve_exp_for(d)
+        if e is not None:
+            by_exp.setdefault(e, []).append(d)
+    for exp, tds in by_exp.items():
+        store, nq = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=TF_MIN)
+        _chain_store.update(store)  # (trade_date, opt) keys are unique per expiry — no collisions
+        _chain_queries += nq
+    log.info("chain_preload  expiries=%d  option_queries=%d  days=%d  series=%d",
+             len(by_exp), _chain_queries, len(days), len(_chain_store))
+
+def preload_spot(days: list[date]) -> None:
+    """Load NIFTY 1m spot for the whole range in one query; bucket by IST trade-date."""
+    global _spot_queries
+    if args.native5m or not days:
+        return
+    lo_utc = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=timezone.utc)
+    hi_utc = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=timezone.utc)
+    for b in mdb["market_bars"].find(
+        {"metadata.security_id": "13", "metadata.timeframe": "1m",
+         "ts": {"$gte": lo_utc, "$lte": hi_utc}}).sort("ts", 1):
+        ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+        _spot_raw_by_day.setdefault((ts + IST).date(), []).append(b)
+    _spot_queries += 1
+    log.info("spot_preload  spot_queries=%d  days_with_spot=%d", _spot_queries, len(_spot_raw_by_day))
+
+def _spot_1m_for_day(trade_date: date, st_ut: datetime, en_ut: datetime) -> list:
+    """NIFTY 1m bars for a day from the pre-loaded cache (filtered to the session window).
+
+    Falls back to a direct Mongo query if the day was not pre-loaded, preserving behaviour.
+    """
+    cached = _spot_raw_by_day.get(trade_date)
+    if cached is None:
+        return list(mdb["market_bars"].find(
+            {"metadata.security_id": "13", "metadata.timeframe": "1m",
+             "ts": {"$gte": st_ut, "$lte": en_ut}}).sort("ts", 1))
+    out = []
+    for b in cached:
+        ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+        if st_ut <= ts <= en_ut:
+            out.append(b)
+    return out
+
 # ── Fixed-strike option_bars reader ──────────────────────────────────────────
 
 def _option_bars_cache_key(expiry_date: date, strike: float, opt_type: str, trade_date: date) -> tuple:
@@ -346,12 +430,12 @@ def fetch_opt_fixed(
     target_strike: float,
     expiry_date: date,
 ) -> tuple[float, list]:
-    """Fetch bars for a fixed-strike contract from the option_bars warehouse.
+    """Fetch bars for a fixed-strike contract, served from the pre-loaded chain store.
 
-    Flow:
-      1. Exact strike from option_bars (1m → resample TF_MIN).
-      2. Nearest available strike within ±WAREHOUSE_STRIKE_BAND if exact is missing (log substitution).
-      3. Live Dhan API fallback if warehouse has nothing (persists into option_bars for next run).
+    Flow (no MongoDB round-trips on the hot path — the chain is batch pre-loaded in main):
+      1. Exact strike from the in-memory store (already resampled to TF_MIN).
+      2. Nearest available strike within ±WAREHOUSE_STRIKE_BAND, from the same store.
+      3. Live Dhan API fallback if the band was not pre-loaded (persists into option_bars).
 
     Returns (actual_strike_used, bars).  bars=[] if all paths fail.
     """
@@ -361,27 +445,23 @@ def fetch_opt_fixed(
         # cache stores (actual_strike, bars)
         return cached
 
-    # 1) Exact strike from warehouse.
-    bars = _fetch_option_bars_for_day(trade_date, opt_type, target_strike, expiry_date)
-    if bars:
-        log.debug("opt_bars_exact strike=%.0f %s expiry=%s date=%s bars=%d",
-                  target_strike, opt_type, expiry_date, trade_date, len(bars))
-        result = (target_strike, bars)
-        _bars[cache_key] = result
-        return result
-
-    # 2) Nearest-strike fallback within band.
-    fallback_strike, fallback_bars = _nearest_strike_fallback(
-        trade_date, opt_type, target_strike, expiry_date
+    # 1+2) Exact then nearest-strike, resolved in-memory from the pre-loaded chain.
+    actual_strike, bars = lookup_strike(
+        _chain_store, trade_date, opt_type, target_strike,
+        band=_WAREHOUSE_STRIKE_BAND, step=_WAREHOUSE_STRIKE_STEP,
     )
-    if fallback_bars:
-        log.warning(
-            "opt_bars_nearest_strike_fallback  date=%s %s expiry=%s  "
-            "target=%.0f -> used=%.0f  bars=%d",
-            trade_date, opt_type, expiry_date,
-            target_strike, fallback_strike, len(fallback_bars),
-        )
-        result = (fallback_strike, fallback_bars)
+    if bars:
+        if actual_strike != float(target_strike):
+            log.warning(
+                "opt_bars_nearest_strike_fallback  date=%s %s expiry=%s  "
+                "target=%.0f -> used=%.0f  bars=%d",
+                trade_date, opt_type, expiry_date,
+                target_strike, actual_strike, len(bars),
+            )
+        else:
+            log.debug("opt_bars_exact strike=%.0f %s expiry=%s date=%s bars=%d",
+                      target_strike, opt_type, expiry_date, trade_date, len(bars))
+        result = (actual_strike, bars)
         _bars[cache_key] = result
         return result
 
@@ -506,6 +586,7 @@ class Trade:
     avg_entry:   float   = 0.0
     leg_pnl:     float | None = None  # only set on close trades
     day_pnl:     float   = 0.0
+    commission_inr: float = 0.0
 
 # ── Per-day simulation ─────────────────────────────────────────────────────────
 def simulate_day(trade_date: date):
@@ -516,9 +597,7 @@ def simulate_day(trade_date: date):
     # NIFTY bars — prefer 1m from Mongo and resample to the signal timeframe (matches
     # the live aggregator); fall back to native 5m, then to the Dhan API (1m + resample).
     # --native5m skips the 1m path to allow parity comparison against native 5m data.
-    raw1 = [] if args.native5m else list(mdb["market_bars"].find(
-        {"metadata.security_id": "13", "metadata.timeframe": "1m",
-         "ts": {"$gte": st_ut, "$lte": en_ut}}).sort("ts", 1))
+    raw1 = [] if args.native5m else _spot_1m_for_day(trade_date, st_ut, en_ut)
     if raw1:
         nifty_bars = resample_mongo_bars(raw1, TF_MIN)
     else:
@@ -606,6 +685,8 @@ def simulate_day(trade_date: date):
         qty     = pos.total_qty
         leg_pnl = (pos.avg_entry - close_px) * qty
         day_pnl += leg_pnl
+        turnover = Decimal(str(qty * close_px))
+        comm = float(calc.calculate("BUY", turnover).total_inr)
         trades.append(Trade(
             side="BUY", opt_type=pos.opt_type, strike=pos.strike,
             bar_time=ist_dt, qty=qty, price=close_px,
@@ -615,6 +696,7 @@ def simulate_day(trade_date: date):
             avg_entry=pos.avg_entry,
             leg_pnl=leg_pnl,
             day_pnl=day_pnl,
+            commission_inr=comm,
         ))
         if pos.entry_ist is not None:
             leg_records.append(LegRecord(
@@ -696,26 +778,30 @@ def simulate_day(trade_date: date):
                     entry_ist=ist_dt,
                 )
                 pos.add(START_LOTS * LOT, entry_px)
+                turnover = Decimal(str(START_LOTS * LOT * entry_px))
+                comm = float(calc.calculate("SELL", turnover).total_inr)
                 trades.append(Trade(
                     side="SELL", opt_type=desired, strike=actual_strike,
                     bar_time=ist_dt, qty=START_LOTS * LOT, price=entry_px,
                     nifty=bar_close,
                     note=f"open {START_LOTS}L",
                     cum_lots=pos.lots, avg_entry=pos.avg_entry,
-                    day_pnl=day_pnl,
+                    day_pnl=day_pnl, commission_inr=comm,
                 ))
         elif pos.sid == imap.get((int(actual_strike), desired.upper()), pos.sid) and pos.lots < MAX_LOTS:
             # Scale in (same contract, same expiry)
             add_px = price_at(new_bars, ist_dt, prefer="open")
             if add_px:
                 pos.add(ADD_LOTS * LOT, add_px)
+                turnover = Decimal(str(ADD_LOTS * LOT * add_px))
+                comm = float(calc.calculate("SELL", turnover).total_inr)
                 trades.append(Trade(
                     side="SELL", opt_type=desired, strike=actual_strike,
                     bar_time=ist_dt, qty=ADD_LOTS * LOT, price=add_px,
                     nifty=bar_close,
                     note=f"scale +{ADD_LOTS}L -> {pos.lots}L",
                     cum_lots=pos.lots, avg_entry=pos.avg_entry,
-                    day_pnl=day_pnl,
+                    day_pnl=day_pnl, commission_inr=comm,
                 ))
 
     # Unclosed position at end (rare — squareoff loop should handle)
@@ -726,7 +812,7 @@ def simulate_day(trade_date: date):
         if end_px:
             close_position(sqoff_dt, nifty_close, end_px, "squareoff_end")
 
-    charges = sum(1 for t in trades if t.side == "BUY") * 2 * 7.25
+    commission_total = sum(t.commission_inr for t in trades)
 
     return {
         "date":         ds,
@@ -736,9 +822,9 @@ def simulate_day(trade_date: date):
         "nifty_chg":    nifty_close - nifty_open,
         "trades":       trades,
         "leg_records":  leg_records,
-        "day_pnl":      day_pnl,
-        "charges":      charges,
-        "realized":     day_pnl - charges,
+        "gross_pnl":    day_pnl,
+        "commission":   commission_total,
+        "realized":     day_pnl - commission_total,
         "done_reason":  stop_reason,
         "nifty_bars":   len(nifty_bars),
         "use_expired":  use_expired,
@@ -774,8 +860,8 @@ def print_day(r):
               f"{t.cum_lots:>7}L  {avg_s}  {leg_s}  {day_s}  {t.note}")
 
     print(f"  {'-'*(W-2)}")
-    print(f"  Net premium: {r['day_pnl']:>+10.2f}   "
-          f"Charges: -{r['charges']:.2f}   "
+    print(f"  Gross premium: {r['gross_pnl']:>+10.2f}   "
+          f"Charges: -{r['commission']:.2f}   "
           f"Realized: {r['realized']:>+10.2f}")
 
     leg_records: list[LegRecord] = r.get("leg_records", [])
@@ -805,7 +891,42 @@ def print_day(r):
               f"Win: {wins}  Loss: {losses}")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-end_date = date.fromisoformat(args.start) if args.start else date(2026, 6, 8)
+def _last_biz_day(d: date) -> date:
+    """Most recent weekday on or before d (holidays fall out as no-data skips)."""
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def auto_heal(window: list[date]) -> None:
+    """Permanently keep the warehouse current: before each run, fill any missing days in the
+    backtest window from Dhan (same self-healing core the warehouser uses). ``only_missing``
+    makes this a single coverage aggregation + zero fetches when the window is already complete,
+    so repeat runs stay within the sub-minute budget; only genuinely-missing recent days (up to
+    the last business day Dhan serves) incur fetches. Skipped with --no-heal or no Dhan creds."""
+    if args.no_heal:
+        return
+    if _cal is None:
+        log.warning("auto_heal_skipped: expiry calendar unavailable")
+        return
+    if not (os.environ.get("DHAN_CLIENT_ID") and os.environ.get("DHAN_ACCESS_TOKEN")):
+        log.warning("auto_heal_skipped: no Dhan creds")
+        return
+    try:
+        col = mdb["option_bars"]
+        summary = backfill_gaps(
+            dhan=dhan, col=col, cal=_cal, days=window,
+            codes=[1, 2], band=_WAREHOUSE_STRIKE_BAND, only_missing=True)
+        if summary.get("gaps"):
+            print(f"  [auto-heal] filled {summary['days_filled']}/{summary['gaps']} missing day(s), "
+                  f"{summary['total_inserted']:,} bars: {', '.join(summary['gap_days'])}")
+        else:
+            print(f"  [auto-heal] window already complete ({len(window)} day(s), 0 fetches)")
+    except Exception as exc:  # noqa: BLE001 — healing is best-effort; never block the backtest
+        log.warning("auto_heal_error (%s); proceeding with existing data", exc)
+
+
+end_date = date.fromisoformat(args.start) if args.start else _last_biz_day(date.today())
 days     = biz_days(end_date, args.days)
 
 print(f"\n{'*'*W}")
@@ -813,6 +934,16 @@ print(f"  SuperTrend(3,1) NIFTY | {args.days} business days ending {end_date} "
       f"| Leg stop=1000/lot | Day stop={DAY_STOP_LOSS:,.0f}")
 print(f"  Option pricing: fixed-strike option_bars warehouse (nearest-strike fallback within ±{_WAREHOUSE_STRIKE_BAND} steps)")
 print(f"{'*'*W}")
+
+# Permanently keep the warehouse current to the last business day Dhan serves: heal any missing
+# days in this window from Dhan before reading them (no-op + 1 aggregation when already complete).
+auto_heal(days)
+
+# Batch pre-load all option chains (one query per expiry) and NIFTY spot (one query) so the
+# per-bar loop performs zero MongoDB round-trips — the key to the sub-minute budget.
+_t0 = time.perf_counter()
+preload_chains(days)
+preload_spot(days)
 
 results = []
 for d in days:
@@ -825,12 +956,16 @@ for d in days:
     print_day(r)
     results.append(r)
 
+_elapsed = time.perf_counter() - _t0
+log.info("backtest_complete  elapsed_s=%.2f  days=%d  option_queries=%d  spot_queries=%d",
+         _elapsed, len(days), _chain_queries, _spot_queries)
+
 # ── Final summary ──────────────────────────────────────────────────────────────
 print(f"\n\n{'*'*W}")
 print(f"  FINAL SUMMARY  ({len(results)} days with data)")
 print(f"{'*'*W}")
 print(f"  {'Date':<12}  {'NIFTY Open':>10}  {'NIFTY Close':>11}  {'Chg':>7}  "
-      f"{'Trades':>6}  {'Net Prem':>11}  {'Charges':>8}  {'Realized':>11}  Status")
+      f"{'Trades':>6}  {'Gross':>11}  {'Comm':>8}  {'Net':>11}  Status")
 print(f"  {'-'*12}  {'-'*10}  {'-'*11}  {'-'*7}  "
       f"{'-'*6}  {'-'*11}  {'-'*8}  {'-'*11}  ------")
 
@@ -843,12 +978,12 @@ for r in results:
     else:                   gl += r["realized"]; ld  += 1
     print(f"  {r['date']:<12}  {r['nifty_open']:>10.2f}  {r['nifty_close']:>11.2f}  "
           f"{r['nifty_chg']:>+7.2f}  {len(r['trades']):>6}  "
-          f"{r['day_pnl']:>+11.2f}  {r['charges']:>8.2f}  "
+          f"{r['gross_pnl']:>+11.2f}  {r['commission']:>8.2f}  "
           f"{r['realized']:>+11.2f}  {st}")
 
 tot_pnl  = sum(r["realized"] for r in results)
-tot_chg  = sum(r["charges"]  for r in results)
-tot_raw  = sum(r["day_pnl"]  for r in results)
+tot_chg  = sum(r["commission"]  for r in results)
+tot_raw  = sum(r["gross_pnl"]  for r in results)
 tot_trades = sum(len(r["trades"]) for r in results)
 
 print(f"  {'-'*12}  {'-'*10}  {'-'*11}  {'-'*7}  "

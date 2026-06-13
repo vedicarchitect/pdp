@@ -44,7 +44,7 @@ log = structlog.get_logger()
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Dhan gap-fill for option_bars (post-Abi tail).")
-    ap.add_argument("--from", dest="date_from", default="2026-05-23")
+    ap.add_argument("--from", dest="date_from", default=None)
     ap.add_argument("--to", dest="date_to", default=date.today().isoformat())
     ap.add_argument("--codes", default="1,2")
     ap.add_argument("--band", type=int, default=None)
@@ -55,14 +55,16 @@ def main() -> int:
 
     s = get_settings()
     band = a.band if a.band is not None else s.WAREHOUSE_STRIKE_BAND
+    date_from = a.date_from if a.date_from is not None else s.ABI_CUTOFF_DATE
     codes = [int(x) for x in a.codes.split(",") if x.strip()]
-    days = trading_days(date.fromisoformat(a.date_from), date.fromisoformat(a.date_to),
+    days = trading_days(date.fromisoformat(date_from), date.fromisoformat(a.date_to),
                         holidays(s.NSE_HOLIDAYS_JSON))
 
     if a.dry_run:
         log.info("dry_run", trading_days=len(days), first=str(days[0]) if days else None,
                  last=str(days[-1]) if days else None, codes=codes, labels=len(labels(band)),
-                 planned_fetches=len(days) * len(codes) * len(labels(band)) * 2)
+                 planned_fetches=len(days) * len(codes) * len(labels(band)) * 2,
+                 date_from=date_from)
         return 0
 
     from dhanhq import DhanContext, dhanhq

@@ -7,7 +7,9 @@ Gates:
   4. expiry_date plausibility:  no bar's IST trade-day is after its expiry_date
   5. strike_label ↔ strike spacing consistency (sampled): within one (expiry_date, ts),
      ATM±N strikes sit N grid-steps from the ATM strike
-  6. (optional) Abi↔Mongo count reconciliation for a range (`--duck --from --to`)
+  6. Timestamp coverage: abi series must span at least 3 distinct IST trade-days
+  7. Live↔backfill overlap reconciliation: no abi bars after the Dhan gap-fill cutoff
+  8. (optional) Abi↔Mongo count reconciliation for a range (`--duck --from --to`)
 
 Usage:
   python scripts/validate_options_warehouse.py
@@ -34,7 +36,7 @@ STEP = 50  # NIFTY strike grid
 IST = timedelta(hours=5, minutes=30)
 
 
-def _check(col) -> list[str]:
+def _check(col, cutoff_date: date | None = None) -> list[str]:
     failures: list[str] = []
     total = col.count_documents({})
     log.info("counts", total=total)
@@ -106,6 +108,39 @@ def _check(col) -> list[str]:
     if label_bad:
         failures.append(f"strike_label↔strike mismatches in sample: {label_bad}")
 
+    # 6. Timestamp coverage: every abi (expiry_date, option_type) series must span ≥3 IST trade-days.
+    # A weekly series in the historical Abi export always covers multiple days; fewer than 3
+    # indicates a partial migration or truncated scrape.
+    thin_result = list(col.aggregate([
+        {"$match": {"source": "abi"}},
+        {"$group": {
+            "_id": {
+                "e": "$expiry_date", "o": "$option_type",
+                "d": {"$dateTrunc": {
+                    "date": {"$add": ["$ts", int(IST.total_seconds() * 1000)]},
+                    "unit": "day",
+                }},
+            },
+        }},
+        {"$group": {"_id": {"e": "$_id.e", "o": "$_id.o"}, "days": {"$sum": 1}}},
+        {"$match": {"days": {"$lt": 3}}},
+        {"$count": "thin_series"},
+    ]))
+    n_thin = thin_result[0]["thin_series"] if thin_result else 0
+    log.info("gate_timestamp_coverage", thin_abi_series=n_thin)
+    if n_thin:
+        failures.append(f"abi series with fewer than 3 distinct trade-days: {n_thin}")
+
+    # 7. Live↔backfill overlap reconciliation: after the Abi cutoff only dhan_api bars expected.
+    if cutoff_date is not None:
+        cutoff_utc = (datetime(cutoff_date.year, cutoff_date.month, cutoff_date.day) - IST).replace(tzinfo=UTC)
+        abi_post = col.count_documents({"source": "abi", "ts": {"$gte": cutoff_utc}})
+        dhan_pre = col.count_documents({"source": "dhan_api", "ts": {"$lt": cutoff_utc}})
+        log.info("gate_overlap_reconciliation",
+                 abi_post_cutoff=abi_post, dhan_api_pre_cutoff=dhan_pre, cutoff=str(cutoff_date))
+        if abi_post:
+            failures.append(f"abi bars found after cutoff {cutoff_date}: {abi_post}")
+
     return failures
 
 
@@ -140,7 +175,8 @@ def main() -> int:
     from pymongo import MongoClient
     col = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]["option_bars"]
 
-    failures = _check(col)
+    cutoff = date.fromisoformat(s.ABI_CUTOFF_DATE)
+    failures = _check(col, cutoff_date=cutoff)
     if a.duck and a.date_from and a.date_to:
         failures += _reconcile(col, s.ABI_NIFTY_DUCKDB,
                                date.fromisoformat(a.date_from), date.fromisoformat(a.date_to),

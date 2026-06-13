@@ -97,6 +97,12 @@ def spot_by_minute(dhan: Any, ds: str) -> dict[datetime, float]:
     data = r.get("data", {}) if isinstance(r, dict) else {}
     if isinstance(data, dict) and "data" in data and "open" not in data:
         data = data["data"]
+    if not isinstance(data, dict):
+        # Dhan returned an error/empty payload (e.g. a string remark) for this day.
+        log.warning("gap_fill_spot_unavailable", day=ds,
+                    status=r.get("status") if isinstance(r, dict) else None,
+                    remarks=r.get("remarks") if isinstance(r, dict) else None)
+        return {}
     closes, tss = data.get("close", []), data.get("timestamp", data.get("start_Time", []))
     out: dict[datetime, float] = {}
     for i, c in enumerate(closes):

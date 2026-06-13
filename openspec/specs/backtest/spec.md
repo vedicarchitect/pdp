@@ -203,3 +203,67 @@ The system SHALL expose a REST endpoint to query backtest results by strategy_id
 - **WHEN** user calls `GET /api/backtests/<run_id>/trades`
 - **THEN** system returns list of trades from `backtest_trades` for that run
 
+### Requirement: Backtest output reports gross and net P&L
+The system SHALL report both gross P&L (premium collected minus premium paid, no costs) and net P&L (gross minus all commissions) in backtest output. Both values SHALL be present in the per-day result dict and the final summary table. The per-day `Trade` record SHALL carry a `commission_inr` field populated by `CommissionCalculator` at fill time.
+
+#### Scenario: Per-day output shows gross, commission, and net columns
+- **WHEN** `backtest_multiday.py` completes simulation for a trading day
+- **THEN** the printed day summary line shows `Net premium: <gross>  Charges: -<commission_total>  Realized: <net>` where `net = gross - commission_total`
+
+#### Scenario: Final summary includes net P&L totals
+- **WHEN** the multi-day backtest summary is printed
+- **THEN** each day row in the summary table includes a `Net` column (= gross - commission), and the footer shows `Total gross`, `Total commission`, `Total net`, and `Avg daily net`
+
+#### Scenario: Commission is calculated per fill not per day
+- **WHEN** a `Trade` is recorded (BUY or SELL)
+- **THEN** `trade.commission_inr` is set to the result of `CommissionCalculator.calculate(side=trade.side, turnover_inr=trade.qty * trade.price)` at the time of fill
+
+#### Scenario: --no-commission flag suppresses cost deduction
+- **WHEN** `backtest_multiday.py --no-commission` is run
+- **THEN** all `commission_inr` values are 0.00, gross P&L equals net P&L, and the output notes `[commissions disabled]`
+
+### Requirement: Batch option-chain pre-loading
+
+The backtest SHALL pre-load option bars in batch rather than querying per signal bar. For each
+distinct expiry in the backtest range the system SHALL issue at most one `option_bars` query,
+filtered by `underlying`, `expiry_date`, `option_type`, `timeframe`, and a `ts` range covering all
+that expiry's trade-days, using the `(underlying, expiry_date, option_type, ts)` index. Loaded bars
+SHALL be grouped in memory by `(trade_date, option_type, strike)` and resampled once to the signal
+timeframe. The total number of option-bar queries for a run SHALL be O(number of expiries), not
+O(number of signal bars).
+
+#### Scenario: One query per expiry
+
+- **WHEN** a backtest spans N trading days across M distinct weekly expiries
+- **THEN** the system issues at most M option-bar queries (plus one NIFTY spot query for the range)
+- **AND** the per-bar inner loop performs no MongoDB reads
+
+#### Scenario: Results are unchanged
+
+- **WHEN** the same backtest window is run with batch pre-loading
+- **THEN** the replayed trades, per-leg P&L, and summary totals are identical to the per-bar reader
+
+### Requirement: In-memory nearest-strike fallback
+
+When the exact target strike is absent for a `(trade_date, option_type)`, the backtest SHALL select
+the nearest available strike within `WAREHOUSE_STRIKE_BAND` grid steps from the already pre-loaded
+chain, without issuing additional MongoDB queries. The live broker API MAY be consulted only when
+no strike in the band was pre-loaded.
+
+#### Scenario: Substitute strike served from memory
+
+- **WHEN** the exact strike has no bars but a strike within the band does
+- **THEN** the nearest in-band strike is used and the substitution is logged
+- **AND** no extra MongoDB query is issued to find it
+
+### Requirement: Backtest performance instrumentation
+
+The backtest SHALL record and log, via `structlog`, the total elapsed wall-clock time, per-day
+elapsed time, and the count of option-bar queries issued. These metrics SHALL be emitted at the end
+of a run so the O(expiries) query budget and the sub-minute target can be verified.
+
+#### Scenario: Timing emitted
+
+- **WHEN** a multi-day backtest completes
+- **THEN** a structured log line reports `elapsed_s`, `days`, and `option_queries`
+

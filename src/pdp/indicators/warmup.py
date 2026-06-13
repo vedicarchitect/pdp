@@ -146,6 +146,7 @@ async def _fetch_from_mongo(
             )
         except Exception:
             continue
+    bars.sort(key=lambda b: b.bar_time)
     return bars
 
 

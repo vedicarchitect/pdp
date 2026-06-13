@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class BacktestCommissionSettings(BaseModel):
+    brokerage_per_order: Decimal = Decimal("20.00")
+    stt_rate: Decimal = Decimal("0.001")
+    txn_charge_rate: Decimal = Decimal("0.0003553")
+    sebi_rate: Decimal = Decimal("0.00001")
+    stamp_duty_rate: Decimal = Decimal("0.00004")
+    gst_rate: Decimal = Decimal("0.18")
 
 
 class Settings(BaseSettings):
@@ -71,7 +81,12 @@ class Settings(BaseSettings):
     WAREHOUSE_GAP_CHECK_INTERVAL_HOURS: float = 4.0
     WAREHOUSE_GAP_LOOKBACK_DAYS: int = 30
     # NSE holiday calendar (JSON {"dates": ["YYYY-MM-DD", ...]}) for trading-day enumeration.
-    NSE_HOLIDAYS_JSON: str = "../Abi/data/nse_holidays_2026.json"
+    # Multi-year (2023-2026) so historical gap scans don't treat past holidays as missing days.
+    NSE_HOLIDAYS_JSON: str = "data/calendars/nse_holidays_2023_2026.json"
+    # Abi DuckDB data cutoff: gap-fill starts from this date by default.
+    ABI_CUTOFF_DATE: str = "2026-05-23"
+
+    backtest_commission: BacktestCommissionSettings = BacktestCommissionSettings()
 
 
 @lru_cache(maxsize=1)
