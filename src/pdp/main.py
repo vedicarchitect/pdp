@@ -102,11 +102,15 @@ async def lifespan(app: FastAPI):
     strategy_host.set_paper_broker(paper_broker)
     app.state.strategy_host = strategy_host
 
-    # Universal indicator engine — computes SuperTrend(3,1) once per (security, timeframe)
-    # on each closed bar; strategies consume it via ctx.indicators (rule #4).
+    # Universal indicator engine — computes SuperTrend once per (security, timeframe)
+    # on each closed bar; strategies consume it via ctx.indicators (rule #4). Period and
+    # multiplier are settings-driven (default ST(10,2), the backtest-promoted config).
     from pdp.indicators.engine import IndicatorEngine
 
-    indicator_engine = IndicatorEngine(st_period=3, st_multiplier=1)
+    indicator_engine = IndicatorEngine(
+        st_period=settings.SUPERTREND_PERIOD,
+        st_multiplier=settings.SUPERTREND_MULTIPLIER,
+    )
     app.state.indicator_engine = indicator_engine
     strategy_host.set_indicator_engine(indicator_engine)
 

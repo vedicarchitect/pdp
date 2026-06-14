@@ -1,0 +1,29 @@
+# ST(10,2) / 15m / OTM-1 — promoted to paper 2026-06-14
+# Sweep result: PF 3.28 / net +232,700 / MaxDD 22,573 / 83 days / 1 stop
+# This is the active paper strategy config.
+id: st10_15m_otm1
+name: "ST(10,2) 15m OTM-1"
+
+st_period: 10
+st_multiplier: 2.0
+timeframe_min: 15
+moneyness: 1
+
+strike_step: 50
+base_lots: 2
+add_lots: 1
+max_lots: 5
+lot_size: 65
+
+start_ist: "09:30"
+squareoff_ist: "15:10"
+
+leg_stop_per_lot: 3000.0
+day_stop: 20000.0
+
+roll_enabled: true
+roll_trigger_prem: 20.0
+roll_target_min_prem: 50.0
+
+scale_in_gate: "premium_break"
+flip_mode: "strangle"
