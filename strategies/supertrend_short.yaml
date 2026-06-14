@@ -1,8 +1,13 @@
-# SuperTrend(3,1) intraday option-selling paper strategy on NIFTY.
+# SuperTrend(10,2) intraday option-selling paper strategy on NIFTY (15-minute).
 #
 # green (uptrend)  -> short OTM-1 PE ;  red (downtrend) -> short OTM-1 CE
 # flip -> close + reverse ; scale-in 2 -> 5 lots while the trend holds ;
 # no entries before 09:30 IST ; flatten all at 15:10 IST. Paper-only.
+#
+# Backtest-promoted 2026-06-14 (sweep over 83 days): ST(10,2) 15m OTM1 with these
+# stops = PF 4.12 / +277k, vs the prior ST(3,1) 5m = PF 0.48 / -292k. The SuperTrend
+# period/multiplier live in settings (SUPERTREND_PERIOD / SUPERTREND_MULTIPLIER),
+# since the IndicatorEngine computes them once for all strategies (rule #4).
 
 id: supertrend_short
 class: pdp.strategies.supertrend_short.SuperTrendShort
@@ -10,13 +15,13 @@ class: pdp.strategies.supertrend_short.SuperTrendShort
 watchlist:
   - security_id: "13"          # NIFTY index (Dhan IDX_I security_id)
     exchange_segment: IDX_I
-    timeframes: [5m]
+    timeframes: [15m]
 
 params:
   underlying: NIFTY
   underlying_security_id: "13"
   index_segment: IDX_I
-  timeframe: 5m
+  timeframe: 15m
   option_segment: NSE_FNO
   otm_steps: 1                 # sell one strike OTM
   strike_step: 50             # NIFTY strike spacing
@@ -26,8 +31,8 @@ params:
   max_lots: 5                 # scale-in cap
   start_ist: "09:30"          # no entries before this (IST)
   square_off_ist: "15:10"     # flatten everything at/after this (IST)
-  leg_stop_per_lot: 1000      # close the leg if MTM loss >= this x current lots
-  day_stop: 10000             # no more trades once day realized P&L <= -this
+  leg_stop_per_lot: 3000      # close the leg if MTM loss >= this x current lots
+  day_stop: 20000             # no more trades once day realized P&L <= -this
 
 risk:
   max_open_orders: 12          # transient OPEN orders during scale-in / cover

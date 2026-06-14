@@ -3,147 +3,83 @@
 A self-hosted, **paper-first** trading and investment platform for intraday, positional, and portfolio management on Indian exchanges (NSE/BSE/MCX via Dhan). Every capability is spec-driven: no implementation without an OpenSpec proposal.
 
 **Key Principles:**
-- 📋 **Spec-first**: All features defined in `openspec/` before coding
-- 📄 **Paper-engine default**: Live trading requires `LIVE=1` + broker config
-- ⚡ **Latency budget**: Tick → WebSocket p99 ≤ 50ms
-- 🗄️ **DB separation**: PostgreSQL (ACID ledger), MongoDB (time-series warehouse), Redis (hot cache)
-- 🔍 **Structured logging**: JSON logs via structlog
+- 📋 **Spec-first** — all features under `openspec/changes/<id>/` before coding
+- 📄 **Paper-first** — `LIVE=1` + `BROKER=dhan` required for real orders
+- ⚡ **Latency budget** — tick → WebSocket p99 ≤ 50ms
+- 🗄️ **DB separation** — PostgreSQL (ACID ledger) · MongoDB (time-series) · Redis (hot cache)
+- 🔍 **Structured logging** — JSON via structlog; no bare `print()` in core modules
 
 ---
 
-## Quickstart
+## Quick Start
 
-### Prerequisites
-- **Python 3.13+** (check with `python --version`)
-- **uv** package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **Docker & Docker Compose** for services
-- **Node.js 18+** for frontend/OpenSpec CLI (optional)
+**Prerequisites:** Python 3.13 · `uv` · Docker Desktop · Node.js ≥ 20 · Task
 
-### 1. Initial Setup
-
-```bash
-# Clone and navigate
-cd PDP
-
-# Copy environment template
-cp .env.example .env
-
-# Install Python dependencies
+```powershell
+# 1. Install dependencies
 uv sync
 
-# Optional: install dev dependencies (for testing, linting, type-checking)
-uv sync --group dev
+# 2. Copy env template (fill in DB/Redis/Mongo URLs — defaults work with Docker)
+cp .env.example .env
+
+# 3. Start infrastructure
+task db:up          # postgres:5432  redis:6379  mongo:27017
+
+# 4. Apply DB migrations
+task db:migrate
+
+# 5. Start API (http://localhost:8000)
+task dev
+
+# 6. (Optional) Start frontend (http://localhost:5173)
+cd frontend && npm install && npm run dev
 ```
 
-### 2. Start Infrastructure
-
-```bash
-# Bring up PostgreSQL 16, Redis 7, MongoDB 7
-docker compose up -d postgres redis mongo
-
-# Verify containers are running
-docker compose ps
-```
-
-### 3. Initialize Database
-
-```bash
-# Run all migrations
-uv run alembic upgrade head
-
-# Check migration status
-uv run alembic current
-```
-
-### 4. Run the API Server
-
-```bash
-# Start FastAPI with hot reload
-uv run uvicorn pdp.main:app --reload
-
-# Server runs at http://localhost:8000
-# API docs at http://localhost:8000/docs (Swagger UI)
-# Health check: http://localhost:8000/healthz
-```
-
-### 5. (Optional) Start Frontend Dev Server
-
-```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start Vite dev server
-npm run dev
-# → Frontend at http://localhost:5173
-```
+➡️ **Full operational details:** [RUNBOOK.md](RUNBOOK.md)
 
 ---
 
-## Development Workflow
+## All Tasks (`task --list`)
 
-### Running Tests
+```
+task dev                 Run API with hot reload (:8000)
+task monitor             Live strategy monitor (Perl, Redis+API)
+task reset-paper         ⚠️ Clear paper orders/trades/positions
+task backtest            Run backtest_multiday.py
 
-```bash
-# Run all tests
-uv run pytest
+task test                pytest
+task lint                ruff check + format --check
+task fmt                 ruff format + fix
+task typecheck           pyright
 
-# Run with coverage
-uv run pytest --cov=src/pdp --cov-report=term-report
+task db:up               Start postgres + redis + mongo
+task db:down             Stop containers
+task db:migrate          alembic upgrade head
+task db:tools            Start pgAdmin (:5050)
 
-# Run specific test file
-uv run pytest tests/positional/test_aggregation.py
+task backfill:spot       Backfill NIFTY 1m spot → market_bars
+task backfill:options    Gap-fill option_bars from Dhan
+task backfill:expired    Backfill expired-contract option bars
+task migrate:abi         Abi DuckDB → MongoDB option_bars
 
-# Run tests matching a pattern
-uv run pytest -k "test_greek" -v
+task audit:coverage      Audit option_bars coverage by date+strike
+task validate:warehouse  Validate warehouse integrity
+task validate:migration  Verify Abi → MongoDB migration
+
+task backtest:compare    Backtest vs paper journal (single day)
+task backtest:sweep      Multi-config parameter sweep
+
+task openspec:list       List all changes
+task openspec:show       Show a change
+task openspec:validate   Validate a change
+task openspec:archive    Archive a completed change
 ```
 
-### Type Checking & Linting
-
-```bash
-# Type check (strict mode on src/pdp/)
-uv run pyright
-
-# Format code with ruff
-uv run ruff format src/ tests/
-
-# Lint and show violations
-uv run ruff check src/ tests/
-
-# Fix auto-fixable violations
-uv run ruff check src/ tests/ --fix
-```
-
-### Database Migrations
-
-```bash
-# Create a new migration
-uv run alembic revision --autogenerate -m "add positions table"
-
-# Review the migration file in alembic/versions/
-# Then apply it:
-uv run alembic upgrade head
-
-# Roll back one migration
-uv run alembic downgrade -1
-
-# Check current migration version
-uv run alembic current
-
-# See migration history
-uv run alembic history
-```
-
-### Using Task Runner
-
-```bash
-# List available tasks
-task --list
-
-# Run a task (examples vary by Taskfile.yml)
-task build
-task test
+Pass args to parameterised tasks with `--`:
+```powershell
+task backfill:spot -- --from 2026-02-09 --to 2026-06-12 --only-missing
+task backtest:compare -- --date 2026-06-10
+task openspec:validate -- configurable-strategy-backtest-sweep --strict
 ```
 
 ---
@@ -152,417 +88,156 @@ task test
 
 ```
 PDP/
-├── openspec/                    # Spec-driven workflow
-│   ├── project.md               # Tech stack & architecture (READ THIS)
-│   ├── specs/                   # Archived, finalized capabilities
-│   │   ├── add-platform-skeleton/
-│   │   ├── add-instrument-registry/
-│   │   └── ...
-│   └── changes/                 # In-flight proposals
-│       ├── add-positional-monitor/
-│       └── ...
-│
-├── src/pdp/                     # Python package (strict type-checking)
-│   ├── main.py                  # FastAPI app & route mounting
-│   ├── settings.py              # Pydantic settings (env-driven config)
-│   ├── logging.py               # structlog setup
-│   ├── cli.py                   # Click CLI entry point (pdp command)
-│   ├── db/                      # Database layer
-│   │   ├── models.py            # SQLAlchemy ORM models
-│   │   ├── session.py           # Async session factory
-│   │   └── ...
-│   ├── market/                  # Market data & indicators
-│   │   ├── feed.py              # Broker WS adapter (Dhan)
-│   │   ├── bars.py              # OHLCV bar aggregation
-│   │   ├── router.py            # Tick routing & caching
-│   │   └── ...
-│   ├── orders/                  # Order routing & execution
-│   │   ├── models.py            # Order/trade/position models
-│   │   ├── paper.py             # Paper trading engine
-│   │   ├── broker.py            # Dhan broker adapter
-│   │   └── ...
-│   ├── portfolio/               # Holdings & P&L
-│   │   ├── service.py           # Portfolio MTM calculation
-│   │   └── ...
-│   ├── strategy/                # Pluggable strategy host
-│   │   ├── base.py              # Strategy interface
-│   │   └── manager.py           # Strategy lifecycle
-│   └── api/                     # FastAPI routes
-│       ├── orders.py            # POST /orders, PATCH /orders/{id}
-│       ├── market.py            # GET /instruments, /bars, /chains
-│       ├── portfolio.py         # GET /portfolio, /positions
-│       └── websocket.py         # WS /ws/market, /ws/orders
-│
-├── frontend/                    # Vite + React 19 frontend
-│   ├── src/
-│   │   ├── components/          # React components
-│   │   ├── hooks/               # Custom React hooks
-│   │   ├── routes/              # TanStack Router pages
-│   │   └── App.tsx
-│   ├── vite.config.ts
-│   └── package.json
-│
-├── tests/                       # pytest suite (async-aware)
-│   ├── conftest.py              # Shared fixtures
-│   ├── positional/              # Positional trading tests
-│   ├── orders/                  # Order execution tests
-│   └── ...
-│
-├── alembic/                     # SQLAlchemy migration tool
-│   ├── versions/                # Migration files
-│   └── env.py                   # Alembic config
-│
-├── CLAUDE.md                    # Agent guidance (spec-first, paper-first)
-├── docker-compose.yml           # PostgreSQL, Redis, MongoDB
-├── Taskfile.yml                 # Task runner commands
-├── pyproject.toml               # uv config, dependencies, tool settings
-├── .env.example                 # Environment template
-└── README.md                    # This file
+├── RUNBOOK.md                  # ← Full operational run guide (start here)
+├── CLAUDE.md                   # Agent rules + module index
+├── Taskfile.yml                # All task shortcuts
+├── openspec/
+│   ├── project.md              # Tech stack, architecture, conventions
+│   ├── specs/                  # Archived capabilities (source of truth)
+│   └── changes/                # In-flight proposals
+├── src/pdp/
+│   ├── main.py                 # FastAPI app factory + lifespan wiring
+│   ├── settings.py             # All env vars (pydantic-settings)
+│   ├── market/                 # Tick feed · BarAggregator · TickRouter · WSHub
+│   ├── orders/                 # PaperBroker · DhanBroker · OrderRouter
+│   ├── strategy/               # StrategyHost · BaseStrategy · StrategyContext
+│   ├── indicators/             # IndicatorEngine · SuperTrend · warmup
+│   ├── backtest/               # BacktestEngine · sim · commissions · output
+│   ├── options/                # OptionsChainPoller · Greeks · gap_backfill
+│   ├── warehouse/              # Abi DuckDB → MongoDB pipeline
+│   ├── portfolio/              # PortfolioService · MTM P&L · kill-switch
+│   ├── journal/                # JournalService · fill recording · daily stats
+│   ├── risk/                   # KillSwitchService · hard-cap auto-kill
+│   ├── alerts/                 # AlertEvaluator · AlertsHub
+│   ├── positional/             # Swing F&O + equity positions
+│   ├── instruments/            # Dhan scrip master
+│   ├── mongo/                  # MongoDB client + collection init
+│   └── db/                     # SQLAlchemy session + base
+├── frontend/                   # Vite + React 19 + TanStack + shadcn/ui
+├── strategies/                 # Strategy YAML configs (auto-loaded)
+│   └── supertrend_short.yaml   # Active: ST(3,1) NIFTY OTM selling
+├── scripts/                    # Operational scripts (see scripts/README.md)
+│   ├── backfill_nifty_spot.py
+│   ├── backfill_options_gap.py
+│   ├── backtest_compare.py
+│   ├── backtest_sweep.py
+│   ├── migrate_abi_options.py
+│   ├── audit_options_coverage.py
+│   ├── validate_options_warehouse.py
+│   ├── monitor.pl
+│   ├── reset_paper.py
+│   └── archive/                # One-time debug scripts (do not use as templates)
+├── backtest_multiday.py        # Main multi-day backtest runner (58 KB)
+├── tests/                      # pytest suite
+├── alembic/                    # DB migrations
+└── docker-compose.yml          # postgres · redis · mongo · pgadmin (profile:tools)
 ```
 
 ---
 
-## Core APIs
+## Tech Stack
 
-### Market Data
-
-```bash
-# Get all tradable instruments
-curl http://localhost:8000/instruments
-
-# Get instrument by symbol
-curl "http://localhost:8000/instruments?symbol=NIFTY50"
-
-# Stream market data (WebSocket)
-wscat -c ws://localhost:8000/ws/market
-# Subscribe to ticker updates
-{"action": "subscribe", "symbols": ["NSE:NIFTY50", "NSE:BANKNIFTY"]}
-```
-
-### Orders & Positions
-
-```bash
-# Place an order (paper engine by default)
-curl -X POST http://localhost:8000/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "symbol": "NIFTY50",
-    "side": "BUY",
-    "quantity": 1,
-    "order_type": "MARKET"
-  }'
-
-# Get open positions
-curl http://localhost:8000/positions
-
-# Get order history
-curl http://localhost:8000/orders
-
-# Modify an order
-curl -X PATCH http://localhost:8000/orders/{order_id} \
-  -H "Content-Type: application/json" \
-  -d '{"quantity": 2}'
-
-# Cancel an order
-curl -X DELETE http://localhost:8000/orders/{order_id}
-```
-
-### Portfolio
-
-```bash
-# Get portfolio summary
-curl http://localhost:8000/portfolio
-
-# Get holdings (equity + MF)
-curl http://localhost:8000/portfolio/holdings
-
-# Get real-time P&L
-curl http://localhost:8000/portfolio/pnl
-```
-
-### Options Analytics
-
-```bash
-# Get option chain for NIFTY50 (all strikes, current expiry)
-curl "http://localhost:8000/chains?symbol=NIFTY50"
-
-# Get Greeks for specific expiry
-curl "http://localhost:8000/chains?symbol=BANKNIFTY&expiry=2026-06-25"
-```
-
----
-
-## Configuration
-
-### Environment Variables
-
-Copy `.env.example` to `.env` and configure:
-
-```bash
-# App
-ENVIRONMENT=development
-DEBUG=true
-LOG_LEVEL=INFO
-
-# Database (PostgreSQL)
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/pdp
-
-# Cache (Redis)
-REDIS_URL=redis://localhost:6379/0
-
-# Warehouse (MongoDB)
-MONGODB_URL=mongodb://localhost:27017/pdp
-
-# Broker (Dhan)
-DHAN_CLIENT_ID=your_client_id
-DHAN_ACCESS_TOKEN=your_access_token
-LIVE=0  # 0 = paper engine, 1 = live trading
-
-# API
-API_BIND_HOST=0.0.0.0
-API_BIND_PORT=8000
-API_RELOAD=true
-```
+| Layer | Choice |
+|-------|--------|
+| Runtime | Python 3.13 · `uv` |
+| API | FastAPI + uvicorn (uvloop / httptools) |
+| Response models | `msgspec.Struct` (hot path) · `pydantic` (input) |
+| DataFrame | Polars |
+| PG ORM | SQLAlchemy 2.0 async + Alembic |
+| HTTP client | httpx async |
+| Logs | structlog JSON |
+| Lint / types | ruff · pyright (strict on `src/pdp/`) |
+| Task runner | Taskfile |
+| Broker | Dhan (paper + live-gated) |
+| Frontend | Vite + React 19 + TanStack Query + shadcn/ui |
 
 ---
 
 ## OpenSpec Workflow
 
-This project is **spec-first**. All features must start with an OpenSpec proposal.
+```powershell
+# List in-flight proposals
+task openspec:list
 
-```bash
-# 1. List active changes
-npx -y @fission-ai/openspec list
+# Start a new feature
+npx -y @fission-ai/openspec@latest new my-feature
 
-# 2. Show details of a change
-npx -y @fission-ai/openspec show add-positional-monitor
+# Validate before coding
+task openspec:validate -- my-feature --strict
 
-# 3. Validate all specs
-npx -y @fission-ai/openspec validate --all --strict
-
-# 4. Create a new change (start a new feature)
-npx -y @fission-ai/openspec new <change-id>
-# Creates: openspec/changes/<change-id>/design.md, specs/, tasks.md
-
-# 5. After implementation, archive the change
-npx -y @fission-ai/openspec archive <change-id>
-# Moves specs to openspec/specs/<capability>/
+# After implementation: promote to specs/
+task openspec:archive -- my-feature
 ```
 
-See [openspec/project.md](openspec/project.md) for architecture, tech stack, and conventions.
+See [openspec/project.md](openspec/project.md) for full architecture and conventions.
 
 ---
 
-## Broker Setup (Dhan)
+## Data Backfill (Dhan creds required)
 
-### Paper Trading (Default)
+```powershell
+# Spot bars first (options depend on spot for strike derivation)
+task backfill:spot -- --from 2026-02-09 --to 2026-06-12 --only-missing
 
-No setup needed—orders route to the paper engine. Check `src/pdp/orders/paper.py`.
+# Options bars (post Abi cutoff)
+task backfill:options -- --only-missing
 
-### Live Trading
-
-⚠️ **Paper is the default.** To enable live trading:
-
-1. **Get credentials from Dhan:**
-   - Sign up at [dhanhq.co](https://www.dhanhq.co/)
-   - Generate API credentials in dashboard
-
-2. **Configure environment:**
-   ```bash
-   DHAN_CLIENT_ID=your_id
-   DHAN_ACCESS_TOKEN=your_token
-   LIVE=1  # Enable live mode
-   ```
-
-3. **Verify broker adapter:**
-   - Check `src/pdp/orders/broker.py` for Dhan SDK usage
-   - All orders are validated against Dhan's rules (margin, liquidity, hours)
-
----
-
-## Testing
-
-### Unit Tests
-
-```bash
-# Run all tests
-uv run pytest
-
-# Run a specific module
-uv run pytest tests/orders/ -v
-
-# Run with output
-uv run pytest -s tests/positional/test_aggregation.py
-```
-
-### Integration Tests
-
-Tests hitting real PostgreSQL/MongoDB/Redis (via Docker):
-
-```bash
-# Make sure docker-compose is running
-docker compose ps
-
-# Run integration tests
-uv run pytest tests/ -m integration
-```
-
-### Frontend Testing
-
-```bash
-cd frontend
-
-# Run unit tests
-npm test
-
-# Run e2e tests with Playwright
-npm run test:e2e
-
-# Debug e2e tests in headed mode
-npm run test:e2e -- --headed
+# Validate coverage
+task audit:coverage
+task validate:warehouse
 ```
 
 ---
 
-## Troubleshooting
+## Live Trading
 
-### Database Connection Issues
-
-```bash
-# Check PostgreSQL is running
-docker compose logs postgres
-
-# Reset database (WARNING: deletes all data)
-docker compose down -v postgres
-docker compose up -d postgres
-uv run alembic upgrade head
-```
-
-### Redis Connection Issues
+Default is **always paper**. To enable real orders:
 
 ```bash
-# Check Redis is running and responsive
-docker compose exec redis redis-cli ping
-# Should return: PONG
+# .env
+LIVE=true
+BROKER=dhan
+DHAN_CLIENT_ID=<id>
+DHAN_ACCESS_TOKEN=<token>
 ```
 
-### MongoDB Connection Issues
-
-```bash
-# Check MongoDB is running
-docker compose logs mongo
-
-# Connect and check collections
-docker compose exec mongo mongosh --eval "show dbs"
-```
-
-### API Server Won't Start
-
-```bash
-# Check logs
-docker compose logs -f
-
-# Verify Python dependencies
-uv sync
-
-# Verify migrations applied
-uv run alembic current
-
-# Try manual server with full traceback
-uv run python -c "from pdp.main import app; print(app)"
-```
-
-### Type Checking Errors
-
-```bash
-# Full pyright output with context
-uv run pyright --outputjson | jq .
-
-# Check specific file
-uv run pyright src/pdp/orders/broker.py --verbose
-```
+Risk guards active in all modes:
+- `RISK_DAILY_LOSS_CAP_INR=50000` → auto kill-switch
+- `POST /risk/kill` → manual flatten
 
 ---
 
-## Frontend Development
+## Capability Status
 
-### Setup
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### Building for Production
-
-```bash
-npm run build
-# Output in frontend/dist/
-```
-
-### Component Library
-
-We use **shadcn/ui** for components. Add a component:
-
-```bash
-npm run add -- button  # adds Button component
-```
-
----
-
-## Contributing
-
-1. **Start with a spec proposal:**
-   ```bash
-   npx -y @fission-ai/openspec new my-feature
-   ```
-
-2. **Implement in a branch:**
-   ```bash
-   git checkout -b feat/my-feature
-   ```
-
-3. **Follow conventions:**
-   - One mutation per API endpoint
-   - Type check: `uv run pyright`
-   - Lint: `uv run ruff check --fix`
-   - Test: `uv run pytest`
-
-4. **Archive when done:**
-   ```bash
-   npx -y @fission-ai/openspec archive my-feature
-   ```
-
-5. **Create a PR** linking to the archived spec.
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Platform core + DB setup | ✅ Live | FastAPI + PG + Redis + Mongo |
+| Instrument registry | ✅ Live | Dhan scrip master sync |
+| Market data feed | ✅ Live | Dhan WS → TickRouter → bars |
+| Paper broker | ✅ Live | Redis LTP fill + slippage |
+| Dhan live broker | ✅ Live | Live-gated (`LIVE=1`) |
+| Order routing | ✅ Live | Paper ↔ live switch |
+| Strategy host | ✅ Live | YAML configs, auto-load |
+| Indicator engine | ✅ Live | SuperTrend(3,1) universal |
+| Portfolio MTM | ✅ Live | Real-time P&L + kill-switch |
+| Paper journal | ✅ Live | Fill recording + daily stats |
+| Backtest engine | ✅ Live | Multi-day, commissions |
+| Options warehouse | ✅ Live | Abi DuckDB → MongoDB |
+| Options gap backfill | ✅ Live | Self-healing loop + script |
+| Options chain poller | ✅ Live | Live-only, Greeks |
+| Alerts engine | ✅ Live | Price/Greeks alerts + WS |
+| Positional monitor | ✅ Live | Swing F&O + equity |
+| Frontend shell | ✅ Live | Vite + React 19 + shadcn |
+| Backtest sweep | 🔄 In progress | `configurable-strategy-backtest-sweep` |
+| Order approval center | 🔄 In progress | Manual gate before live |
 
 ---
 
 ## Resources
 
-- 📋 **Architecture & Tech Stack**: [openspec/project.md](openspec/project.md)
-- 🤖 **Agent Guidance**: [CLAUDE.md](CLAUDE.md) (for Claude Code / LLM integration)
-- 📚 **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs) (when running)
+- 📖 **Runbook** (how to run everything): [RUNBOOK.md](RUNBOOK.md)
+- 🏗️ **Architecture & Tech Stack**: [openspec/project.md](openspec/project.md)
+- 🤖 **Agent Guidance**: [CLAUDE.md](CLAUDE.md)
+- 📜 **Scripts Reference**: [scripts/README.md](scripts/README.md)
+- 📚 **API Docs**: http://localhost:8000/docs (when running)
 - 🌐 **Dhan SDK**: [dhanhq on PyPI](https://pypi.org/project/dhanhq/)
-- 🗺️ **OpenSpec**: [@fission-ai/openspec](https://github.com/fission-ai/openspec)
-
----
-
-## Status
-
-| Capability                   | Status | Notes |
-|------------------------------|--------|-------|
-| **add-platform-skeleton**    | ✅ Spec | FastAPI + async DB setup |
-| **add-instrument-registry**  | ✅ Spec | NSE/BSE/MCX instruments |
-| **add-market-data-feed**     | ✅ Spec | Dhan WebSocket adapter |
-| **add-paper-broker**         | ✅ Spec | Paper trading engine |
-| **add-portfolio-engine**     | 🟡 Stub | Holdings + P&L tracking |
-| **add-intraday-monitor**     | 🟡 Stub | Algo + manual trading UI |
-| **add-positional-monitor**   | 🟡 WIP | Greeks + expiry awareness |
-| **add-strategy-host**        | ✅ Spec | Pluggable strategy engine |
-| **add-backtest-engine**      | 🟡 Stub | Historical backtesting |
-| **add-options-analytics**    | 🟡 Stub | IV / Greeks visualization |
-| **add-alerts-engine**        | 🟡 Stub | Price / Greeks alerts |
-| **add-frontend-skeleton**    | 🟡 WIP | Vite + React + TanStack |
-
-Legend: ✅ Spec finalized | 🟡 In progress | 🟢 Live

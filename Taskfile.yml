@@ -10,6 +10,21 @@ tasks:
     cmds:
       - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
 
+  monitor:
+    desc: Run the live strategy monitor (Perl, read-only Redis+API client)
+    cmds:
+      - perl scripts/monitor.pl
+
+  reset-paper:
+    desc: "⚠️  Clear paper orders/trades/positions and reset ID sequences"
+    cmds:
+      - uv run python scripts/reset_paper.py
+
+  backtest:
+    desc: "Legacy baseline runner — ST(3,1)/5m hardcoded in backtest_multiday.py (use backtest:sweep for configurable runs)"
+    cmds:
+      - uv run python backtest_multiday.py
+
   test:
     desc: Run pytest
     cmds:
@@ -32,6 +47,8 @@ tasks:
     cmds:
       - uv run pyright
 
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+
   db:up:
     desc: Start Postgres + Redis + Mongo
     cmds:
@@ -47,15 +64,84 @@ tasks:
     cmds:
       - uv run alembic upgrade head
 
+  db:tools:
+    desc: Start pgAdmin on http://localhost:5050 (dev@pdp.local / pdp)
+    cmds:
+      - docker compose --profile tools up -d pgadmin
+
+  # ── Data backfill ────────────────────────────────────────────────────────────
+  # Pass args after -- e.g:
+  #   task backfill:spot -- --from 2026-02-09 --to 2026-06-12
+  #   task backfill:spot -- --from 2026-02-09 --only-missing
+  #   task backfill:spot -- --dry-run --from 2026-02-09
+
+  backfill:spot:
+    desc: "Backfill NIFTY 1m spot → market_bars. Args: -- --from YYYY-MM-DD [--to YYYY-MM-DD] [--only-missing] [--dry-run]"
+    cmds:
+      - uv run python scripts/backfill_nifty_spot.py {{.CLI_ARGS}}
+
+  backfill:options:
+    desc: "Gap-fill option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    cmds:
+      - uv run python scripts/backfill_options_gap.py {{.CLI_ARGS}}
+
+  backfill:expired:
+    desc: "Backfill expired-contract option bars. Args: -- --help for options"
+    cmds:
+      - uv run python scripts/backfill_expired_options.py {{.CLI_ARGS}}
+
+  migrate:abi:
+    desc: "Migrate NIFTY options Abi DuckDB → MongoDB option_bars. Args: -- --from YYYY-MM-DD --to YYYY-MM-DD"
+    cmds:
+      - uv run python -m pdp.warehouse {{.CLI_ARGS}}
+
+  # ── Data validation & audit ──────────────────────────────────────────────────
+
+  audit:coverage:
+    desc: Audit option_bars coverage by date + strike (identifies gaps)
+    cmds:
+      - uv run python scripts/audit_options_coverage.py {{.CLI_ARGS}}
+
+  validate:warehouse:
+    desc: Validate warehouse integrity — missing days, bad prices, OI anomalies
+    cmds:
+      - uv run python scripts/validate_options_warehouse.py {{.CLI_ARGS}}
+
+  validate:migration:
+    desc: Verify Abi → MongoDB migration completeness
+    cmds:
+      - uv run python scripts/verify_nifty_migration.py {{.CLI_ARGS}}
+
+  # ── Backtest utilities ───────────────────────────────────────────────────────
+
+  backtest:compare:
+    desc: "Backtest vs paper journal for a date. Args: -- [--date YYYY-MM-DD]"
+    cmds:
+      - uv run python scripts/backtest_compare.py {{.CLI_ARGS}}
+
+  backtest:sweep:
+    desc: "Multi-config parameter sweep. Args: -- [--days N] [--start YYYY-MM-DD] [--st 10,2;3,1] [--tf 5,15,30] [--moneyness -1,0,1] [--config '{json}'] [--no-commission] [--no-heal]"
+    cmds:
+      - uv run python scripts/backtest_sweep.py {{.CLI_ARGS}}
+
+  # ── OpenSpec ─────────────────────────────────────────────────────────────────
+
   openspec:list:
-    desc: List OpenSpec changes
+    desc: List all OpenSpec changes
     cmds:
       - npx -y @fission-ai/openspec@latest list
 
-  openspec:validate:
-    desc: Validate authored OpenSpec changes (skips draft stubs)
+  openspec:show:
+    desc: "Show a specific change. Args: -- <change-id>"
     cmds:
-      - npx -y @fission-ai/openspec@latest validate add-platform-skeleton --strict
-      - npx -y @fission-ai/openspec@latest validate add-instrument-registry --strict
-      - npx -y @fission-ai/openspec@latest validate add-market-data-feed --strict
-      - npx -y @fission-ai/openspec@latest validate add-paper-broker --strict
+      - npx -y @fission-ai/openspec@latest show {{.CLI_ARGS}}
+
+  openspec:validate:
+    desc: "Validate a change. Args: -- <change-id> [--strict]"
+    cmds:
+      - npx -y @fission-ai/openspec@latest validate {{.CLI_ARGS}}
+
+  openspec:archive:
+    desc: "Archive a completed change. Args: -- <change-id>"
+    cmds:
+      - npx -y @fission-ai/openspec@latest archive {{.CLI_ARGS}}

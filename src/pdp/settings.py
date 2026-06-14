@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     RISK_PER_STRATEGY_LOSS_CAP_INR: float = 20000.0
     RISK_SOFT_CAP_PCT: float = 80.0
 
+    # SuperTrend params for the universal IndicatorEngine (rule #4: computed once,
+    # strategies consume). Promoted 2026-06-14 from (3,1) to (10,2) after the backtest
+    # sweep: ST(10,2) on 15m = PF 4.12 vs ST(3,1) on 5m = PF 0.48 over 83 days.
+    SUPERTREND_PERIOD: int = 10
+    SUPERTREND_MULTIPLIER: float = 2.0
+
     # Options warehouse + historical migration (NIFTY options data pipeline).
     # External, read-only "abi project" DuckDB source (PDP and Abi are siblings).
     ABI_NIFTY_DUCKDB: str = "../Abi/data/historicaldata/nifty.db"
