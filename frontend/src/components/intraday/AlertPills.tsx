@@ -130,7 +130,7 @@ export function AlertPills({ positions, summary, settings }: Props) {
           <span>{alert.message}</span>
           <button
             onClick={() => dismiss(alert.id)}
-            className="ml-1 text-current opacity-60 hover:opacity-100"
+            className="ml-1 text-current opacity-60 hover:opacity-100 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current"
             aria-label="Dismiss alert"
           >
             ×
