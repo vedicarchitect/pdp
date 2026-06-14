@@ -21,9 +21,9 @@ tasks:
       - uv run python scripts/reset_paper.py
 
   backtest:
-    desc: "Legacy baseline runner — ST(3,1)/5m hardcoded in backtest_multiday.py (use backtest:sweep for configurable runs)"
+    desc: "Run backtest. Args: -- [--config-file backtest/configs/st10_15m_otm1.yaml] [--days N] [--start YYYY-MM-DD]"
     cmds:
-      - uv run python backtest_multiday.py
+      - uv run python backtest_multiday.py {{.CLI_ARGS}}
 
   test:
     desc: Run pytest
