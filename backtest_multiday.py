@@ -51,8 +51,12 @@ OTM_STEPS    = 1
 NIFTY_EXPIRY_WEEKDAY = 1   # Tuesday
 START_H, START_M  = 9,  30
 SQOFF_H, SQOFF_M  = 15, 10
-LEG_STOP_PER_LOT = 1_000.0  # close if MTM loss >= this × current lots
-DAY_STOP_LOSS    = 10_000.0  # no more trades if realized day loss >= this
+LEG_STOP_PER_LOT = 3_000.0  # close if MTM loss >= this × current lots
+DAY_STOP_LOSS    = 20_000.0  # no more trades if realized day loss >= this
+ROLL_TRIGGER_PREM  = 20.0   # roll the short leg when current premium drops below this
+ROLL_TARGET_MIN_PREM = 50.0  # roll target must have premium above this floor
+PROFIT_LOCK_TRIGGER = 2_000.0  # arm trailing profit lock when per-leg MTM gain reaches this
+PROFIT_LOCK_TRAIL   = 0.5      # close when MTM falls to this fraction of peak MTM
 IST = timedelta(hours=5, minutes=30)
 TF_MIN = 5   # signal timeframe in minutes; source bars are fetched at 1m and resampled
 
@@ -139,10 +143,35 @@ def otm_strike(spot, opt_type):
 def price_at(bars, target, prefer="open"):
     best, bd = None, timedelta(hours=99)
     for (dt, o, h, l, c) in bars:
+        if dt > target:
+            continue  # never select a future bar (no look-ahead)
         d = abs(dt - target)
         if d < bd: bd, best = d, (dt, o, h, l, c)
     if best is None or bd > timedelta(minutes=15): return None
     return best[1] if prefer == "open" else best[4]
+
+
+def prev_curr_bars(bars, target):
+    """Return (prior_bar, current_bar) for the nearest bar at or before target.
+
+    current_bar: nearest bar with dt <= target within 15-min tolerance.
+    prior_bar:   the bar immediately before current_bar in time (or None if first).
+    Returns (None, None) when no bar is within tolerance.
+    Bar tuples are (dt, o, h, l, c); h is index 2.
+    """
+    best_i, bd = None, timedelta(hours=99)
+    for i, (dt, o, h, l, c) in enumerate(bars):
+        if dt > target:
+            continue
+        d = abs(dt - target)
+        if d < bd:
+            bd, best_i = d, i
+    if best_i is None or bd > timedelta(minutes=15):
+        return None, None
+    curr = bars[best_i]
+    prior = bars[best_i - 1] if best_i > 0 else None
+    return prior, curr
+
 
 # ── Instrument / bar caches ───────────────────────────────────────────────────
 _inst:  dict[tuple, dict] = {}
@@ -154,7 +183,8 @@ _snap:  dict[date, list | None] = {}
 # load_expiry_chain with one Mongo query per expiry. NIFTY 1m spot raw docs keyed by IST
 # trade-date, loaded for the whole range in one query. fetch_opt_fixed and the spot reader
 # serve from these so the bar-by-bar loop issues zero MongoDB round-trips.
-_chain_store: dict[tuple, dict] = {}
+_chain_store:    dict[tuple, dict] = {}
+_chain_store_1m: dict[tuple, dict] = {}   # 1-minute option bars for intra-bar ST-touch pricing
 _spot_raw_by_day: dict[date, list] = {}
 _chain_queries = 0   # option_bars queries (≈ number of distinct expiries)
 _spot_queries  = 0   # market_bars queries for NIFTY spot
@@ -312,8 +342,10 @@ def preload_chains(days: list[date]) -> None:
         store, nq = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=TF_MIN)
         _chain_store.update(store)  # (trade_date, opt) keys are unique per expiry — no collisions
         _chain_queries += nq
-    log.info("chain_preload  expiries=%d  option_queries=%d  days=%d  series=%d",
-             len(by_exp), _chain_queries, len(days), len(_chain_store))
+        store_1m, _ = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=1)
+        _chain_store_1m.update(store_1m)
+    log.info("chain_preload  expiries=%d  option_queries=%d  days=%d  series_5m=%d  series_1m=%d",
+             len(by_exp), _chain_queries, len(days), len(_chain_store), len(_chain_store_1m))
 
 def preload_spot(days: list[date]) -> None:
     """Load NIFTY 1m spot for the whole range in one query; bucket by IST trade-date."""
@@ -576,6 +608,7 @@ class Position:
     total_qty:   int      = 0
     total_cost:  float    = 0.0
     lots:        int      = 0
+    peak_mtm:    float    = 0.0
     entry_ist:   datetime | None = None
 
     def add(self, qty, px):
@@ -737,6 +770,9 @@ def simulate_day(trade_date: date):
     # first genuine SuperTrend flip after session start. Anchors entries to a real momentum
     # change, not the cold-start direction. Resets each day (this flag is per simulate_day).
     first_flip_seen = False
+    # prev_st: the ST emitted by the PREVIOUS completed bar; used for intra-bar ST-touch
+    # detection (current bar's ST is computed from its own close — not yet known intra-bar).
+    prev_st: object = None
 
     def _pos_bars(p: Position) -> list:
         """Retrieve the cached bars for the current position's fixed contract."""
@@ -747,6 +783,30 @@ def simulate_day(trade_date: date):
         # Re-fetch (shouldn't be needed, but guard for safety).
         _, bars = fetch_opt_fixed(trade_date, p.opt_type, p.strike, p.expiry_date)
         return bars
+
+    def _pos_bars_1m(p: Position) -> list:
+        """1-minute bars for the held position's contract from _chain_store_1m."""
+        day = _chain_store_1m.get((trade_date, p.opt_type.upper()), {})
+        return day.get(p.strike, [])
+
+    def _find_roll_target(opt_type: str, ist_dt):
+        """Furthest-OTM same-side strike with close premium > ROLL_TARGET_MIN_PREM.
+
+        Scans the preloaded chain from furthest-OTM inward; returns (strike, bars) or (None, []).
+        Skips the currently held strike (we're rolling away from it).
+        """
+        day = _chain_store.get((trade_date, opt_type.upper()), {})
+        # PE: OTM = lower strikes (sort ascending, lowest first)
+        # CE: OTM = higher strikes (sort descending, highest first)
+        ordered = sorted(day.keys(), reverse=(opt_type.upper() == "CE"))
+        for stk in ordered:
+            if pos is not None and stk == pos.strike:
+                continue  # skip the leg being rolled away from
+            bars = day.get(stk, [])
+            prem = price_at(bars, ist_dt, prefer="close") if bars else None
+            if prem is not None and prem > ROLL_TARGET_MIN_PREM:
+                return stk, bars
+        return None, []
 
     def close_position(ist_dt, nifty_px, close_px, reason):
         nonlocal day_pnl, done, stop_reason, pos
@@ -786,6 +846,12 @@ def simulate_day(trade_date: date):
 
     for ist_dt, bar_open, bar_close, st in series:
         if st is None: continue
+        # Capture prev_bar_st BEFORE any continue so every bar updates the reference
+        # regardless of whether it's skipped below. The ST-touch sweep uses prev_bar_st
+        # (the prior completed bar's ST line) not the current bar's st (which is computed
+        # from the current bar's own close — not yet known intra-bar).
+        prev_bar_st = prev_st
+        prev_st = st
         if ist_dt < start_dt: continue
 
         # First genuine flip after session start arms entries for the rest of the day.
@@ -796,7 +862,7 @@ def simulate_day(trade_date: date):
         if ist_dt >= sqoff_dt:
             if pos:
                 sq_bars = _pos_bars(pos)
-                sq_px = price_at(sq_bars, ist_dt, prefer="open") or price_at(sq_bars, ist_dt, prefer="close")
+                sq_px = price_at(sq_bars, ist_dt, prefer="close")
                 if sq_px:
                     close_position(ist_dt, bar_open, sq_px, "squareoff")
             break
@@ -805,21 +871,62 @@ def simulate_day(trade_date: date):
 
         desired = "PE" if st.direction > 0 else "CE"
 
-        # ── Check leg stop-loss at bar CLOSE (if position open) ──
+        # ── ST-touch intra-bar sweep ──────────────────────────────────────────────
+        # Iterate 1-minute NIFTY sub-bars within this 5-minute window. If the sub-bar
+        # extreme touches the PRIOR bar's ST line (prev_bar_st.value), close immediately
+        # at the 1-minute option bar's close price (fallback: 5-minute close). No new
+        # entry or scale-in fires on this bar after a touch exit.
+        st_touch_fired = False
+        if pos and prev_bar_st is not None:
+            spot_1m_raw = _spot_raw_by_day.get(trade_date, [])
+            bar_end_dt = ist_dt + timedelta(minutes=TF_MIN)
+            prev_st_val = float(prev_bar_st.value)
+            for doc in spot_1m_raw:
+                ts_utc = doc["ts"] if doc["ts"].tzinfo else doc["ts"].replace(tzinfo=timezone.utc)
+                sub_ist = (ts_utc + IST).replace(tzinfo=None)
+                if sub_ist < ist_dt or sub_ist >= bar_end_dt:
+                    continue
+                sub_low   = float(doc.get("low",   doc.get("close", 0)))
+                sub_high  = float(doc.get("high",  doc.get("close", 0)))
+                sub_close_nifty = float(doc.get("close", 0))
+                if prev_bar_st.direction > 0:
+                    breach = sub_low <= prev_st_val      # uptrend / SELL PE
+                else:
+                    breach = sub_high >= prev_st_val     # downtrend / SELL CE
+                if breach:
+                    touch_px = (price_at(_pos_bars_1m(pos), sub_ist, prefer="close")
+                                or price_at(_pos_bars(pos), ist_dt, prefer="close"))
+                    if touch_px:
+                        close_position(sub_ist, sub_close_nifty, touch_px, "st_touch")
+                    st_touch_fired = True
+                    break
+
+        if st_touch_fired:
+            continue  # no entry, scale-in, or roll-up on this bar
+
+        # ── Bar-close checks: profit lock then leg stop-loss ──────────────────────
         if pos:
             pos_bars = _pos_bars(pos)
             bar_close_px = price_at(pos_bars, ist_dt, prefer="close")
             if bar_close_px:
-                mtm = pos.mtm(bar_close_px)
-                if mtm <= -(LEG_STOP_PER_LOT * pos.lots):
-                    limit = LEG_STOP_PER_LOT * pos.lots
-                    close_position(ist_dt, bar_close, bar_close_px, f"leg_stop (mtm={mtm:+.0f}, limit={-limit:.0f})")
-                    continue   # no new entry on stop bar
+                current_mtm = pos.mtm(bar_close_px)
+                pos.peak_mtm = max(pos.peak_mtm, current_mtm)
+                if pos.peak_mtm >= PROFIT_LOCK_TRIGGER:
+                    lock_floor = pos.peak_mtm * PROFIT_LOCK_TRAIL
+                    if current_mtm <= lock_floor:
+                        close_position(ist_dt, bar_close, bar_close_px, "profit_lock")
+                        continue
+                if pos:  # profit lock may have closed the position
+                    mtm = pos.mtm(bar_close_px)
+                    if mtm <= -(LEG_STOP_PER_LOT * pos.lots):
+                        limit = LEG_STOP_PER_LOT * pos.lots
+                        close_position(ist_dt, bar_close, bar_close_px, f"leg_stop (mtm={mtm:+.0f}, limit={-limit:.0f})")
+                        continue   # no new entry on stop bar
 
         # ── Flip: close current, open new ──
         if pos and pos.opt_type != desired:
             flip_bars = _pos_bars(pos)
-            flip_px = price_at(flip_bars, ist_dt, prefer="open")
+            flip_px = price_at(flip_bars, ist_dt, prefer="close")
             if flip_px:
                 close_position(ist_dt, bar_open, flip_px, "flip")
             else:
@@ -830,6 +937,38 @@ def simulate_day(trade_date: date):
         # Stops, flip-close, and square-off above still run; only opening/adding is gated.
         if not first_flip_seen:
             continue
+
+        # ── Roll-up: premium-decay roll to a richer same-side strike ──
+        # Fires when direction is unchanged (pos.opt_type == desired) and the leg's
+        # current premium is below ROLL_TRIGGER_PREM.  Flip (pos.opt_type != desired)
+        # and squareoff (break before here) both take precedence structurally.
+        if pos and pos.opt_type == desired:
+            roll_bars = _pos_bars(pos)
+            roll_prem = price_at(roll_bars, ist_dt, prefer="close")
+            if roll_prem is not None and roll_prem < ROLL_TRIGGER_PREM:
+                roll_stk, roll_new_bars = _find_roll_target(desired, ist_dt)
+                if roll_stk is not None:
+                    close_position(ist_dt, bar_close, roll_prem, "roll")
+                    if not done:
+                        roll_px = price_at(roll_new_bars, ist_dt, prefer="close")
+                        if roll_px:
+                            pos = Position(
+                                opt_type=desired, strike=roll_stk, expiry_date=exp_date,
+                                sid=imap.get((int(roll_stk), desired.upper())),
+                                entry_ist=ist_dt,
+                            )
+                            pos.add(START_LOTS * LOT, roll_px)
+                            turnover = Decimal(str(START_LOTS * LOT * roll_px))
+                            comm = float(calc.calculate("SELL", turnover).total_inr)
+                            trades.append(Trade(
+                                side="SELL", opt_type=desired, strike=roll_stk,
+                                bar_time=ist_dt, qty=START_LOTS * LOT, price=roll_px,
+                                nifty=bar_close,
+                                note=f"roll {START_LOTS}L",
+                                cum_lots=pos.lots, avg_entry=pos.avg_entry,
+                                day_pnl=day_pnl, commission_inr=comm,
+                            ))
+                    continue  # no scale-in on roll bar
 
         # ── Compute target strike for the desired leg ──
         target_stk = float(otm_strike(bar_close, desired))
@@ -848,7 +987,7 @@ def simulate_day(trade_date: date):
 
         if pos is None:
             # New entry
-            entry_px = price_at(new_bars, ist_dt, prefer="open")
+            entry_px = price_at(new_bars, ist_dt, prefer="close")
             if entry_px:
                 pos = Position(
                     opt_type=desired, strike=actual_strike, expiry_date=exp_date,
@@ -867,26 +1006,32 @@ def simulate_day(trade_date: date):
                     day_pnl=day_pnl, commission_inr=comm,
                 ))
         elif pos.sid == imap.get((int(actual_strike), desired.upper()), pos.sid) and pos.lots < MAX_LOTS:
-            # Scale in (same contract, same expiry)
-            add_px = price_at(new_bars, ist_dt, prefer="open")
-            if add_px:
-                pos.add(ADD_LOTS * LOT, add_px)
-                turnover = Decimal(str(ADD_LOTS * LOT * add_px))
-                comm = float(calc.calculate("SELL", turnover).total_inr)
-                trades.append(Trade(
-                    side="SELL", opt_type=desired, strike=actual_strike,
-                    bar_time=ist_dt, qty=ADD_LOTS * LOT, price=add_px,
-                    nifty=bar_close,
-                    note=f"scale +{ADD_LOTS}L -> {pos.lots}L",
-                    cum_lots=pos.lots, avg_entry=pos.avg_entry,
-                    day_pnl=day_pnl, commission_inr=comm,
-                ))
+            # Scale-in gate: add only when the leg's premium did NOT make a new high this bar.
+            # current.high > prior.high → premium spiking against the short → defer.
+            # Re-evaluates naturally on the next bar (no counter; gate just skips pos.add).
+            _prior, _curr = prev_curr_bars(new_bars, ist_dt)
+            if _prior is not None and _curr is not None and _curr[2] > _prior[2]:
+                pass  # premium breakout: defer this bar, re-check next
+            else:
+                # Scale in (same contract, same expiry)
+                add_px = price_at(new_bars, ist_dt, prefer="close")
+                if add_px:
+                    pos.add(ADD_LOTS * LOT, add_px)
+                    turnover = Decimal(str(ADD_LOTS * LOT * add_px))
+                    comm = float(calc.calculate("SELL", turnover).total_inr)
+                    trades.append(Trade(
+                        side="SELL", opt_type=desired, strike=actual_strike,
+                        bar_time=ist_dt, qty=ADD_LOTS * LOT, price=add_px,
+                        nifty=bar_close,
+                        note=f"scale +{ADD_LOTS}L -> {pos.lots}L",
+                        cum_lots=pos.lots, avg_entry=pos.avg_entry,
+                        day_pnl=day_pnl, commission_inr=comm,
+                    ))
 
     # Unclosed position at end (rare — squareoff loop should handle)
     if pos:
         end_bars = _pos_bars(pos)
-        end_px = (price_at(end_bars, sqoff_dt, prefer="close") or
-                  price_at(end_bars, sqoff_dt, prefer="open"))
+        end_px = price_at(end_bars, sqoff_dt, prefer="close")
         if end_px:
             close_position(sqoff_dt, nifty_close, end_px, "squareoff_end")
 
