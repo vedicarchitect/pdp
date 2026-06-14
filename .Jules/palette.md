@@ -1,6 +1,3 @@
-## 2026-06-08 - Interactive Table Rows Need Keyboard Support
-**Learning:** Interactive <tr> elements used for expand/collapse functionality often lack keyboard navigation (tabbing and Enter/Space triggers).
-**Action:** Always add `tabIndex={0}`, `onKeyDown` handlers for Enter/Space, and appropriate ARIA attributes (`aria-expanded`) to interactive rows.
-## 2026-06-13 - Critical Action UX
-**Learning:** Destructive modal actions (like Kill Switch) need safe defaults. Adding `autoFocus` to the Cancel button and supporting Escape key dismissal prevents accidental execution from blind keyboard entry.
-**Action:** Always auto-focus the safe/cancel action and attach Escape key listeners (using capturing phase if needed) for all destructive confirmation modals.
+## 2025-06-14 - Accessible Mutation Buttons
+**Learning:** React Query mutations (`toggle.isPending`) should always be accompanied by `aria-busy` states on interactive elements to prevent user confusion and inform screen readers of asynchronous activity. Using specific `aria-label` values containing entity IDs (like `s.id`) drastically improves context for screen reader users on list items.
+**Action:** Always map mutation loading states to both visual text changes (e.g. "Starting...") and accessibility attributes (`aria-busy`, `disabled`), while ensuring keyboard users can clearly see focus via `focus-visible:ring-2`.

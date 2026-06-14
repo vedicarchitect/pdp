@@ -100,13 +100,17 @@ function StrategiesPage() {
                 </div>
               </div>
               <button
-                className={`rounded-md px-3 py-1.5 text-sm font-medium text-white ${
-                  running ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'
-                } disabled:opacity-50`}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium text-white transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${
+                  running ? 'bg-bearish hover:bg-bearish/90 focus-visible:ring-bearish' : 'bg-bullish hover:bg-bullish/90 focus-visible:ring-bullish'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
                 disabled={toggle.isPending}
+                aria-busy={toggle.isPending && toggle.variables?.id === s.id}
+                aria-label={running ? `Stop strategy ${s.id}` : `Start strategy ${s.id}`}
                 onClick={() => toggle.mutate({ id: s.id, action: running ? 'stop' : 'start' })}
               >
-                {running ? 'Stop' : 'Start'}
+                {toggle.isPending && toggle.variables?.id === s.id
+                  ? running ? 'Stopping...' : 'Starting...'
+                  : running ? 'Stop' : 'Start'}
               </button>
             </div>
           )
