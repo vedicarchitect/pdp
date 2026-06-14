@@ -117,10 +117,71 @@ def print_table(rows: list[dict]) -> None:
     print(f"{'='*104}\n")
 
 
+_W = 130  # wide column width for per-day trade tables
+
+
+def _print_day_detail(r) -> None:
+    """Print per-trade table + leg summary for one DayResult (mirrors backtest_multiday print_day)."""
+    stop = f"  [DAY STOP: {r.done_reason}]" if r.done_reason else ""
+    print(f"\n{'='*_W}")
+    print(f"  {r.date}  |  NIFTY {r.nifty_open:.2f} -> {r.nifty_close:.2f} "
+          f"({r.nifty_chg:+.2f})  |  Expiry: {r.expiry}  |  Bars: {r.nifty_bars}{stop}")
+    print(f"{'='*_W}")
+
+    if not r.trades:
+        print("  (no trades)")
+        return
+
+    print(f"  {'#':>3}  {'Side':<4}  {'Type':<2} {'Strike':>7}  {'Time':>5}  "
+          f"{'Qty':>5}  {'Price':>7}  {'NIFTY':>9}  "
+          f"{'CumLots':>7}  {'AvgEntry':>9}  {'LegPNL':>10}  {'DayPNL':>10}  Note")
+    print(f"  {'-'*3}  {'-'*4}  {'-'*2} {'-'*7}  {'-'*5}  "
+          f"{'-'*5}  {'-'*7}  {'-'*9}  "
+          f"{'-'*7}  {'-'*9}  {'-'*10}  {'-'*10}  ----")
+    for i, t in enumerate(r.trades, 1):
+        leg_s = f"{t.leg_pnl:>+10.2f}" if t.leg_pnl is not None else f"{'':>10}"
+        print(f"  {i:>3}  {t.side:<4}  {t.opt_type:<2} {t.strike:>7.0f}  "
+              f"{t.bar_time.strftime('%H:%M'):>5}  "
+              f"{t.qty:>5}  {t.price:>7.2f}  {t.nifty:>9.2f}  "
+              f"{t.cum_lots:>7}L  {t.avg_entry:>9.2f}  {leg_s}  {t.day_pnl:>+10.2f}  {t.note}")
+    print(f"  {'-'*(_W-2)}")
+    print(f"  Gross premium: {r.gross_pnl:>+10.2f}   "
+          f"Charges: -{r.commission:.2f}   "
+          f"Realized: {r.realized:>+10.2f}")
+
+    if r.leg_records:
+        wins = sum(1 for lr in r.leg_records if lr.leg_pnl >= 0)
+        losses = len(r.leg_records) - wins
+        total_leg_pnl = sum(lr.leg_pnl for lr in r.leg_records)
+        print()
+        print(f"  LEG SUMMARY")
+        print(f"  {'#':>3}  {'Type':<2} {'Strike':>7}  {'Entry':>5}  {'Exit':>5}  "
+              f"{'Lots':>4}  {'AvgEntry':>9}  {'Exit Rs':>8}  {'Leg P&L':>10}  Reason")
+        print(f"  {'-'*3}  {'-'*2} {'-'*7}  {'-'*5}  {'-'*5}  "
+              f"{'-'*4}  {'-'*9}  {'-'*8}  {'-'*10}  ------")
+        for i, lr in enumerate(r.leg_records, 1):
+            print(f"  {i:>3}  {lr.opt_type:<2} {lr.strike:>7.0f}  "
+                  f"{lr.entry_ist.strftime('%H:%M'):>5}  "
+                  f"{lr.exit_ist.strftime('%H:%M'):>5}  "
+                  f"{lr.lots:>4}L  {lr.avg_entry:>9.2f}  "
+                  f"{lr.exit_px:>8.2f}  {lr.leg_pnl:>+10.2f}  {lr.reason}")
+        print(f"  {'-'*90}")
+        print(f"  {len(r.leg_records)} leg(s)  |  Total P&L: {total_leg_pnl:>+.2f}  |  "
+              f"Win: {wins}  Loss: {losses}")
+
+
 def print_detail(m: dict) -> None:
-    print(f"\n{'='*100}")
-    print(f"  SINGLE CONFIG: {m['label']}   ({m['days']} days)")
-    print(f"{'='*100}")
+    print(f"\n{'*'*_W}")
+    print(f"  SINGLE CONFIG: {m['label']}   ({m['days']} days traded)")
+    print(f"{'*'*_W}")
+
+    for r in m["results"]:
+        _print_day_detail(r)
+
+    # Final summary table
+    print(f"\n\n{'*'*_W}")
+    print(f"  SUMMARY  ({m['days']} days)")
+    print(f"{'*'*_W}")
     print(f"  {'Date':<12}  {'NIFTY Chg':>9}  {'Trades':>6}  {'Gross':>11}  {'Comm':>8}  {'Net':>11}  Status")
     print(f"  {'-'*12}  {'-'*9}  {'-'*6}  {'-'*11}  {'-'*8}  {'-'*11}  ------")
     for r in m["results"]:
@@ -131,7 +192,7 @@ def print_detail(m: dict) -> None:
     print(f"  {'-'*78}")
     print(f"  Net {m['net']:>+.0f}  |  PF {m['profit_factor']:.2f}  |  Win {m['win_rate']:.0f}%  |  "
           f"MaxDD {m['max_dd']:.0f}  |  Trades {m['trades']}  |  Stopped {m['stopped']}")
-    print(f"{'='*100}\n")
+    print(f"{'*'*_W}\n")
 
 
 # ── auto-heal (mirror backtest_multiday) ─────────────────────────────────────────
