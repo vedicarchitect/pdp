@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,8 +13,7 @@ from pdp.market.bars import BarClosed
 from pdp.market.models import Tick
 from pdp.strategy.abc import FillEvent, Strategy
 from pdp.strategy.context import StrategyContext
-from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost, StrategyStatus
-
+from pdp.strategy.host import StrategyHost, StrategyStatus
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -30,21 +30,21 @@ def _make_host(strategies_dir: Path | None = None) -> StrategyHost:
 
 
 def _tick(security_id: str = "1333") -> Tick:
-    from datetime import datetime, timezone
+    from datetime import datetime
     return Tick(
         security_id=security_id,
         exchange_segment="NSE_EQ",
         ltp=Decimal("100.0"),
-        ltt=datetime.now(timezone.utc),
+        ltt=datetime.now(UTC),
     )
 
 
 def _bar(security_id: str = "1333", timeframe: str = "1m") -> BarClosed:
-    from datetime import datetime, timezone
+    from datetime import datetime
     return BarClosed(
         security_id=security_id,
         timeframe=timeframe,
-        bar_time=datetime.now(timezone.utc),
+        bar_time=datetime.now(UTC),
         open=Decimal("100"),
         high=Decimal("105"),
         low=Decimal("99"),

@@ -7,9 +7,8 @@ creds required. Settings carry empty Dhan credentials so the API path is skipped
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
-
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 

@@ -5,7 +5,7 @@ has a usable NIFTY 1m spot series. The first-flip rule suppresses entries until 
 SuperTrend flip after session start; here we assert that contract against the real
 `SuperTrendTracker.flipped` signal (the same flag `backtest_multiday.simulate_day` gates on).
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pdp.backtest.completeness import (
     EXPECTED_SESSION_BARS,
@@ -14,7 +14,7 @@ from pdp.backtest.completeness import (
 )
 from pdp.indicators.supertrend import SuperTrendTracker
 
-BASE = datetime(2026, 6, 12, 3, 45, tzinfo=timezone.utc)  # 09:15 IST
+BASE = datetime(2026, 6, 12, 3, 45, tzinfo=UTC)  # 09:15 IST
 
 
 def _bars(n: int, *, start: datetime = BASE, step_min: int = 1) -> list[dict]:

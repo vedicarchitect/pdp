@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-
 # ── Contract under test (mirrors backtest_multiday.price_at exactly) ─────────
 
 def _price_at(bars, target, prefer="open"):

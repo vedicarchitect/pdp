@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pdp.db.session import dispose_engine, get_engine, get_session_maker  # noqa: F401 (re-used in lifespan)
+from pdp.db.session import dispose_engine, get_engine, get_session_maker
 from pdp.logging import RequestIdMiddleware, configure_logging
 from pdp.mongo.client import connect as mongo_connect
 from pdp.mongo.client import disconnect as mongo_disconnect
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
 
     ws_hub = WSHub()
     app.state.ws_hub = ws_hub
+    await ws_hub.start()
     orders_hub = OrdersHub()
     app.state.orders_hub = orders_hub
     options_hub = OptionsHub()
@@ -260,6 +261,7 @@ async def lifespan(app: FastAPI):
         if dhan_broker is not None:
             await dhan_broker.stop()
         await paper_broker.stop()
+        await ws_hub.stop()
         await app.state.redis.aclose()
         mongo_disconnect(app.state.mongo_client)
         await dispose_engine()

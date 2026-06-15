@@ -73,7 +73,7 @@ class PortfolioService:
 
     def set_hard_cap_callback(
         self,
-        callback: "Callable[[], Awaitable[None]]",
+        callback: Callable[[], Awaitable[None]],
         daily_loss_cap_inr: float,
     ) -> None:
         """Wire the hard-cap breach callback (auto-invoked when daily loss exceeds cap)."""

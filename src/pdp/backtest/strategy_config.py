@@ -105,7 +105,7 @@ class StrategyConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StrategyConfig:
         """Build a config from a plain dict (unknown keys rejected)."""
-        known = {f for f in cls.__dataclass_fields__}  # noqa: C416
+        known = {f for f in cls.__dataclass_fields__}
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"unknown StrategyConfig keys: {sorted(unknown)}")

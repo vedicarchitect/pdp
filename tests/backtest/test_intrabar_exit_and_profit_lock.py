@@ -16,12 +16,11 @@ These tests exercise pure logic without MongoDB or the full backtest script
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from decimal import Decimal
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
-
 
 # ── Constants (mirrored from backtest_multiday) ───────────────────────────────
 PROFIT_LOCK_TRIGGER = 2_000.0

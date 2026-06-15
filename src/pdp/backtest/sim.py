@@ -17,9 +17,9 @@ Semantics (configurable):
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from datetime import UTC, date, datetime, timedelta
 
 from pdp.backtest.strategy_config import (
     FLIP_CLOSE_ALL,
@@ -202,13 +202,13 @@ def simulate_day(
     # SuperTrend, warmed with the prior session so the line is continuous across the day boundary.
     tracker = SuperTrendTracker(period=cfg.st_period, multiplier=cfg.st_multiplier)
     for wb in data.prior_session_bars:
-        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=timezone.utc)
+        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=UTC)
         tracker.update(wb["high"], wb["low"], wb["close"], bar_time=wts)
 
     # Build the in-session series: (ist_dt, open, high, low, close, st_state).
     series = []
     for b in nifty_bars:
-        ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+        ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         ist_dt = (ts_utc + _IST).replace(tzinfo=None)
         st = tracker.update(b["high"], b["low"], b["close"], bar_time=ts_utc)
         series.append((ist_dt, float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]), st))

@@ -20,9 +20,9 @@ import pytest
 import pdp.strategy.log as log_mod
 from pdp.indicators.supertrend import DOWN, UP, SuperTrendState
 from pdp.market.bars import BarClosed
+from pdp.strategies.supertrend_short import SuperTrendShort
 from pdp.strategy.abc import Strategy
 from pdp.strategy.log import StrategyDailyLog
-from pdp.strategies.supertrend_short import SuperTrendShort
 
 _IST = ZoneInfo("Asia/Kolkata")
 

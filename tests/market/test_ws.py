@@ -53,23 +53,37 @@ def _bar(sid: str = "13", tf: str = "5m") -> BarClosed:
 
 
 class TestWSHub:
-    def test_publish_tick_delivers_to_subscribed_client(self) -> None:
+    @pytest.mark.asyncio
+    async def test_publish_tick_delivers_to_subscribed_client(self) -> None:
         hub = WSHub()
+        await hub.start()
         client = _make_client()
         client.security_ids = {"13"}
         hub._clients.add(client)
 
         hub.publish_tick(_tick("13"))
-        assert client.queue.qsize() == 1
+        # Wait for the background task to flush ticks
+        import asyncio
+        await asyncio.sleep(0.15)
 
-    def test_publish_tick_skips_unsubscribed_client(self) -> None:
+        assert client.queue.qsize() == 1
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_publish_tick_skips_unsubscribed_client(self) -> None:
         hub = WSHub()
+        await hub.start()
         client = _make_client()
         client.security_ids = {"25"}
         hub._clients.add(client)
 
         hub.publish_tick(_tick("13"))
+        # Wait for the background task to flush ticks
+        import asyncio
+        await asyncio.sleep(0.15)
+
         assert client.queue.empty()
+        await hub.stop()
 
     def test_publish_bar_delivers_matching_timeframe(self) -> None:
         hub = WSHub()
@@ -97,13 +111,18 @@ class TestWSHub:
         client.security_ids = {"13"}
         hub._clients.add(client)
 
+        # To test the client queue dropping oldest without getting blocked
+        # by the new tick debouncer, we use publish_bar since bars
+        # are not debounced
+        client.timeframes = {"5m"}
+
         # Fill queue to max
         for _ in range(_CLIENT_QUEUE_SIZE):
-            hub.publish_tick(_tick("13"))
+            hub.publish_bar(_bar("13", "5m"))
         assert client.queue.full()
 
         # One more — should drop oldest, queue stays at max
-        hub.publish_tick(_tick("13"))
+        hub.publish_bar(_bar("13", "5m"))
         assert client.queue.qsize() == _CLIENT_QUEUE_SIZE
 
     @pytest.mark.asyncio

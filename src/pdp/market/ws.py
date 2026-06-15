@@ -55,6 +55,55 @@ class WSHub:
 
     def __init__(self) -> None:
         self._clients: set[_Client] = set()
+        self._dirty_ticks: dict[str, Tick] = {}
+        self._flush_task: asyncio.Task | None = None
+        self._running: bool = False
+
+    async def start(self) -> None:
+        self._running = True
+        self._flush_task = asyncio.create_task(self._flush_loop(), name="ws-tick-flush")
+        log.info("ws_hub_started")
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        log.info("ws_hub_stopped")
+
+    async def _flush_loop(self) -> None:
+        """
+        Background task that flushes dirty ticks every 100ms.
+        This optimizes high-frequency tick broadcasts by debouncing rapid updates,
+        preventing event loop contention from excessive JSON serialization.
+        """
+        while self._running:
+            await asyncio.sleep(0.1)
+            if not self._dirty_ticks:
+                continue
+
+            # Clear dirty flag before heavy work to prevent losing subsequent updates
+            ticks_to_flush = self._dirty_ticks
+            self._dirty_ticks = {}
+
+            ts = time.time()
+            for sid, tick in ticks_to_flush.items():
+                payload = json.dumps(
+                    {
+                        "type": "tick",
+                        "security_id": sid,
+                        "ltp": str(tick.ltp),
+                        "ltt": tick.ltt.isoformat(),
+                        "volume": tick.volume,
+                        "ts": ts,
+                    }
+                )
+                for client in self._clients:
+                    if sid in client.security_ids:
+                        client.push(payload)
 
     def _add(self, client: _Client) -> None:
         self._clients.add(client)
@@ -67,19 +116,8 @@ class WSHub:
     def publish_tick(self, tick: Tick) -> None:
         if not self._clients:
             return
-        payload = json.dumps(
-            {
-                "type": "tick",
-                "security_id": tick.security_id,
-                "ltp": str(tick.ltp),
-                "ltt": tick.ltt.isoformat(),
-                "volume": tick.volume,
-                "ts": time.time(),
-            }
-        )
-        for client in self._clients:
-            if tick.security_id in client.security_ids:
-                client.push(payload)
+        # Store tick in dirty ticks to be picked up by the flush loop
+        self._dirty_ticks[tick.security_id] = tick
 
     def publish_bar(self, bar: BarClosed) -> None:
         if not self._clients:

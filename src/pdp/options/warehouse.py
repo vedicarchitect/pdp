@@ -10,8 +10,9 @@ sync backfill scripts, and motor, in the async live feed).
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
+from typing import Any
 
 from pymongo import UpdateOne
 
@@ -24,8 +25,8 @@ KEY_FIELDS: tuple[str, ...] = (
 def _expiry_to_dt(expiry_date: date | datetime) -> datetime:
     """Normalise an expiry to a midnight-UTC datetime (BSON has no date type)."""
     if isinstance(expiry_date, datetime):
-        return expiry_date.astimezone(timezone.utc)
-    return datetime(expiry_date.year, expiry_date.month, expiry_date.day, tzinfo=timezone.utc)
+        return expiry_date.astimezone(UTC)
+    return datetime(expiry_date.year, expiry_date.month, expiry_date.day, tzinfo=UTC)
 
 
 def build_option_bar_doc(
@@ -50,14 +51,14 @@ def build_option_bar_doc(
     source: str,
 ) -> dict[str, Any]:
     """Build one ``option_bars`` document keyed by the real fixed contract."""
-    ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
     return {
         "underlying": underlying.upper(),
         "expiry_date": _expiry_to_dt(expiry_date),
         "strike": float(strike),
         "option_type": option_type.upper(),
         "timeframe": timeframe,
-        "ts": ts_utc.astimezone(timezone.utc),
+        "ts": ts_utc.astimezone(UTC),
         "open": float(open),
         "high": float(high),
         "low": float(low),
