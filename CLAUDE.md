@@ -23,11 +23,12 @@ task db:up / db:migrate / db:down / db:tools
 task test / lint / fmt / typecheck
 task monitor      # perl scripts/monitor.pl
 task reset-paper  # ⚠️ clears paper DB
-task backtest     # backtest_multiday.py
+task backtest     # 7-day per-trade detail (BACKTEST_DEFAULT_CONFIG)
+task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30
+task backtest:sweep  -- --st "3,1;10,2" --tf "5,15" --moneyness "1,0,-1" [--days N]
 task backfill:spot   -- --from YYYY-MM-DD [--only-missing] [--dry-run]
 task backfill:options -- [--from] [--only-missing]
 task backtest:compare -- [--date YYYY-MM-DD]
-task backtest:sweep  -- [--days N] [--dry-run]
 task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 ```
 
@@ -58,9 +59,12 @@ task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 | `alembic/` | DB migrations (alembic.ini stays at root) → [`CLAUDE.md`](alembic/CLAUDE.md) |
 | `docs/` | Supplementary feature docs → [`CLAUDE.md`](docs/CLAUDE.md) |
 | `frontend/` | Vite + React 19 + TanStack + shadcn → [`CLAUDE.md`](frontend/CLAUDE.md) |
+| `backtest/` | Runnable backtest scripts + YAML configs → [`CLAUDE.md`](backtest/CLAUDE.md) |
+| `backtest/run.py` | Canonical multi-day runner: single-config detail or grid sweep |
+| `backtest/compare.py` | Single-day backtest vs paper journal |
+| `backtest/configs/` | Named YAML strategy configs (one file per named config) |
 | `scripts/` | Operational scripts → [`CLAUDE.md`](scripts/CLAUDE.md) |
-| `scripts/archive/` | One-time debug scripts — do not use as templates |
+| `scripts/archive/` | Archived scripts — do not use as templates |
 | `strategies/` | Strategy YAML configs (auto-loaded) → [`CLAUDE.md`](strategies/CLAUDE.md) |
 | `tests/` | pytest suite → [`CLAUDE.md`](tests/CLAUDE.md) |
-| `backtest_multiday.py` | **Main** multi-day backtest runner (58 KB) — active, do not move |
 

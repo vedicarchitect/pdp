@@ -14,8 +14,6 @@ See [README.md](README.md) for full arg reference.
 | `task audit:coverage` | `audit_options_coverage.py` | Coverage gap audit by date+strike |
 | `task validate:warehouse` | `validate_options_warehouse.py` | Integrity: missing days, bad prices, OI |
 | `task validate:migration` | `verify_nifty_migration.py` | Verify Abi → MongoDB completeness |
-| `task backtest:compare` | `backtest_compare.py` | Single-date backtest vs paper journal. `--date YYYY-MM-DD` |
-| `task backtest:sweep` | `backtest_sweep.py` | Multi-config sweep. `--days --start --st --tf --moneyness --dry-run` ⚠️ active in other session |
 | `task monitor` | `monitor.pl` | Perl live monitor (read-only Redis+API) |
 | `task reset-paper` | `reset_paper.py` | ⚠️ Clears paper orders/trades/positions from PG |
 
@@ -27,5 +25,5 @@ See [README.md](README.md) for full arg reference.
 
 ## Archive
 
-`archive/` — one-time Jun-2026 debug scripts. Do not use as templates.
-Use `backtest_compare.py` (single date) or `backtest_sweep.py` (grid) instead.
+`archive/` — archived scripts. Do not use as templates.
+Backtest runners moved to `backtest/` (repo root): use `task backtest` / `task backtest:sweep` / `task backtest:compare`.

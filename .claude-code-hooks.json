@@ -1,0 +1,23 @@
+{
+  "description": "Claude Code hooks for PDP project",
+  "hooks": [
+    {
+      "name": "update-docs-on-archive",
+      "description": "Update docs when OpenSpec changes are archived",
+      "event": "command",
+      "pattern": "/opsx:archive",
+      "command": "bash scripts/hooks/update-docs-on-archive.sh",
+      "enabled": true,
+      "notes": "Scans archived change for spec modifications and flags docs that may need manual sync"
+    }
+  ],
+  "setup": {
+    "instructions": "Configure this hook in Claude Code settings:",
+    "steps": [
+      "Go to Claude Code Settings (or user settings)",
+      "Find 'Hooks' or 'Shell Hooks' section",
+      "Add this command that runs after /opsx:archive completes:",
+      "bash scripts/hooks/update-docs-on-archive.sh $(basename openspec/changes/archive/$(ls -td openspec/changes/archive/*/ 2>/dev/null | head -1 | xargs -I {} basename {}))"
+    ]
+  }
+}

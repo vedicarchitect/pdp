@@ -47,3 +47,5 @@ frontend/dist/
 
 # Local claude
 .claude/settings.local.json
+pdp.code-workspace
+backtest/mutliplerunschecklog.txt

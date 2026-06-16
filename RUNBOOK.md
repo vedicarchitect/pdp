@@ -267,53 +267,51 @@ Requirements:
 
 ## 8. Backtest
 
-### Main multi-day backtest runner
+All backtest tooling lives in `backtest/`. Entry point: `backtest/run.py`.
+Named configs live in `backtest/configs/*.yaml`. See [`backtest/CLAUDE.md`](backtest/CLAUDE.md).
+
+### Per-trade detail (default config)
 
 ```powershell
-# Run from repo root
+# Last 7 days for the active config (BACKTEST_DEFAULT_CONFIG env var)
 task backtest
-# Equivalent: uv run python backtest_multiday.py
 
-# The script has flags at the top (module-level constants).
-# Edit backtest_multiday.py directly to change:
-#   START_DATE, DAYS, TF_MIN (timeframe), ST period/multiplier, OTM_STEPS
+# Named config, custom window
+task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30
+
+# Inline JSON config
+task backtest -- --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,"moneyness":1}'
 ```
+
+### Parameter grid sweep
+
+```powershell
+# Pass at least one grid flag (--st / --tf / --moneyness) to trigger grid mode
+
+# Winner vs baseline, 90 days
+task backtest:sweep -- --days 90 --st "3,1;10,2" --tf "5,15" --moneyness "1"
+
+# Full grid (105 combos: 3 ST × 5 TF × 7 moneyness — ~2-3 min)
+task backtest:sweep -- --days 90 --st "3,1;10,2;10,3" --tf "3,5,15,30,60" --moneyness "3,2,1,0,-1,-2,-3"
+
+# Skip commissions (faster, logic testing only)
+task backtest:sweep -- --days 90 --st "10,2" --no-commission
+```
+
+Grid axes (`backtest/run.py` defaults when axis is omitted):
+- `--st` — `period,mult` pairs, semicolon-separated (default: `3,1;10,2;10,3`)
+- `--tf` — timeframe minutes, comma-separated (default: `3,5,15,30,60`)
+- `--moneyness` — `+N` OTM / `0` ATM / `−N` ITM (default: `3,2,1,0,-1,-2,-3`)
 
 ### Backtest compare (single day vs paper journal)
 
 ```powershell
 # Default: today's IST date
-uv run python scripts/backtest_compare.py
+task backtest:compare
 
 # Specific date
-uv run python scripts/backtest_compare.py --date 2026-06-10
-
-# Output: side-by-side backtest trades vs paper journal P&L for that day
+task backtest:compare -- --date 2026-06-10
 ```
-
-### Backtest sweep (parameter grid)
-
-```powershell
-# Full grid (105 combos: 3 ST × 5 TF × 7 moneyness — ~2-3 min)
-task backtest:sweep -- --days 90 --start 2026-06-12
-
-# Narrow the grid (faster)
-task backtest:sweep -- --st "10,2" --tf "5,15" --moneyness "1,0,-1" --days 90
-
-# Winner vs baseline only
-task backtest:sweep -- --st "3,1;10,2" --tf "5,15" --moneyness "1" --days 90
-
-# Single config — prints full per-day/per-leg detail (verify a specific config)
-task backtest:sweep -- --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,"moneyness":1}'
-
-# Skip commissions (faster, logic testing only)
-task backtest:sweep -- --days 90 --no-commission
-```
-
-Grid axes (defaults shown in `scripts/backtest_sweep.py` header):
-- `--st` — `period,mult` pairs, semicolon-separated (default: `3,1;10,2;10,3`)
-- `--tf` — timeframe minutes, comma-separated (default: `3,5,15,30,60`)
-- `--moneyness` — `+N` OTM / `0` ATM / `−N` ITM (default: `3,2,1,0,-1,-2,-3`)
 
 > **Data prerequisite**: Run spot + options backfill first (see §9) to avoid `[DATA INCOMPLETE]` days.
 

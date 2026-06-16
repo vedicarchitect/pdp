@@ -124,6 +124,16 @@ class TickRouter:
                             ),
                             ex=900,
                         )
+                    # Publish suite snapshot (non-blocking; only when suite is configured)
+                    _snap = self._indicator_engine.get_snapshot(bar.security_id, bar.timeframe)
+                    if _snap is not None:
+                        _snap_d = _snap.to_dict()
+                        if _snap_d:
+                            await redis.set(
+                                f"ind:{bar.security_id}:{bar.timeframe}",
+                                json.dumps(_snap_d),
+                                ex=900,
+                            )
 
                 # 7b — strategy host bar dispatch
                 if self._strategy_host is not None:

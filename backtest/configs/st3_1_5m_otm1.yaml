@@ -1,29 +1,21 @@
-# ST(3,1) / 5m / OTM-1 — legacy anchor baseline
-# Sweep result: net -306,708 / PF 0.38 / 83 days — kept as regression anchor only.
+# ST(3,1) / 5m / OTM-1 — legacy anchor baseline (matches StrategyConfig.legacy())
+# Sweep result: net -306,708 / PF 0.38 / 83 days — regression anchor only.
 # Do NOT promote this config to paper.
-id: st3_1_5m_otm1
-name: "ST(3,1) 5m OTM-1 (legacy anchor)"
-
 st_period: 3
 st_multiplier: 1.0
 timeframe_min: 5
 moneyness: 1
-
 strike_step: 50
 base_lots: 2
 add_lots: 1
 max_lots: 5
 lot_size: 65
-
 start_ist: "09:30"
 squareoff_ist: "15:10"
-
 leg_stop_per_lot: 3000.0
 day_stop: 20000.0
-
 roll_enabled: true
 roll_trigger_prem: 20.0
 roll_target_min_prem: 50.0
-
-scale_in_gate: "premium_break"
-flip_mode: "strangle"
+scale_in_gate: premium_no_new_high
+flip_mode: close_all

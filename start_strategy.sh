@@ -7,16 +7,18 @@ if python -m pdp strategy list &>/dev/null; then
   STATUS=$(python -m pdp strategy list)
   echo "$STATUS"
 
-  # Check if strategy is already running
-  if echo "$STATUS" | grep -q "RUNNING.*supertrend_short"; then
-    echo "✓ Strategy already running"
+  # Start any STOPPED strategies
+  STOPPED=$(echo "$STATUS" | grep '^STOPPED' | awk '{print $2}')
+  if [ -z "$STOPPED" ]; then
+    echo "✓ All strategies already running"
     exit 0
   fi
 
-  # Strategy is stopped, start it
-  echo "Starting supertrend_short strategy..."
-  python -m pdp strategy start supertrend_short
-  echo "✓ Strategy started"
+  echo "$STOPPED" | while read -r strat; do
+    echo "Starting $strat..."
+    python -m pdp strategy start "$strat"
+  done
+  echo "✓ Done"
   exit 0
 fi
 
@@ -46,11 +48,14 @@ for i in {1..30}; do
   sleep 1
 done
 
-echo "Starting supertrend_short strategy..."
-python -m pdp strategy start supertrend_short
+echo "Starting all strategies..."
+python -m pdp strategy list | grep '^STOPPED' | awk '{print $2}' | while read -r strat; do
+  echo "  Starting $strat..."
+  python -m pdp strategy start "$strat"
+done
 
 echo ""
-echo "✓ Strategy running"
+echo "✓ Strategies running"
 python -m pdp strategy list
 echo ""
 echo "API server running at http://localhost:8000"

@@ -36,6 +36,56 @@ class IndicatorReader:
             return None
         return self._engine.get(security_id, timeframe)
 
+    def snapshot(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_snapshot(security_id, timeframe)
+
+    def ema(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_ema(security_id, timeframe)
+
+    def rsi(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_rsi(security_id, timeframe)
+
+    def psar(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_psar(security_id, timeframe)
+
+    def vwap(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_vwap(security_id, timeframe)
+
+    def vwma(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_vwma(security_id, timeframe)
+
+    def pivots(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_pivots(security_id, timeframe)
+
+    def fvg(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_fvg(security_id, timeframe)
+
+    def market_profile(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_market_profile(security_id, timeframe)
+
+    def volume_profile(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_volume_profile(security_id, timeframe)
+
 
 class MarketControl:
     """Lets a strategy subscribe/unsubscribe feed instruments at runtime.
