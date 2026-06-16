@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import time
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Signal timeframes the resampler + warehouse support (minutes).
 SUPPORTED_TIMEFRAMES = (3, 5, 15, 30, 60)
@@ -68,6 +71,13 @@ class StrategyConfig:
     # Behaviour modes
     scale_in_gate: str = SCALE_PREMIUM_BREAK
     flip_mode: str = FLIP_STRANGLE
+    # EMA early-exit (opt-in; requires "ema" in suite_indicators).
+    # PE leg exits when NIFTY close < EMA; CE leg exits when NIFTY close > EMA.
+    early_exit_ema_fast: int | None = None    # e.g. 9  — exits after confirm_bars consecutive breaches
+    early_exit_ema_slow: int | None = None    # e.g. 20 — exits on first close breach
+    early_exit_ema_confirm_bars: int = 2      # bars needed for fast-EMA exit
+    # Suite indicators replayed per-bar in backtest (same families as live engine)
+    suite_indicators: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.start_ist = _parse_hhmm(self.start_ist)
@@ -100,16 +110,32 @@ class StrategyConfig:
             raise ValueError(f"scale_in_gate must be one of {_SCALE_MODES}, got {self.scale_in_gate}")
         if self.flip_mode not in _FLIP_MODES:
             raise ValueError(f"flip_mode must be one of {_FLIP_MODES}, got {self.flip_mode}")
+        if self.early_exit_ema_fast is not None and self.early_exit_ema_fast < 1:
+            raise ValueError(f"early_exit_ema_fast must be >= 1, got {self.early_exit_ema_fast}")
+        if self.early_exit_ema_slow is not None and self.early_exit_ema_slow < 1:
+            raise ValueError(f"early_exit_ema_slow must be >= 1, got {self.early_exit_ema_slow}")
+        if self.early_exit_ema_confirm_bars < 1:
+            raise ValueError(f"early_exit_ema_confirm_bars must be >= 1, got {self.early_exit_ema_confirm_bars}")
 
     # -- (de)serialization ------------------------------------------------- #
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StrategyConfig:
         """Build a config from a plain dict (unknown keys rejected)."""
-        known = {f for f in cls.__dataclass_fields__}  # noqa: C416
+        known = set(cls.__dataclass_fields__)
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"unknown StrategyConfig keys: {sorted(unknown)}")
         return cls(**d)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> StrategyConfig:
+        """Load a config from a YAML file produced by ``to_yaml``."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"StrategyConfig YAML not found: {path}")
+        with p.open() as f:
+            data = yaml.safe_load(f)
+        return cls.from_dict(data)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict; times become ``HH:MM`` strings (JSON/frontend friendly)."""
@@ -117,6 +143,13 @@ class StrategyConfig:
         out["start_ist"] = self.start_ist.strftime("%H:%M")
         out["squareoff_ist"] = self.squareoff_ist.strftime("%H:%M")
         return out
+
+    def to_yaml(self, path: str | Path) -> None:
+        """Write this config to a YAML file reloadable by ``from_yaml``."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w") as f:
+            yaml.safe_dump(self.to_dict(), f, default_flow_style=False, sort_keys=True)
 
     @property
     def timeframe(self) -> str:

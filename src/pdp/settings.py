@@ -92,6 +92,18 @@ class Settings(BaseSettings):
     # Abi DuckDB data cutoff: gap-fill starts from this date by default.
     ABI_CUTOFF_DATE: str = "2026-05-23"
 
+    # Default config YAML loaded by `task backtest` when no --config-file / --config flag is given.
+    BACKTEST_DEFAULT_CONFIG: str = "backtest/configs/st10_15m_otm1.yaml"
+
+    # Indicator suite defaults (used as fallback; overridden per-entry via watchlist indicators: [...])
+    INDICATOR_EMA_PERIODS: str = "9,20,50,100,200"   # comma-separated ints
+    INDICATOR_RSI_PERIOD: int = 14
+    INDICATOR_PSAR_STEP: float = 0.02
+    INDICATOR_PSAR_MAX_STEP: float = 0.2
+    INDICATOR_VWMA_PERIOD: int = 20
+    INDICATOR_PROFILE_BUCKET_SIZE: float = 50.0       # price-bucket width for VP / MP
+    INDICATOR_PROFILE_VALUE_AREA_PCT: float = 0.70    # VP value-area coverage
+
     backtest_commission: BacktestCommissionSettings = BacktestCommissionSettings()
 
 

@@ -115,6 +115,27 @@ def test_config_roundtrip():
     assert again.to_dict() == cfg.to_dict()
 
 
+def test_config_yaml_roundtrip(tmp_path):
+    cfg = StrategyConfig(st_period=10, st_multiplier=2, timeframe_min=15, moneyness=-1)
+    p = tmp_path / "test_config.yaml"
+    cfg.to_yaml(p)
+    loaded = StrategyConfig.from_yaml(p)
+    assert loaded.to_dict() == cfg.to_dict()
+
+
+def test_config_yaml_missing_file():
+    with pytest.raises(FileNotFoundError, match="nonexistent.yaml"):
+        StrategyConfig.from_yaml("backtest/configs/nonexistent.yaml")
+
+
+def test_config_yaml_invalid_value(tmp_path):
+    import yaml as _yaml
+    p = tmp_path / "bad.yaml"
+    p.write_text(_yaml.safe_dump({"timeframe_min": 7, "st_period": 3, "st_multiplier": 1.0}))
+    with pytest.raises(ValueError):
+        StrategyConfig.from_yaml(p)
+
+
 def test_config_rejects_unknown_key():
     with pytest.raises(ValueError, match="unknown"):
         StrategyConfig.from_dict({"st_period": 10, "bogus": 1})
@@ -301,9 +322,9 @@ def test_partial_close_preserves_avg_entry_books_real_loss():
 # ── sweep aggregation ────────────────────────────────────────────────────────
 def _load_aggregate():
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "scripts"))
-    from backtest_sweep import aggregate  # noqa: E402
-    return aggregate
+        os.path.abspath(__file__)))), "backtest"))
+    import run as _backtest_run  # noqa: E402
+    return _backtest_run.aggregate
 
 
 class _R:

@@ -17,9 +17,10 @@ Semantics (configurable):
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from pdp.backtest.strategy_config import (
     FLIP_CLOSE_ALL,
@@ -28,6 +29,8 @@ from pdp.backtest.strategy_config import (
     SCALE_PREMIUM_NO_NEW_HIGH,
     StrategyConfig,
 )
+from pdp.indicators.registry import build_tracker
+from pdp.indicators.snapshot import Snapshot
 from pdp.indicators.supertrend import SuperTrendTracker
 
 _IST = timedelta(hours=5, minutes=30)
@@ -191,7 +194,6 @@ def simulate_day(
     """Replay one trade day under ``cfg``. Returns a ``DayResult`` (or None if no spot bars)."""
     commission_fn = commission_fn or _zero_commission
     lot = cfg.lot_size
-    tf = cfg.timeframe_min
 
     nifty_bars = data.nifty_bars
     if not nifty_bars:
@@ -202,16 +204,39 @@ def simulate_day(
     # SuperTrend, warmed with the prior session so the line is continuous across the day boundary.
     tracker = SuperTrendTracker(period=cfg.st_period, multiplier=cfg.st_multiplier)
     for wb in data.prior_session_bars:
-        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=timezone.utc)
+        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=UTC)
         tracker.update(wb["high"], wb["low"], wb["close"], bar_time=wts)
 
-    # Build the in-session series: (ist_dt, open, high, low, close, st_state).
+    # Suite indicator bundle: built from cfg.suite_indicators, warmed with prior session.
+    suite_bundle: dict[str, Any] = {}
+    if cfg.suite_indicators:
+        for _ind in cfg.suite_indicators:
+            _fam = _ind.get("family") if isinstance(_ind, dict) else str(_ind)
+            if _fam:
+                _params = {k: v for k, v in _ind.items() if k != "family"} if isinstance(_ind, dict) else {}
+                try:
+                    suite_bundle[_fam] = build_tracker(_fam, _params)
+                except KeyError:
+                    pass
+        for wb in data.prior_session_bars:
+            _wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=UTC)
+            for _ft in suite_bundle.values():
+                _ft.update(wb["high"], wb["low"], wb["close"], wb.get("volume", 0.0), _wts)
+
+    # Build the in-session series: (ist_dt, open, high, low, close, st_state, suite_snapshot).
     series = []
     for b in nifty_bars:
-        ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+        ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         ist_dt = (ts_utc + _IST).replace(tzinfo=None)
         st = tracker.update(b["high"], b["low"], b["close"], bar_time=ts_utc)
-        series.append((ist_dt, float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]), st))
+        suite_snap: Snapshot | None = None
+        if suite_bundle:
+            _skw = {_fam: _ft.update(b["high"], b["low"], b["close"], b.get("volume", 0.0), ts_utc)
+                    for _fam, _ft in suite_bundle.items()}
+            suite_snap = Snapshot(**_skw)
+        series.append(
+            (ist_dt, float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]), st, suite_snap)
+        )
 
     td = data.trade_date
     start_dt = datetime(td.year, td.month, td.day, cfg.start_ist.hour, cfg.start_ist.minute)
@@ -227,6 +252,8 @@ def simulate_day(
     done = False
     done_reason = ""
     first_flip_seen = False
+    _ema_confirm_count: int = 0        # consecutive bars with fast-EMA breach
+    _ema_confirm_leg: str | None = None  # which leg the counter belongs to
 
     def in_strangle() -> bool:
         return len(legs) == 2
@@ -253,7 +280,9 @@ def simulate_day(
         ))
         return True
 
-    def close_leg(opt_type: str, ist_dt: datetime, nifty_px: float, reason: str, lots: int | None = None) -> None:
+    def close_leg(
+        opt_type: str, ist_dt: datetime, nifty_px: float, reason: str, lots: int | None = None
+    ) -> None:
         """Close ``lots`` (default all) of a leg, booking realized P&L and a leg record."""
         nonlocal day_pnl, done, done_reason, active
         leg = legs.get(opt_type)
@@ -297,7 +326,7 @@ def simulate_day(
         for ot in list(legs.keys()):
             close_leg(ot, ist_dt, nifty_px, reason)
 
-    for ist_dt, bar_open, bar_high, bar_low, bar_close, st in series:
+    for ist_dt, bar_open, bar_high, bar_low, bar_close, st, _suite_snap in series:
         if st is None:
             continue
         if ist_dt < start_dt:
@@ -336,10 +365,46 @@ def simulate_day(
             if mtm_px is not None:
                 if leg.mtm(mtm_px) <= -(cfg.leg_stop_per_lot * leg.lots):
                     close_leg(active, ist_dt, bar_close, "leg_stop")
+                    _ema_confirm_count = 0
+                    _ema_confirm_leg = None
                     continue
+
+        # ── EMA early-exit (PE exits on close < EMA; CE exits on close > EMA) ─
+        if (active is not None and active in legs
+                and (cfg.early_exit_ema_fast is not None or cfg.early_exit_ema_slow is not None)
+                and _suite_snap is not None and _suite_snap.ema is not None):
+            ema_vals = _suite_snap.ema.values
+            if _ema_confirm_leg != active:
+                _ema_confirm_count = 0
+                _ema_confirm_leg = active
+            # Slow EMA: instant 1-bar exit.
+            if cfg.early_exit_ema_slow is not None:
+                eslow = ema_vals.get(cfg.early_exit_ema_slow)
+                if eslow is not None:
+                    if (active == "PE" and bar_close < eslow) or (active == "CE" and bar_close > eslow):
+                        close_leg(active, ist_dt, bar_close, "ema_slow_exit")
+                        _ema_confirm_count = 0
+                        _ema_confirm_leg = None
+                        continue
+            # Fast EMA: needs confirm_bars consecutive close breaches.
+            if cfg.early_exit_ema_fast is not None:
+                efast = ema_vals.get(cfg.early_exit_ema_fast)
+                if efast is not None:
+                    breach = (active == "PE" and bar_close < efast) or (active == "CE" and bar_close > efast)
+                    if breach:
+                        _ema_confirm_count += 1
+                        if _ema_confirm_count >= cfg.early_exit_ema_confirm_bars:
+                            close_leg(active, ist_dt, bar_close, "ema_fast_exit")
+                            _ema_confirm_count = 0
+                            _ema_confirm_leg = None
+                            continue
+                    else:
+                        _ema_confirm_count = 0
 
         # ── Flip ──────────────────────────────────────────────────────────────
         if active is not None and active in legs and legs[active].opt_type != desired:
+            _ema_confirm_count = 0
+            _ema_confirm_leg = None
             old = active
             if cfg.flip_mode == FLIP_CLOSE_ALL:
                 close_leg(old, ist_dt, bar_open, "flip")
@@ -400,7 +465,8 @@ def simulate_day(
             continue
 
         # ── Scale-in (active aligned leg, under max) ──────────────────────────
-        if active is not None and active in legs and legs[active].opt_type == desired and legs[active].lots < cfg.max_lots:
+        if (active is not None and active in legs
+                and legs[active].opt_type == desired and legs[active].lots < cfg.max_lots):
             leg = legs[active]
             if _scale_gate_open(cfg, leg.bars, ist_dt):
                 add_px = price_at(leg.bars, ist_dt, prefer="close")

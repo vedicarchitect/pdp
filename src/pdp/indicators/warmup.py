@@ -2,13 +2,14 @@
 
 Priority:
   1. MongoDB market_bars collection (bars already stored from previous sessions).
-  2. Dhan intraday_minute_data API (fetched when MongoDB has < MIN_BARS rows).
-     Fetched bars are persisted to MongoDB so subsequent restarts use path 1.
+  2. Dhan intraday_minute_data API (fetched when MongoDB holds fewer bars than a
+     full prior session). Fetched bars are persisted to MongoDB so subsequent
+     restarts use path 1.
 """
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -24,10 +25,19 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-# Warm up with this many bars minimum; fetch from API when MongoDB is short.
-MIN_BARS = 10  # need period(3) + a few extra to stabilise bands
-# How far back to look in MongoDB (one full trading day should be enough).
-LOOKBACK_HOURS = 8
+# NIFTY session start: 09:15 IST = 03:45 UTC
+_SESSION_START_UTC_H = 3
+_SESSION_START_UTC_M = 45
+
+# Bars expected from a full prior trading session (375-minute NIFTY session).
+_TF_SESSION_BARS: dict[str, int] = {
+    "1m": 375,
+    "5m": 75,
+    "15m": 25,
+    "25m": 15,
+    "1H": 7,
+}
+_DEFAULT_SESSION_BARS = 75
 
 # Timeframe label → Dhan interval integer
 _TF_TO_DHAN_INTERVAL: dict[str, int] = {
@@ -42,24 +52,44 @@ _TF_TO_DHAN_INTERVAL: dict[str, int] = {
 _SEGMENT_TO_INSTRUMENT: dict[str, str] = {
     "IDX_I": "INDEX",
     "NSE_EQ": "EQUITY",
-    "NSE_FNO": "FUTIDX",  # used for options too
+    "NSE_FNO": "FUTIDX",
     "BSE_EQ": "EQUITY",
 }
+
+
+def _prior_trading_day(holiday_set: set[date], *, _today: date | None = None) -> date:
+    """Return the most recent prior trading day (IST calendar), walking back over weekends/holidays."""
+    today = _today or (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    d = today - timedelta(days=1)
+    while d.weekday() >= 5 or d in holiday_set:
+        d -= timedelta(days=1)
+    return d
 
 
 async def warm_up_indicator_engine(
     engine: IndicatorEngine,
     mongo_db: AsyncIOMotorDatabase,
     settings: Settings,
-    watchlist: list[dict],  # [{security_id, exchange_segment, timeframes:[...]}]
+    watchlist: list[dict],
 ) -> None:
     """Seed the IndicatorEngine from MongoDB or Dhan API for each watchlist entry."""
+    from pdp.options.gap_backfill import holidays as _load_holidays
+
+    holiday_set = _load_holidays(settings.NSE_HOLIDAYS_JSON)
+    prior_day = _prior_trading_day(holiday_set)
+    since = datetime(
+        prior_day.year, prior_day.month, prior_day.day,
+        _SESSION_START_UTC_H, _SESSION_START_UTC_M,
+        tzinfo=UTC,
+    )
+    log.info("indicator_warmup_start", prior_day=str(prior_day), since=since.isoformat())
+
     for entry in watchlist:
         sid = str(entry["security_id"])
         segment = str(entry["exchange_segment"])
         for tf in entry.get("timeframes", []):
             try:
-                await _warm_one(engine, mongo_db, settings, sid, segment, tf)
+                await _warm_one(engine, mongo_db, settings, sid, segment, tf, since, prior_day)
             except Exception as exc:
                 log.warning(
                     "indicator_warmup_failed",
@@ -76,25 +106,26 @@ async def _warm_one(
     security_id: str,
     segment: str,
     timeframe: str,
+    since: datetime,
+    prior_day: date,
 ) -> None:
     col = mongo_db["market_bars"]
-    since = datetime.now(UTC) - timedelta(hours=LOOKBACK_HOURS)
-
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
 
-    if len(bars) < MIN_BARS and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+    session_bars = _TF_SESSION_BARS.get(timeframe, _DEFAULT_SESSION_BARS)
+    if len(bars) < session_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
             security_id=security_id,
             timeframe=timeframe,
             mongo_count=len(bars),
+            session_target=session_bars,
         )
         api_bars = await asyncio.get_running_loop().run_in_executor(
-            None, _fetch_from_dhan, settings, security_id, segment, timeframe
+            None, _fetch_from_dhan, settings, security_id, segment, timeframe, prior_day
         )
         if api_bars:
             await _persist_bars(col, api_bars)
-            # Merge: keep mongo bars as ground truth, prepend api bars not in mongo
             existing_times = {b.bar_time for b in bars}
             new_bars = [b for b in api_bars if b.bar_time not in existing_times]
             bars = sorted(new_bars + bars, key=lambda b: b.bar_time)
@@ -103,14 +134,27 @@ async def _warm_one(
         log.warning("indicator_warmup_no_bars", security_id=security_id, timeframe=timeframe)
         return
 
+    if not engine._suite_trackers.get((security_id, timeframe)):
+        log.debug("indicator_warmup_suite_not_configured", security_id=security_id, timeframe=timeframe)
+
     fed = engine.seed_from_bars(bars)
+
+    # Derive prior-session HLC for PivotTrackers in the suite bundle.
+    # Bars are from prior_day 09:15 UTC onwards; their high/low/close give the prior HLC.
+    key = (security_id, timeframe)
+    bundle = engine._suite_trackers.get(key)
+    if bundle and "pivots" in bundle and bars:
+        prior_h = max(float(b.high) for b in bars)
+        prior_l = min(float(b.low) for b in bars)
+        prior_c = float(bars[-1].close)
+        bundle["pivots"].seed_prior_hlc(prior_h, prior_l, prior_c, prior_day)
 
     log.info(
         "indicator_warmup_done",
         security_id=security_id,
         timeframe=timeframe,
         bars_fed=fed,
-        direction=engine.get(security_id, timeframe).direction if engine.get(security_id, timeframe) else None,
+        direction=((_st := engine.get(security_id, timeframe)) and _st.direction) or None,
     )
 
 
@@ -144,7 +188,7 @@ async def _fetch_from_mongo(
                     oi=int(doc.get("oi", 0)),
                 )
             )
-        except Exception:
+        except Exception:  # noqa: S112
             continue
     bars.sort(key=lambda b: b.bar_time)
     return bars
@@ -155,9 +199,10 @@ def _fetch_from_dhan(
     security_id: str,
     segment: str,
     timeframe: str,
+    prior_day: date | None = None,
 ) -> list[BarClosed]:
     """Blocking — call via run_in_executor."""
-    from dhanhq import dhanhq as DhanClient
+    from dhanhq import dhanhq as DhanClient  # noqa: N812
 
     interval = _TF_TO_DHAN_INTERVAL.get(timeframe)
     if interval is None:
@@ -165,8 +210,10 @@ def _fetch_from_dhan(
         return []
 
     instrument = _SEGMENT_TO_INSTRUMENT.get(segment, "EQUITY")
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    from_d = prior_day if prior_day is not None else today_ist - timedelta(days=1)
+    from_date = from_d.strftime("%Y-%m-%d")
+    to_date = today_ist.strftime("%Y-%m-%d")
 
     from dhanhq import DhanContext
     ctx = DhanContext(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
@@ -175,8 +222,8 @@ def _fetch_from_dhan(
         security_id=security_id,
         exchange_segment=segment,
         instrument_type=instrument,
-        from_date=yesterday,
-        to_date=today,
+        from_date=from_date,
+        to_date=to_date,
         interval=interval,
     )
 
@@ -198,7 +245,6 @@ def _fetch_from_dhan(
             ts_raw = timestamps[i] if i < len(timestamps) else None
             if ts_raw is None:
                 continue
-            # Dhan returns epoch seconds (int) or ISO string
             if isinstance(ts_raw, (int, float)):
                 bar_time = datetime.fromtimestamp(ts_raw, tz=UTC)
             else:
@@ -218,7 +264,7 @@ def _fetch_from_dhan(
                     oi=0,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: S112
             continue
 
     bars.sort(key=lambda b: b.bar_time)

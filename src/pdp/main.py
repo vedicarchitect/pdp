@@ -124,6 +124,14 @@ async def lifespan(app: FastAPI):
         for cfg in _all_configs
         for w in cfg.watchlist
     ]
+
+    # Build indicator suite from the union of each strategy's watchlist indicator requests.
+    for _cfg in _all_configs:
+        for _w in _cfg.watchlist:
+            if _w.indicators:
+                for _tf in _w.timeframes:
+                    indicator_engine.configure_suite(_w.security_id, _tf, _w.indicators)
+
     if _watchlist_dicts:
         try:
             await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)

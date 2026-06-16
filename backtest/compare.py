@@ -5,7 +5,7 @@ and prints a side-by-side comparison against that day's paper journal stats.
 Does NOT write to any PostgreSQL table.
 
 Usage:
-    python scripts/backtest_compare.py [--date YYYY-MM-DD]
+    python backtest/compare.py [--date YYYY-MM-DD]
 
 Defaults to today's IST date when --date is omitted.
 """
@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 # Allow running from repo root without installing the package
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from pdp.indicators.supertrend import SuperTrendTracker  # noqa: E402
 
 load_dotenv()
@@ -419,7 +419,7 @@ def main() -> None:
     # Load NIFTY 5m bars
     nifty_bars = _load_bars(db, NIFTY_SID, TIMEFRAME, start_utc, end_utc)
     if not nifty_bars:
-        print(f"No NIFTY {TIMEFRAME} bars found for {date_ist}.")
+        print(f"No market bars found for {date_ist}.")
         sys.exit(1)
 
     print(f"Loaded {len(nifty_bars)} NIFTY {TIMEFRAME} bars for {date_ist}.")

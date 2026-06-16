@@ -1,0 +1,19 @@
+# ST(10,2) / 15m / ATM
+st_period: 10
+st_multiplier: 2.0
+timeframe_min: 15
+moneyness: 0
+strike_step: 50
+base_lots: 2
+add_lots: 1
+max_lots: 5
+lot_size: 65
+start_ist: "09:30"
+squareoff_ist: "15:10"
+leg_stop_per_lot: 3000.0
+day_stop: 10000.0
+roll_enabled: true
+roll_trigger_prem: 20.0
+roll_target_min_prem: 50.0
+scale_in_gate: premium_break
+flip_mode: strangle

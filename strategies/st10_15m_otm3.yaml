@@ -1,0 +1,32 @@
+# ST(10,2) / 15m / OTM-3 — observation run started 2026-06-15
+# 300-day sweep rank #2: PF 1.72 / Net +295,016 / MaxDD 53,426 / Win% 77% / 13 stops
+# Furthest OTM tested; lowest nominal premium → smaller absolute moves per trade
+
+id: st10_15m_otm3
+class: pdp.strategies.supertrend_short.SuperTrendShort
+
+watchlist:
+  - security_id: "13"
+    exchange_segment: IDX_I
+    timeframes: [15m]
+
+params:
+  underlying: NIFTY
+  underlying_security_id: "13"
+  index_segment: IDX_I
+  timeframe: 15m
+  option_segment: NSE_FNO
+  otm_steps: 3
+  strike_step: 50
+  lot_size: 65
+  start_lots: 2
+  add_lots: 1
+  max_lots: 5
+  start_ist: "09:30"
+  square_off_ist: "15:10"
+  leg_stop_per_lot: 3000
+  day_stop: 12000
+
+risk:
+  max_open_orders: 12
+  max_daily_loss_inr: 12000

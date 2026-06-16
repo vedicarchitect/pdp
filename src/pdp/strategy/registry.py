@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any  # noqa: F401 (Any used in WatchlistEntry.indicators)
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -15,6 +15,7 @@ class WatchlistEntry(BaseModel):
     security_id: str
     exchange_segment: str
     timeframes: list[str]
+    indicators: list[dict[str, Any]] = []
 
 
 class RiskConfig(BaseModel):

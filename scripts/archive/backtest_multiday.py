@@ -1,3 +1,4 @@
+# ARCHIVED 2026-06-14 — superseded by backtest/run.py (sim.py + StrategyConfig). Kept for reference only.
 """
 Multi-day backtest: SuperTrend(3,1) NIFTY option-selling with risk management.
 

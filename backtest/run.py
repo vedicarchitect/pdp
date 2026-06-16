@@ -1,18 +1,32 @@
-"""Parameter-sweep harness for the configurable SuperTrend option-selling strategy.
+"""Canonical multi-day backtest runner for the configurable SuperTrend option-selling strategy.
 
 Loads raw 1-minute spot + option chains for the window once, then runs the config-driven engine
-(``pdp.backtest.sim``) across a grid of variants and prints a ranked comparison table. No DB writes.
+(``pdp.backtest.sim``) for either a single named config (per-trade detail) or a grid sweep of
+variants and prints a ranked comparison table.
+
+Modes (priority order):
+  --sweep-param KEY=v1,...  sweep one field across values, print comparison table
+  --st / --tf / --moneyness run the full parameter grid (any one flag triggers grid mode)
+  --config-file <path>      load a named YAML config, run single-config per-trade detail
+  --config <json>           parse an inline JSON config, run single-config per-trade detail
+  (none of the above)       load BACKTEST_DEFAULT_CONFIG, run last-7-day per-trade detail
+
+Modifiers (combine with any mode):
+  --set KEY=VALUE           override one StrategyConfig field on top of a loaded config
+                            (repeatable; applied before --sweep-param variation)
 
 Usage:
-  python scripts/backtest_sweep.py --days 90 --start 2026-06-12
-  python scripts/backtest_sweep.py --days 60 --st "10,2;10,3" --tf "5,15" --moneyness "1,0,-1"
-  python scripts/backtest_sweep.py --days 90 --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,"moneyness":0}'
+  python backtest/run.py                                                  # default config, 7 days
+  python backtest/run.py --config-file backtest/configs/st10_15m_otm1.yaml --days 30
+  python backtest/run.py --config-file backtest/configs/st10_15m_otm1.yaml --set day_stop=12000 --days 30
+  python backtest/run.py --sweep-param day_stop=10000,12000,15000,20000 --days 30
+  python backtest/run.py --config-file backtest/configs/st10_2_5m_otm1.yaml --sweep-param day_stop=10000,12000,15000,20000 --days 30
+  python backtest/run.py --days 90 --st "10,2;10,3" --tf "5,15" --moneyness "1,0,-1"
 
-Grid axes (defaults):
+Grid axis defaults (used when flag given without value or as fallback inside grid mode):
   --st         SuperTrend (period,multiplier) pairs, ';'-separated   [3,1;10,2;10,3]
   --tf         signal timeframes in minutes, ','-separated           [3,5,15,30,60]
   --moneyness  signed strike offsets (>0 OTM, 0 ATM, <0 ITM)         [3,2,1,0,-1,-2,-3]
-  --config     run a single StrategyConfig (JSON) in detail instead of the grid
 """
 from __future__ import annotations
 
@@ -55,6 +69,37 @@ def parse_st(s: str) -> list[tuple[int, float]]:
 
 def parse_ints(s: str) -> list[int]:
     return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+# ── runtime overrides ──────────────────────────────────────────────────────────
+def apply_overrides(cfg: StrategyConfig, overrides: list[str]) -> StrategyConfig:
+    """Apply --set KEY=VALUE pairs on top of a loaded config (type-coerced from existing field)."""
+    d = cfg.to_dict()
+    for kv in overrides:
+        if "=" not in kv:
+            raise ValueError(f"--set must be KEY=VALUE, got: {kv!r}")
+        key, raw_val = kv.split("=", 1)
+        key = key.strip()
+        if key not in d:
+            raise ValueError(f"Unknown StrategyConfig field: {key!r}. Known: {sorted(d)}")
+        existing = d[key]
+        if isinstance(existing, bool):
+            d[key] = raw_val.lower() in ("true", "1", "yes")
+        elif isinstance(existing, int):
+            d[key] = int(raw_val)
+        elif isinstance(existing, float):
+            d[key] = float(raw_val)
+        else:
+            d[key] = raw_val
+    return StrategyConfig.from_dict(d)
+
+
+def parse_param_sweep(s: str) -> tuple[str, list[str]]:
+    """Parse --sweep-param KEY=v1,v2,... → (key, [raw_values])."""
+    if "=" not in s:
+        raise ValueError(f"--sweep-param must be KEY=v1,v2,..., got: {s!r}")
+    key, vals_str = s.split("=", 1)
+    return key.strip(), [v.strip() for v in vals_str.split(",") if v.strip()]
 
 
 # ── metrics ────────────────────────────────────────────────────────────────────
@@ -219,16 +264,30 @@ def _last_biz_day(d: date) -> date:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=90)
-    ap.add_argument("--start", type=str, default=None, help="End date YYYY-MM-DD (default last biz day)")
-    ap.add_argument("--st", type=str, default="3,1;10,2;10,3")
-    ap.add_argument("--tf", type=str, default="3,5,15,30,60")
-    ap.add_argument("--moneyness", type=str, default="3,2,1,0,-1,-2,-3")
-    ap.add_argument("--config", type=str, default=None, help="Run a single StrategyConfig (JSON) in detail")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--days", type=int, default=None, help="Window size in trading days (default: 7 for single-config, 90 for grid)")
+    ap.add_argument("--start", type=str, default=None, help="End date YYYY-MM-DD (default: last business day)")
+    # Single-config sources (mutually exclusive in practice)
+    ap.add_argument("--config-file", type=str, default=None, metavar="PATH", help="Load a named YAML config for single-config detail")
+    ap.add_argument("--config", type=str, default=None, help="Run a single StrategyConfig (inline JSON) in detail mode")
+    # Grid axes — any non-None value triggers grid mode
+    ap.add_argument("--st", type=str, default=None, help="SuperTrend pairs ';'-sep, e.g. '3,1;10,2'  [grid default: 3,1;10,2;10,3]")
+    ap.add_argument("--tf", type=str, default=None, help="Timeframe minutes ','-sep, e.g. '5,15'       [grid default: 3,5,15,30,60]")
+    ap.add_argument("--moneyness", type=str, default=None, help="Strike offsets ','-sep, e.g. '1,0,-1'    [grid default: 3,2,1,0,-1,-2,-3]")
+    ap.add_argument("--set", action="append", metavar="KEY=VALUE", dest="overrides",
+                    help="Override a StrategyConfig field on top of any loaded config, e.g. --set day_stop=12000")
+    ap.add_argument("--sweep-param", type=str, default=None, metavar="KEY=v1,v2,...",
+                    help="Sweep one field across values, e.g. --sweep-param day_stop=10000,12000,15000,20000")
     ap.add_argument("--no-commission", action="store_true")
     ap.add_argument("--no-heal", action="store_true")
     args = ap.parse_args()
+
+    # Determine mode
+    use_grid = any([args.st is not None, args.tf is not None, args.moneyness is not None])
+    use_yaml = args.config_file is not None
+    use_json = args.config is not None
+    use_param_sweep = args.sweep_param is not None
+    overrides: list[str] = args.overrides or []
 
     s = get_settings()
     mdb = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]
@@ -245,7 +304,9 @@ def main() -> int:
         return float(calc.calculate(side, Decimal(str(turnover))).total_inr)
 
     end = date.fromisoformat(args.start) if args.start else _last_biz_day(date.today())
-    days = biz_days(end, args.days)
+    # Default days: 7 for single-config modes, 90 for grid
+    days_count = args.days if args.days is not None else (90 if use_grid else 7)
+    days = biz_days(end, days_count)
 
     dhan = None
     if not args.no_heal and s.DHAN_CLIENT_ID and s.DHAN_ACCESS_TOKEN:
@@ -261,16 +322,55 @@ def main() -> int:
         print("No valid trading days in window (check data).")
         return 1
 
-    # ── single-config detail mode ──
-    if args.config:
+    # ── param sweep (--sweep-param KEY=v1,v2,...) ──
+    if use_param_sweep:
+        sweep_key, sweep_vals = parse_param_sweep(args.sweep_param)
+        if use_yaml:
+            base_cfg = StrategyConfig.from_yaml(args.config_file)
+        elif use_json:
+            base_cfg = StrategyConfig.from_dict(json.loads(args.config))
+        else:
+            base_cfg = StrategyConfig.from_yaml(s.BACKTEST_DEFAULT_CONFIG)
+        if overrides:
+            base_cfg = apply_overrides(base_cfg, overrides)
+        rows = []
+        for raw_val in sweep_vals:
+            cfg = apply_overrides(base_cfg, [f"{sweep_key}={raw_val}"])
+            m = run_config(cfg, window, commission_fn)
+            m["label"] = f"{cfg.label()} {sweep_key}={raw_val}"
+            rows.append(m)
+        log.info("param sweep: %s across %s", sweep_key, sweep_vals)
+        print_table(rows)
+        return 0
+
+    # ── single-config detail: YAML file ──
+    if use_yaml:
+        cfg = StrategyConfig.from_yaml(args.config_file)
+        if overrides:
+            cfg = apply_overrides(cfg, overrides)
+        print_detail(run_config(cfg, window, commission_fn))
+        return 0
+
+    # ── single-config detail: inline JSON ──
+    if use_json:
         cfg = StrategyConfig.from_dict(json.loads(args.config))
+        if overrides:
+            cfg = apply_overrides(cfg, overrides)
+        print_detail(run_config(cfg, window, commission_fn))
+        return 0
+
+    # ── single-config detail: default config from settings ──
+    if not use_grid:
+        cfg = StrategyConfig.from_yaml(s.BACKTEST_DEFAULT_CONFIG)
+        if overrides:
+            cfg = apply_overrides(cfg, overrides)
         print_detail(run_config(cfg, window, commission_fn))
         return 0
 
     # ── grid sweep ──
-    sts = parse_st(args.st)
-    tfs = parse_ints(args.tf)
-    mnys = parse_ints(args.moneyness)
+    sts = parse_st(args.st or "3,1;10,2;10,3")
+    tfs = parse_ints(args.tf or "3,5,15,30,60")
+    mnys = parse_ints(args.moneyness or "3,2,1,0,-1,-2,-3")
     combos = [(p, m, tf, mny) for (p, m) in sts for tf in tfs for mny in mnys]
     log.info("running grid: %d combos (%d ST x %d TF x %d moneyness)",
              len(combos), len(sts), len(tfs), len(mnys))
@@ -278,6 +378,8 @@ def main() -> int:
     rows = []
     for i, (period, mult, tf, mny) in enumerate(combos, 1):
         cfg = StrategyConfig(st_period=period, st_multiplier=mult, timeframe_min=tf, moneyness=mny)
+        if overrides:
+            cfg = apply_overrides(cfg, overrides)
         rows.append(run_config(cfg, window, commission_fn))
         if i % 10 == 0 or i == len(combos):
             log.info("  %d/%d combos done", i, len(combos))

@@ -1,0 +1,32 @@
+# ST(10,2) / 5m / OTM-2 / b3a1m7 ls2k ds20k — observation run started 2026-06-15
+# 300-day sweep rank #11: PF 1.34 / Net +425,735 / MaxDD 86,974 / Win% 51% / 21 stops
+# Highest net of all experiments; 5m = 5x more trades than 15m, expect intraday noise
+
+id: st10_5m_otm2_b3m7
+class: pdp.strategies.supertrend_short.SuperTrendShort
+
+watchlist:
+  - security_id: "13"
+    exchange_segment: IDX_I
+    timeframes: [5m]
+
+params:
+  underlying: NIFTY
+  underlying_security_id: "13"
+  index_segment: IDX_I
+  timeframe: 5m
+  option_segment: NSE_FNO
+  otm_steps: 2
+  strike_step: 50
+  lot_size: 65
+  start_lots: 3
+  add_lots: 1
+  max_lots: 7
+  start_ist: "09:30"
+  square_off_ist: "15:10"
+  leg_stop_per_lot: 2000
+  day_stop: 20000
+
+risk:
+  max_open_orders: 15
+  max_daily_loss_inr: 20000

@@ -37,6 +37,15 @@ OrderRouter.place_order(req)
 3. Wire into `OrderRouter.__init__()`.
 4. Add `BROKER` literal to `settings.py`.
 
+## Known Bug — Shared Position (UNFIXED as of 2026-06-16)
+
+`PaperBroker` keys its in-memory position map by `security_id` only. When two strategies hold the **same** security (e.g. both st10_15m_otm3 and st10_5m_otm2_b3m7 sell CE24050), they share one position object. Effects:
+- Heartbeat `lots` = inflated sum across strategies
+- Stop-loss fires against the combined position → over-closes
+- When strategy A flips and clears the shared position, strategy B sees `lots=0` and re-enters immediately (cascading re-entry)
+
+**Fix**: Key `_positions` and the DB `positions` table by `(strategy_id, security_id)` instead of `security_id` alone. All callers that look up position by `security_id` must also pass `strategy_id`.
+
 ## Active Specs
 
 `order-approval-center` (in-flight) — manual approval gate before live sends.
