@@ -84,3 +84,89 @@ def test_pcr_endpoint(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["pcr"] == pytest.approx(1.23)
+
+
+def _fake_snapshot_with_strikes() -> dict:
+    base = _fake_snapshot()
+    base["strikes"] = [
+        {"strike": 22500, "ce": {"oi": 1000, "gamma": 0.02}, "pe": {"oi": 800, "gamma": 0.02}},
+        {"strike": 22400, "ce": {"oi": 500, "gamma": 0.01}, "pe": {"oi": 600, "gamma": 0.01}},
+    ]
+    return base
+
+
+def _mock_find(client: TestClient, docs: list[dict]) -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.limit.return_value = mock_cursor
+    mock_cursor.to_list = AsyncMock(return_value=docs)
+    mock_col = MagicMock()
+    mock_col.find.return_value = mock_cursor
+    client.app.state.mongo_db.__getitem__ = MagicMock(return_value=mock_col)
+
+
+def test_gex_paper_mode(client):
+    resp = client.get("/api/v1/options/NIFTY/gex")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "paper"
+    assert body["per_strike"] == []
+    assert body["net_gex"] == 0
+    assert body["net_gex_cr"] == pytest.approx(0.0)
+
+
+def test_gex_returns_sorted_per_strike(client):
+    client.app.state.options_poller = MagicMock()
+    _mock_find_one(client, _fake_snapshot_with_strikes())
+
+    resp = client.get("/api/v1/options/NIFTY/gex?expiry=2026-06-26")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["underlying"] == "NIFTY"
+    assert "net_gex_cr" in body
+    assert body["lot_size"] == 75
+    strikes = [s["strike"] for s in body["per_strike"]]
+    assert strikes == sorted(strikes)
+
+
+def test_gex_404_when_no_snapshot(client):
+    client.app.state.options_poller = MagicMock()
+    _mock_find_one(client, None)
+
+    resp = client.get("/api/v1/options/NIFTY/gex?expiry=2026-06-26")
+    assert resp.status_code == 404
+
+
+def test_oi_history_paper_mode(client):
+    resp = client.get("/api/v1/options/NIFTY/oi-history")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "paper"
+    assert body["snapshots"] == []
+
+
+def test_oi_history_returns_oldest_first(client):
+    client.app.state.options_poller = MagicMock()
+    ts1 = datetime(2026, 6, 6, 9, 30, tzinfo=UTC)
+    ts2 = datetime(2026, 6, 6, 9, 35, tzinfo=UTC)
+    # find() sorts desc; route reverses → oldest first
+    docs = [
+        {**_fake_snapshot(), "snapshot_ts": ts2, "pcr": 1.5},
+        {**_fake_snapshot(), "snapshot_ts": ts1, "pcr": 1.2},
+    ]
+    _mock_find(client, docs)
+
+    resp = client.get("/api/v1/options/NIFTY/oi-history?expiry=2026-06-26")
+    assert resp.status_code == 200
+    body = resp.json()
+    snapshots = body["snapshots"]
+    assert len(snapshots) == 2
+    assert snapshots[0]["pcr"] == pytest.approx(1.2)
+    assert snapshots[1]["pcr"] == pytest.approx(1.5)
+
+
+def test_oi_history_404_when_no_docs(client):
+    client.app.state.options_poller = MagicMock()
+    _mock_find(client, [])
+
+    resp = client.get("/api/v1/options/NIFTY/oi-history?expiry=2026-06-26")
+    assert resp.status_code == 404
