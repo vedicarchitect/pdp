@@ -78,21 +78,21 @@ export function KillSwitchButton() {
       >
         {isBusy ? (
           <>
-            <span className="animate-spin">⏳</span> Executing...
+            <span className="animate-spin" aria-hidden="true">⏳</span> Executing...
           </>
         ) : (
           <>
-            <span>☠</span> Kill Switch
+            <span aria-hidden="true">☠</span> Kill Switch
           </>
         )}
       </button>
 
       {/* Confirmation modal */}
       {uiState === 'confirming' && (
-        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 transition-opacity" role="dialog" aria-modal>
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 transition-opacity" role="dialog" aria-modal aria-labelledby="kill-switch-modal-title" aria-describedby="kill-switch-modal-desc">
           <div className="glass-panel border-bearish/50 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl shadow-bearish/10 transform scale-100 transition-transform">
-            <h2 className="text-lg font-bold text-bearish mb-2">⚠ Confirm Kill Switch</h2>
-            <p className="text-text-muted text-sm mb-6 leading-relaxed">
+            <h2 id="kill-switch-modal-title" className="text-lg font-bold text-bearish mb-2"><span aria-hidden="true">⚠</span> Confirm Kill Switch</h2>
+            <p id="kill-switch-modal-desc" className="text-text-muted text-sm mb-6 leading-relaxed">
               Are you sure? This will <strong className="text-text-main">cancel all open orders</strong> and <strong className="text-text-main">flatten all intraday positions</strong> at market price immediately. This action cannot be undone.
             </p>
             <div className="flex gap-3 justify-end">
@@ -117,6 +117,8 @@ export function KillSwitchButton() {
       {/* Toast notification */}
       {toast && (
         <div
+          role="status"
+          aria-live="polite"
           className={`fixed bottom-4 right-4 max-w-sm px-5 py-3.5 rounded-lg border text-sm font-medium z-50 shadow-xl transition-all duration-300 translate-y-0 ${
             uiState === 'error' || uiState === 'idle' && toast.includes('failed')
               ? 'glass-panel bg-bearish/10 border-bearish/40 text-bearish'
