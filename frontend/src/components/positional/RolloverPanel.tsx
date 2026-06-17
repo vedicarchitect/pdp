@@ -104,6 +104,7 @@ export function RolloverPanel({ leg }: Props) {
         <button
           onClick={handleEstimate}
           disabled={loading}
+          aria-busy={loading}
           className="ml-auto px-3 py-1 bg-blue-800 hover:bg-blue-700 text-blue-100 rounded text-xs disabled:opacity-50"
         >
           {loading ? 'Fetching…' : 'Estimate Rollover'}
@@ -135,8 +136,9 @@ export function RolloverPanel({ leg }: Props) {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-gray-500">Slippage buffer</span>
+              <label htmlFor="slippage" className="text-gray-500">Slippage buffer</label>
               <input
+                id="slippage"
                 type="number"
                 min="0"
                 max="5"
