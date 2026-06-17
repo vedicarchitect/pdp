@@ -7,8 +7,8 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from pdp.alerts.evaluator import AlertNotification
 from pdp.alerts import service
+from pdp.alerts.evaluator import AlertNotification
 
 log = structlog.get_logger()
 
@@ -17,7 +17,7 @@ _CLIENT_QUEUE_SIZE = 100
 
 
 class _Client:
-    __slots__ = ("addr", "queue", "ws", "user_id")
+    __slots__ = ("addr", "queue", "user_id", "ws")
 
     def __init__(self, ws: WebSocket, user_id: str) -> None:
         self.ws = ws

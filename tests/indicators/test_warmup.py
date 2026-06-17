@@ -19,8 +19,8 @@ import pytest
 
 from pdp.indicators.engine import IndicatorEngine
 from pdp.indicators.warmup import (
-    _prior_trading_day,
     _TF_SESSION_BARS,
+    _prior_trading_day,
     warm_up_indicator_engine,
 )
 from pdp.market.bars import BarClosed

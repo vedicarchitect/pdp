@@ -16,7 +16,7 @@ The service does NOT touch the order router (paper-first, read/ingest only).
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -33,7 +33,7 @@ from pdp.strategy.strikes import atm_strike
 from pdp.warehouse.writer import NIFTY_INDEX_SID, ContractMeta, OptionBarWriter
 
 if TYPE_CHECKING:
-    from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
+    from motor.motor_asyncio import AsyncIOMotorDatabase
 
 log = structlog.get_logger()
 
@@ -49,7 +49,6 @@ _UNDERLYING = "NIFTY"
 
 
 def _ist_today() -> date:
-    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
@@ -172,8 +171,7 @@ class WarehouseService:
 
         import aiohttp
 
-        from pdp.instruments.snapshots import create_snapshot, snapshot_path
-        from pdp.instruments.snapshots import parse_underlyings
+        from pdp.instruments.snapshots import create_snapshot, parse_underlyings, snapshot_path
 
         masters_dir = Path(self._settings.MASTERS_DIR)
         path = snapshot_path(snapshot_date, masters_dir)

@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from pymongo import MongoClient
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.market.bars import BarClosed
-from pdp.strategy.abc import FillEvent, Strategy
+from pdp.strategy.abc import Strategy
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker

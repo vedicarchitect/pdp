@@ -166,7 +166,7 @@ def fill_day(dhan: Any, col: Any, cal: NiftyExpiryCalendar, ds: str,
                         required_data=["open", "high", "low", "close", "volume", "oi", "iv"],
                         from_date=ds, to_date=ds, interval=1)
                     time.sleep(API_PAUSE)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning("gap_fill_api_error", day=ds, code=code, label=label,
                                 ot=ot, exc=str(exc))
                     continue

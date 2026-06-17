@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.alerts.enums import AlertCondition, AlertStatus
 from pdp.alerts.models import AlertRecord
-from pdp.alerts import service
 
 log = structlog.get_logger()
 
 
 class AlertNotification:
-    __slots__ = ("alert_id", "security_id", "condition", "threshold", "timestamp", "status")
+    __slots__ = ("alert_id", "condition", "security_id", "status", "threshold", "timestamp")
 
     def __init__(
         self,

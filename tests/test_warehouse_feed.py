@@ -11,17 +11,13 @@ Proves that:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
-
 from pdp.market.bars import BarClosed
 from pdp.options.warehouse import KEY_FIELDS
-from pdp.warehouse.writer import ContractMeta, NIFTY_INDEX_SID, OptionBarWriter
-
+from pdp.warehouse.writer import NIFTY_INDEX_SID, ContractMeta, OptionBarWriter
 
 # ── Stub collection ──────────────────────────────────────────────────────────
 

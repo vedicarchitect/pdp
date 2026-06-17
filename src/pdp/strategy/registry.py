@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any  # noqa: F401 (Any used in WatchlistEntry.indicators)
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, field_validator

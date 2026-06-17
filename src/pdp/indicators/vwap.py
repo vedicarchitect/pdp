@@ -18,7 +18,7 @@ class VWAPTracker:
     (all bars 03:45-10:00 UTC fall on the same UTC calendar date as IST session date).
     """
 
-    __slots__ = ("_sum_pv", "_sum_v", "_session_date", "_state")
+    __slots__ = ("_session_date", "_state", "_sum_pv", "_sum_v")
 
     def __init__(self) -> None:
         self._sum_pv: float = 0.0

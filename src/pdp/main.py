@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pdp.db.session import dispose_engine, get_engine, get_session_maker  # noqa: F401 (re-used in lifespan)
+from pdp.db.session import dispose_engine, get_engine, get_session_maker
 from pdp.logging import RequestIdMiddleware, configure_logging
 from pdp.mongo.client import connect as mongo_connect
 from pdp.mongo.client import disconnect as mongo_disconnect

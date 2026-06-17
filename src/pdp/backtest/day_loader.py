@@ -8,7 +8,7 @@ sub-minute single-run budget of ``backtest_multiday.py`` while amortising I/O ac
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from pdp.backtest.chain_loader import load_expiry_chain
@@ -59,12 +59,12 @@ def load_window(mdb: Any, cal: Any, days: list[date]) -> WindowData:
     # ── Spot: one query for the whole range, bucketed by IST trade-date. ──
     spot_by_day: dict[date, list[dict]] = {}
     if days:
-        lo = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=timezone.utc)
-        hi = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=timezone.utc)
+        lo = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=UTC)
+        hi = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=UTC)
         for b in mdb["market_bars"].find(
             {"metadata.security_id": NIFTY_SID, "metadata.timeframe": "1m",
              "ts": {"$gte": lo, "$lte": hi}}).sort("ts", 1):
-            ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+            ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
             spot_by_day.setdefault((ts + _IST).date(), []).append(b)
 
     # ── Expiry per day, then one chain query per expiry (1-minute bars). ──
@@ -101,13 +101,13 @@ def _resample_spot_ist(raw1: list[dict], tf: int) -> list[dict]:
     """
     tuples = []
     for d in raw1:
-        ts = d["ts"] if d["ts"].tzinfo else d["ts"].replace(tzinfo=timezone.utc)
+        ts = d["ts"] if d["ts"].tzinfo else d["ts"].replace(tzinfo=UTC)
         ist = (ts + _IST).replace(tzinfo=None)
         tuples.append((ist, float(d["open"]), float(d["high"]), float(d["low"]), float(d["close"])))
     tuples.sort(key=lambda b: b[0])
     out = []
     for (ist_dt, o, h, lo, c) in resample_ohlcv(tuples, tf):
-        out.append({"ts": (ist_dt - _IST).replace(tzinfo=timezone.utc),
+        out.append({"ts": (ist_dt - _IST).replace(tzinfo=UTC),
                     "open": o, "high": h, "low": lo, "close": c})
     return out
 

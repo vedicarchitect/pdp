@@ -41,7 +41,7 @@ class _FakeAggCol:
     def __init__(self, per_day: dict[date, int]) -> None:
         self._per_day = per_day
 
-    def aggregate(self, pipeline):  # noqa: ARG002 - signature parity only
+    def aggregate(self, pipeline):
         return [{"_id": datetime(d.year, d.month, d.day), "contracts": n}
                 for d, n in self._per_day.items()]
 
@@ -62,7 +62,7 @@ def test_backfill_gaps_only_targets_missing_days(monkeypatch):
 
     filled: list[str] = []
 
-    def _fake_fill_day(dhan, c, cal, ds, codes, label_offsets):  # noqa: ARG001
+    def _fake_fill_day(dhan, c, cal, ds, codes, label_offsets):
         filled.append(ds)
         return 5  # pretend 5 bars inserted per day
 

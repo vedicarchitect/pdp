@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -49,7 +49,7 @@ def _doc(source: str, *, strike: float = 19150, close: float = 100.0):
         strike=strike,
         option_type="CE",
         timeframe="1m",
-        ts=datetime(2026, 6, 1, 9, 15, tzinfo=timezone.utc),
+        ts=datetime(2026, 6, 1, 9, 15, tzinfo=UTC),
         open=close, high=close, low=close, close=close,
         volume=1, oi=2, iv=10.0,
         expiry_flag="WEEK",

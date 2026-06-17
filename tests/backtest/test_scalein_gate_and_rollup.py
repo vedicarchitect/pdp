@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-
 # ── Helpers mirroring backtest_multiday (pure functions) ─────────────────────
 
 def _price_at(bars, target, prefer="open"):

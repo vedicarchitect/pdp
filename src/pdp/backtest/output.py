@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,7 +11,6 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pdp.backtest.engine import BacktestEngine
-    from pdp.backtest.models import BacktestDaily, BacktestRun, BacktestTrade
 
 log = structlog.get_logger()
 

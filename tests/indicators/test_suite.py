@@ -4,7 +4,7 @@ backtest parity, and a latency micro-benchmark.
 from __future__ import annotations
 
 import time
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -16,11 +16,9 @@ from pdp.indicators.pivots import PivotTracker, _compute_pivots
 from pdp.indicators.psar import ParabolicSARTracker
 from pdp.indicators.registry import available_families, build_tracker
 from pdp.indicators.rsi import RSITracker
-from pdp.indicators.snapshot import Snapshot
 from pdp.indicators.volume_profile import VolumeProfileTracker
 from pdp.indicators.vwap import VWAPTracker
 from pdp.indicators.vwma import VWMATracker
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +34,7 @@ def _make_bar_closed(close, high=None, low=None, volume=1000, bar_time=None,
                       security_id="13", timeframe="15m"):
     """Return a BarClosed-like object with the given values."""
     from decimal import Decimal
+
     from pdp.market.bars import BarClosed
     h = high if high is not None else close + 5
     lo = low if low is not None else close - 5
@@ -529,6 +528,7 @@ class TestBacktestParity:
 class TestLatencyBenchmark:
     def test_200_bundles_sub_millisecond_mean(self):
         from decimal import Decimal
+
         from pdp.market.bars import BarClosed
 
         num_instruments = 200

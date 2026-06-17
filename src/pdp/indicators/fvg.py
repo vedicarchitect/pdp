@@ -31,7 +31,7 @@ class FVGTracker:
     penetrates the gap's top (bar[n-2].low).
     """
 
-    __slots__ = ("_max_gaps", "_bars", "_gaps")
+    __slots__ = ("_bars", "_gaps", "_max_gaps")
 
     def __init__(self, max_gaps: int = 50) -> None:
         self._max_gaps = max_gaps

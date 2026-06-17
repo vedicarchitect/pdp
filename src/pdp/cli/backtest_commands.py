@@ -9,7 +9,6 @@ from pymongo import MongoClient
 from sqlalchemy import select
 
 from pdp.backtest.engine import BacktestEngine
-from pdp.backtest.indicators import IndicatorCache
 from pdp.backtest.output import BacktestOutputWriter
 from pdp.db.session import get_session_maker
 from pdp.settings import get_settings
@@ -94,8 +93,8 @@ async def _run_backtest_async(engine: BacktestEngine, session_maker) -> None:
     """Run backtest asynchronously."""
     try:
         from pdp.indicators.engine import IndicatorEngine
-        from pdp.strategy.context import IndicatorReader, StrategyContext, StrategyOrderClient
         from pdp.orders.router import OrderRouter
+        from pdp.strategy.context import IndicatorReader, StrategyContext, StrategyOrderClient
 
         # Create indicator engine and attach it so bars update it before strategy dispatch.
         indicator_engine = IndicatorEngine(st_period=3, st_multiplier=1, timeframes=["5m"])
@@ -136,7 +135,7 @@ async def _run_backtest_async(engine: BacktestEngine, session_maker) -> None:
                 else 0
             )
 
-            click.echo(f"\nBacktest Complete!")
+            click.echo("\nBacktest Complete!")
             click.echo(f"Strategy: {engine.strategy_id}")
             click.echo(f"Period: {engine.from_date.date()} to {engine.to_date.date()}")
             click.echo(f"Initial Equity: ${float(engine.initial_equity):,.2f}")
@@ -159,10 +158,7 @@ async def _run_backtest_async(engine: BacktestEngine, session_maker) -> None:
 @click.option("--limit", default=10, type=int, help="Number of results (default: 10)")
 def list_backtests(strategy_id: str | None, limit: int) -> None:
     """List recent backtests."""
-    from decimal import Decimal
 
-    from pdp.backtest.models import BacktestRun
-    from sqlalchemy import desc
 
     try:
         session_maker = get_session_maker()
@@ -178,8 +174,9 @@ def list_backtests(strategy_id: str | None, limit: int) -> None:
 
 async def _list_backtests_async(session_maker, strategy_id: str | None, limit: int) -> None:
     """List backtests asynchronously."""
-    from pdp.backtest.models import BacktestRun
     from sqlalchemy import desc
+
+    from pdp.backtest.models import BacktestRun
 
     async with session_maker() as session:
         stmt = select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(limit)

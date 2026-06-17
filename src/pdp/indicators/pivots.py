@@ -82,7 +82,7 @@ class PivotTracker:
     trading day and used to compute levels at the start of the next session.
     """
 
-    __slots__ = ("_session_h", "_session_l", "_session_c", "_current_date", "_state")
+    __slots__ = ("_current_date", "_session_c", "_session_h", "_session_l", "_state")
 
     def __init__(self) -> None:
         self._session_h: float | None = None

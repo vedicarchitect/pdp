@@ -12,7 +12,7 @@ import) so the gate can be unit-tested in isolation.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 EXPECTED_SESSION_BARS = 375   # 09:15–15:30 inclusive at 1m
@@ -41,7 +41,7 @@ def spot_completeness(
 
     times: list[datetime] = []
     for b in raw1:
-        ts: datetime = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
+        ts: datetime = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         times.append(ts)
     times.sort()
     max_gap = 0.0

@@ -22,17 +22,17 @@ class ParabolicSARTracker:
     """
 
     __slots__ = (
-        "_step",
-        "_max_step",
         "_af",
-        "_ep",
-        "_sar",
+        "_bars",
         "_direction",
-        "_prev_high",
-        "_prev_low",
+        "_ep",
+        "_max_step",
         "_pp_high",
         "_pp_low",
-        "_bars",
+        "_prev_high",
+        "_prev_low",
+        "_sar",
+        "_step",
     )
 
     def __init__(self, step: float = 0.02, max_step: float = 0.2) -> None:

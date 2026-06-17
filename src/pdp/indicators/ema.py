@@ -17,7 +17,7 @@ class EMATracker:
     ``ema = a*close + (1-a)*ema`` with ``a = 2/(period+1)`` incrementally.
     """
 
-    __slots__ = ("_periods", "_alpha", "_values", "_history", "_seeded")
+    __slots__ = ("_alpha", "_history", "_periods", "_seeded", "_values")
 
     def __init__(self, periods: list[int] | None = None) -> None:
         self._periods: list[int] = sorted(periods or [9, 20, 50, 100, 200])

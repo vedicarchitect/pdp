@@ -23,7 +23,7 @@ class VolumeProfileTracker:
     (default 70 %).
     """
 
-    __slots__ = ("_bucket_size", "_va_pct", "_buckets", "_total_vol", "_session_date", "_state")
+    __slots__ = ("_bucket_size", "_buckets", "_session_date", "_state", "_total_vol", "_va_pct")
 
     def __init__(self, bucket_size: float = 50.0, value_area_pct: float = 0.70) -> None:
         self._bucket_size = bucket_size

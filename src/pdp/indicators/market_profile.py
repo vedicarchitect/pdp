@@ -20,7 +20,7 @@ class MarketProfileTracker:
     The Profile Of Control (POC) is the bucket with the most TPOs.
     """
 
-    __slots__ = ("_bucket_size", "_tpo_counts", "_session_date", "_state")
+    __slots__ = ("_bucket_size", "_session_date", "_state", "_tpo_counts")
 
     def __init__(self, bucket_size: float = 50.0) -> None:
         self._bucket_size = bucket_size

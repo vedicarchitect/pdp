@@ -32,7 +32,7 @@ def client(mock_mongo_lifespan):
 
 def _patch_positions(client: TestClient, positions=None) -> None:
     """Patch the DB so get_positions returns given list of Position-like objects."""
-    from unittest.mock import AsyncMock, MagicMock, patch
+    from unittest.mock import AsyncMock, MagicMock
 
     pos_list = positions or []
 

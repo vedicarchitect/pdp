@@ -1,8 +1,9 @@
 from decimal import Decimal
+
 import pytest
 
-from pdp.settings import BacktestCommissionSettings
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
+from pdp.settings import BacktestCommissionSettings
 
 
 @pytest.fixture

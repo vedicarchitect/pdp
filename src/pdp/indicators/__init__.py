@@ -12,10 +12,10 @@ from pdp.indicators.supertrend import (
 
 __all__ = [
     "DOWN",
+    "UP",
     "IndicatorEngine",
     "Snapshot",
     "SuperTrendState",
     "SuperTrendTracker",
-    "UP",
     "supertrend",
 ]

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -167,7 +167,7 @@ def test_config_label():
 def _utc(td: date, hh: int, mm: int) -> datetime:
     """IST wall-clock -> UTC tz-aware ts (engine converts back to IST internally)."""
     ist = datetime(td.year, td.month, td.day, hh, mm)
-    return (ist - _IST).replace(tzinfo=timezone.utc)
+    return (ist - _IST).replace(tzinfo=UTC)
 
 
 def _spot_bar(td, hh, mm, o, h, lo, c):
@@ -323,7 +323,7 @@ def test_partial_close_preserves_avg_entry_books_real_loss():
 def _load_aggregate():
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))), "backtest"))
-    import run as _backtest_run  # noqa: E402
+    import run as _backtest_run
     return _backtest_run.aggregate
 
 

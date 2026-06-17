@@ -19,7 +19,7 @@ class VWMATracker:
     ratio summed over the window.
     """
 
-    __slots__ = ("_period", "_buffer")
+    __slots__ = ("_buffer", "_period")
 
     def __init__(self, period: int = 20) -> None:
         if period < 1:

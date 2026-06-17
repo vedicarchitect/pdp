@@ -67,6 +67,9 @@ class WSHub:
     def publish_tick(self, tick: Tick) -> None:
         if not self._clients:
             return
+        targets = [c for c in self._clients if tick.security_id in c.security_ids]
+        if not targets:
+            return
         payload = json.dumps(
             {
                 "type": "tick",
@@ -77,12 +80,17 @@ class WSHub:
                 "ts": time.time(),
             }
         )
-        for client in self._clients:
-            if tick.security_id in client.security_ids:
-                client.push(payload)
+        for client in targets:
+            client.push(payload)
 
     def publish_bar(self, bar: BarClosed) -> None:
         if not self._clients:
+            return
+        targets = [
+            c for c in self._clients
+            if bar.security_id in c.security_ids and bar.timeframe in c.timeframes
+        ]
+        if not targets:
             return
         payload = json.dumps(
             {
@@ -99,9 +107,8 @@ class WSHub:
                 "ts": time.time(),
             }
         )
-        for client in self._clients:
-            if bar.security_id in client.security_ids and bar.timeframe in client.timeframes:
-                client.push(payload)
+        for client in targets:
+            client.push(payload)
 
     async def _pump(self, client: _Client) -> None:
         """Drain a client's queue to the WebSocket."""
