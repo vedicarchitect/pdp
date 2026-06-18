@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     DATABASE_SYNC_URL: str = Field(...)
     REDIS_URL: str = Field(...)
 
+    # Security: allowed origins for CORS. Expects JSON string array.
+    CORS_ORIGINS: str = '["http://localhost:5173", "http://localhost:8000"]'
+
     DHAN_CLIENT_ID: str = ""
     DHAN_ACCESS_TOKEN: str = ""
     DHAN_SCRIPMASTER_URL: str = (

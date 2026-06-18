@@ -374,8 +374,26 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    import json
+    from fastapi.middleware.cors import CORSMiddleware
+    from pdp.settings import get_settings
+
     app = FastAPI(title="PDP", version="0.1.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
+
+    settings = get_settings()
+    try:
+        origins = json.loads(settings.CORS_ORIGINS)
+    except Exception:
+        origins = []
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=(origins != ["*"]),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     from pdp.alerts.routes import router as alerts_router
     from pdp.alerts.ws import alerts_ws_router
