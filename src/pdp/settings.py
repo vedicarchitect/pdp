@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     GIT_SHA: str = "local"
 
+    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
     LIVE: bool = False
     BROKER: Literal["paper", "dhan"] = "paper"
 

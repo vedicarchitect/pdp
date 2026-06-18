@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import redis.asyncio as redis_asyncio
 import structlog
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from pdp.db.session import dispose_engine, get_engine, get_session_maker
@@ -375,6 +376,17 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="PDP", version="0.1.0", lifespan=lifespan)
+
+    # Configure CORS
+    settings = get_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.add_middleware(RequestIdMiddleware)
 
     from pdp.alerts.routes import router as alerts_router
