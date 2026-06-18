@@ -17,9 +17,9 @@ export function RiskBanner({ summary, settings }: Props) {
 
   if (pct >= 1.5) {
     return (
-      <div className="w-full bg-red-900 border border-red-600 rounded px-4 py-2 text-red-200 text-sm font-medium flex items-center gap-2">
-        <span className="text-red-400">⚠</span>
-        CRITICAL: Daily loss cap exceeded by 150% — hard cap triggered. All positions being flattened.
+      <div className="w-full bg-bearish/15 border border-bearish/50 rounded-lg px-4 py-2 text-bearish text-sm font-medium flex items-center gap-2">
+        <span>⚠</span>
+        CRITICAL: Daily loss at {(pct * 100).toFixed(0)}% of daily cap — hard cap triggered. All positions being flattened.
         <span className="ml-auto font-mono">₹{loss.toFixed(0)} / ₹{cap.toFixed(0)}</span>
       </div>
     )
@@ -27,7 +27,7 @@ export function RiskBanner({ summary, settings }: Props) {
 
   if (pct >= 1.0) {
     return (
-      <div className="w-full bg-red-800 border border-red-500 rounded px-4 py-2 text-white text-sm font-medium flex items-center gap-2">
+      <div className="w-full bg-bearish/10 border border-bearish/40 rounded-lg px-4 py-2 text-bearish text-sm font-medium flex items-center gap-2">
         <span>🔴</span>
         Loss cap breached — automatic kill-switch may trigger.
         <span className="ml-auto font-mono">₹{loss.toFixed(0)} / ₹{cap.toFixed(0)}</span>
@@ -36,7 +36,7 @@ export function RiskBanner({ summary, settings }: Props) {
   }
 
   return (
-    <div className="w-full bg-yellow-900 border border-yellow-600 rounded px-4 py-2 text-yellow-200 text-sm font-medium flex items-center gap-2">
+    <div className="w-full bg-warning/10 border border-warning/40 rounded-lg px-4 py-2 text-warning text-sm font-medium flex items-center gap-2">
       <span>⚠</span>
       Approaching loss cap: {(pct * 100).toFixed(0)}% of daily limit used.
       <span className="ml-auto font-mono">₹{loss.toFixed(0)} / ₹{cap.toFixed(0)}</span>

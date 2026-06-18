@@ -8,9 +8,9 @@ interface Props {
 
 function statusDot(status: FeedStatus): string {
   switch (status) {
-    case 'connected': return 'bg-green-500'
-    case 'connecting': return 'bg-yellow-500 animate-pulse'
-    case 'disconnected': return 'bg-red-500'
+    case 'connected': return 'bg-bullish'
+    case 'connecting': return 'bg-warning animate-pulse'
+    case 'disconnected': return 'bg-bearish'
   }
 }
 
@@ -30,15 +30,15 @@ export function ConnectionBadge({ marketStatus, ordersStatus, portfolioStatus }:
 
   if (allConnected) {
     return (
-      <div className="flex items-center gap-1.5 text-xs text-green-400">
-        <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+      <div className="flex items-center gap-1.5 text-xs text-bullish">
+        <span className="w-2 h-2 rounded-full bg-bullish inline-block" />
         Live
       </div>
     )
   }
 
   return (
-    <div className="flex items-center gap-3 text-xs">
+    <div className="flex flex-wrap items-center gap-3 text-xs">
       {[
         { label: 'Market', status: marketStatus },
         { label: 'Orders', status: ordersStatus },
@@ -46,13 +46,13 @@ export function ConnectionBadge({ marketStatus, ordersStatus, portfolioStatus }:
       ].map(({ label: name, status }) => (
         <div key={name} className="flex items-center gap-1">
           <span className={`w-2 h-2 rounded-full inline-block ${statusDot(status)}`} />
-          <span className={status === 'disconnected' ? 'text-red-400 font-medium' : 'text-gray-400'}>
+          <span className={status === 'disconnected' ? 'text-bearish font-medium' : 'text-text-muted'}>
             {name}: {label(status)}
           </span>
         </div>
       ))}
       {(marketStatus === 'disconnected' || ordersStatus === 'disconnected' || portfolioStatus === 'disconnected') && (
-        <span className="px-2 py-0.5 bg-red-900 border border-red-700 rounded text-red-300 font-medium">
+        <span className="px-2 py-0.5 bg-bearish/10 border border-bearish/40 rounded text-bearish font-medium">
           Disconnected
         </span>
       )}

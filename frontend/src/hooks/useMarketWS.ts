@@ -21,8 +21,9 @@ export function useMarketWS(securityIds: string[]): Tick | null {
     if (WS_DISABLED || securityIds.length === 0) return
 
     function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const params = securityIds.map((id) => `security_id=${encodeURIComponent(id)}`).join('&')
-      const ws = new WebSocket(`/ws/market?${params}`)
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/market?${params}`)
       wsRef.current = ws
 
       ws.onmessage = (e) => {

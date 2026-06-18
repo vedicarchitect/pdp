@@ -25,10 +25,35 @@ tasks:
     cmds:
       - uv run python backtest/run.py {{.CLI_ARGS}}
 
+  expiry:
+    desc: "Read-only expiry analysis for NIFTY+BANKNIFTY+SENSEX nearest expiries. Args: -- [--symbol ALL] [--expiry YYYY-MM-DD]"
+    cmds:
+      - uv run python scripts/expiry_analysis.py {{.CLI_ARGS}}
+
+  oi:track:
+    desc: "OI snapshot tracker (ATM+/-5 vs morning baseline -> JSONL + Mongo TS + Redis hot/pubsub). One pass; add -- --interval 300 to loop every 5m"
+    cmds:
+      - uv run python scripts/expiry_analysis.py --track {{.CLI_ARGS}}
+
   test:
     desc: Run pytest
     cmds:
       - uv run pytest
+
+  e2e:
+    desc: Run Playwright e2e suite (requires dev server on :5173)
+    cmds:
+      - cd frontend && npx playwright test
+
+  e2e:cypress:
+    desc: Run Cypress e2e suite (requires dev server on :5173). Set APPLITOOLS_API_KEY for visual regression.
+    cmds:
+      - cd frontend && npm run cypress:run
+
+  e2e:cypress:open:
+    desc: Open Cypress interactive runner
+    cmds:
+      - cd frontend && npm run cypress:open
 
   lint:
     desc: Lint with ruff
@@ -128,6 +153,13 @@ tasks:
     desc: "Comprehensive experiment sweep (all sections A-H). Writes per-trade detail + ranked summary to logs/sweep_*.log. Args: -- [--days N] [--section A,B] [--no-detail] [--no-heal]"
     cmds:
       - uv run python backtest/sweep_all.py {{.CLI_ARGS}}
+
+  # ── ML ───────────────────────────────────────────────────────────────────────
+
+  ml:train:
+    desc: "Train the candlestick-ml-signals model. Args: -- [--security-id ID] [--timeframe TF] [--days N] [--version VER] [--head HEAD]"
+    cmds:
+      - uv run python scripts/ml_train.py {{.CLI_ARGS}}
 
   # ── OpenSpec ─────────────────────────────────────────────────────────────────
 

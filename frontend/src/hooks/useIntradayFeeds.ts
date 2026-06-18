@@ -34,7 +34,8 @@ function useOrdersWS(): OrdersState {
 
     function connect() {
       setState((s) => ({ ...s, status: 'connecting' }))
-      const ws = new WebSocket('/ws/orders')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/orders`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -83,7 +84,8 @@ function useMarketFeedStatus(): MarketState {
 
     function connect() {
       setState((s) => ({ ...s, status: 'connecting' }))
-      const ws = new WebSocket('/ws/market')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/market`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -126,10 +128,10 @@ export function useIntradayFeeds(): IntradayFeedState {
     if (WS_DISABLED) return
     const interval = setInterval(() => {
       const now = Date.now()
-      if (portfolio.status === 'connected' && orders.lastUpdate && now - orders.lastUpdate > STALE_WARN_MS) {
+      if (orders.status === 'connected' && orders.lastUpdate && now - orders.lastUpdate > STALE_WARN_MS) {
         console.warn('[intraday] orders feed silent for >5s')
       }
-      if (portfolio.status === 'connected' && market.lastUpdate && now - market.lastUpdate > STALE_WARN_MS) {
+      if (market.status === 'connected' && market.lastUpdate && now - market.lastUpdate > STALE_WARN_MS) {
         console.warn('[intraday] market feed silent for >5s')
       }
     }, STALE_WARN_MS)

@@ -21,7 +21,8 @@ export function useOrderStream(): OrderUpdate | null {
     if (WS_DISABLED) return
 
     function connect() {
-      const ws = new WebSocket('/ws/orders')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/orders`)
       wsRef.current = ws
 
       ws.onmessage = (e) => {

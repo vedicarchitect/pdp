@@ -84,3 +84,19 @@ If `PORTFOLIO_EOD_SNAPSHOT=true` (default), the system SHALL write one document 
 
 - **WHEN** `PORTFOLIO_EOD_SNAPSHOT=false`
 - **THEN** no document is written to `portfolio_snapshots` at market close
+
+## Requirement: Portfolio route displays holdings and positions
+
+The `/portfolio` route SHALL fetch data from `GET /api/v1/portfolio/positions` and `GET /api/v1/portfolio/summary` and display them in `DataTable` sections within `Card` containers. A summary section at the top SHALL show Day P&L, Unrealized P&L, Realized P&L, and Open Positions count from the summary endpoint. If the endpoint is unavailable, an error card with a retry button SHALL be displayed.
+
+#### Scenario: Portfolio page loads with positions data
+- **WHEN** a user navigates to `/portfolio` and the API returns 3 open positions
+- **THEN** an "Open Positions" card with a DataTable of 3 rows is displayed, showing columns: Security, Segment, Product, Qty, Avg Price, Realized P&L, Unrealized P&L
+
+#### Scenario: Portfolio page handles empty state
+- **WHEN** a user navigates to `/portfolio` and the API returns zero positions
+- **THEN** the DataTable shows "No open positions" empty message
+
+#### Scenario: Portfolio page handles API error gracefully
+- **WHEN** the portfolio API returns an error
+- **THEN** an error card is displayed with a retry button

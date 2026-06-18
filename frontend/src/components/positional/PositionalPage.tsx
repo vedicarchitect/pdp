@@ -6,11 +6,12 @@ import { useEodHistory } from '../../hooks/useEodHistory'
 import { StrategyGroupRow } from './StrategyGroupRow'
 import { ExpiryAlertPanel } from './ExpiryAlertPanel'
 import { PnLSparkline } from './PnLSparkline'
+import { Card } from '@/components/ui/Card'
 import type { FeedStatus, PositionalLeg, StrategyGroup } from '../../types/positional'
 
 function StatusDot({ status }: { status: FeedStatus }) {
   const color =
-    status === 'connected' ? 'bg-green-500' : status === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
+    status === 'connected' ? 'bg-bullish' : status === 'connecting' ? 'bg-warning animate-pulse' : 'bg-bearish'
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} />
 }
 
@@ -67,7 +68,7 @@ export function PositionalPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Positional Monitor</h1>
-        <div className="flex items-center gap-2 text-xs text-gray-400">
+        <div className="flex items-center gap-2 text-xs text-text-muted">
           <StatusDot status={connectionState} />
           <span>{connectionState}</span>
         </div>
@@ -84,28 +85,28 @@ export function PositionalPage() {
             { label: 'Unrealized', value: totalUnrealized },
             { label: 'Realized', value: totalRealized },
           ].map(({ label, value }) => (
-            <div key={label} className="glass-panel rounded-xl px-5 py-4 transition-transform duration-300 hover:-translate-y-1 hover:shadow-lg">
+            <Card key={label} className="px-5 py-4 transition-transform duration-300 hover:-translate-y-1 hover:shadow-lg">
               <div className="text-xs font-medium text-text-muted mb-1.5 uppercase tracking-wider">{label}</div>
               <div className={`text-2xl font-mono font-bold ${value > 0 ? 'text-bullish' : value < 0 ? 'text-bearish' : 'text-text-muted'}`}>
                 ₹{value.toFixed(2)}
               </div>
-            </div>
+            </Card>
           ))}
         </div>
       )}
 
       {/* Strategy table */}
       {connectionState === 'connecting' && !hasPositions ? (
-        <div className="text-gray-500 text-sm">Connecting to portfolio feed…</div>
+        <div className="text-text-muted text-sm">Connecting to portfolio feed…</div>
       ) : !hasPositions ? (
-        <div className="flex flex-col items-center gap-2 py-12 text-gray-500 text-sm">
+        <div className="flex flex-col items-center gap-2 py-12 text-text-muted text-sm">
           <span>No open positions</span>
-          <Link to="/instruments" className="text-blue-400 hover:text-blue-300 underline text-xs">
+          <Link to="/instruments" className="text-primary hover:text-primary/80 underline text-xs transition-colors">
             Browse instruments
           </Link>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-surface-border glass-panel">
+        <Card className="overflow-x-auto rounded-xl">
           <table className="w-full text-sm">
             <thead className="bg-surface text-xs text-text-muted uppercase tracking-wider font-semibold border-b border-surface-border">
               <tr>
@@ -125,16 +126,16 @@ export function PositionalPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </Card>
       )}
 
       {/* EOD P&L history chart */}
       <div className="mt-4">
         <div className="text-xs font-medium text-text-muted mb-2 uppercase tracking-wide">Daily P&L History</div>
         {histLoading ? (
-          <div className="h-40 glass-panel bg-surface/50 rounded-xl flex items-center justify-center text-text-muted text-sm font-medium">
+          <Card className="h-40 rounded-xl flex items-center justify-center text-text-muted text-sm font-medium">
             Loading…
-          </div>
+          </Card>
         ) : (
           <PnLSparkline history={history} />
         )}

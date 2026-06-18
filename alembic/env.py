@@ -9,9 +9,11 @@ from pdp.db.base import Base
 from pdp.settings import get_settings
 
 # Import all models so Base.metadata is populated for autogenerate.
+from pdp.events import models_db as _events_models  # noqa: F401
 from pdp.instruments import models as _instrument_models  # noqa: F401
 from pdp.market import subscription_model as _subscription_model  # noqa: F401
 from pdp.orders import models as _orders_models  # noqa: F401
+from pdp.jobs import models as _jobs_models  # noqa: F401
 
 config = context.config
 if config.config_file_name:

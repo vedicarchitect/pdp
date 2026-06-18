@@ -7,9 +7,9 @@ interface ExpiryAlert {
 }
 
 function severity(dte: number): { label: string; classes: string } {
-  if (dte <= 1) return { label: 'CRITICAL', classes: 'bg-red-950 border-red-700 text-red-200' }
-  if (dte <= 3) return { label: 'URGENT', classes: 'bg-orange-950 border-orange-700 text-orange-200' }
-  return { label: 'WARNING', classes: 'bg-yellow-950 border-yellow-700 text-yellow-200' }
+  if (dte <= 1) return { label: 'CRITICAL', classes: 'bg-bearish/10 border-bearish/50 text-bearish' }
+  if (dte <= 3) return { label: 'URGENT', classes: 'bg-warning/15 border-warning/50 text-warning' }
+  return { label: 'WARNING', classes: 'bg-warning/10 border-warning/30 text-warning/80' }
 }
 
 function alertMessage(leg: PositionalLeg, dte: number): string {
@@ -39,7 +39,7 @@ export function ExpiryAlertPanel({ legs }: Props) {
         return (
           <div
             key={`${leg.security_id}-expiry`}
-            className={`flex items-center gap-2 px-3 py-2 rounded border text-xs font-medium ${classes}`}
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium ${classes}`}
           >
             <span className="font-bold">[{label}]</span>
             <span>{alertMessage(leg, dte)}</span>

@@ -39,6 +39,28 @@ contain profit-lock or ST-touch settings.
 - **WHEN** a config specifies a `timeframe_min` outside the supported set (3, 5, 15, 30, 60)
 - **THEN** construction raises a validation error
 
+### Requirement: YAML serialization for StrategyConfig
+`StrategyConfig` SHALL gain two methods: `from_yaml(path: str | Path) -> StrategyConfig` (class
+method, loads YAML and calls `from_dict`) and `to_yaml(path: str | Path) -> None` (instance method,
+serializes via `to_dict()` and writes YAML). The YAML schema SHALL be the flat dict produced by
+`to_dict()` — no nested sections. `PyYAML` SHALL be used (already a transitive dependency).
+
+#### Scenario: from_yaml loads a valid config file
+- **WHEN** a YAML file with valid StrategyConfig fields exists at the given path
+- **THEN** `StrategyConfig.from_yaml(path)` returns a config equal to `StrategyConfig.from_dict(yaml.safe_load(file))`
+
+#### Scenario: to_yaml writes a reloadable file
+- **WHEN** `cfg.to_yaml("out.yaml")` is called
+- **THEN** the file is created and `StrategyConfig.from_yaml("out.yaml") == cfg`
+
+#### Scenario: from_yaml validates same as from_dict
+- **WHEN** a YAML file contains an invalid value (e.g. unsupported timeframe_min=7)
+- **THEN** `from_yaml` raises the same validation error as `from_dict`
+
+#### Scenario: from_yaml with missing file
+- **WHEN** the path does not exist
+- **THEN** raises `FileNotFoundError` with the path in the message (not a generic YAML error)
+
 ### Requirement: Per-instrument indicator selection
 The strategy configuration SHALL allow a watchlist entry to declare an optional `indicators`
 list naming which indicator-suite families to compute for that entry's `security_id` and
@@ -56,3 +78,16 @@ of families requested across all loaded strategies.
 - **WHEN** a watchlist entry omits the `indicators` list
 - **THEN** the engine computes no indicator-suite families for that entry
 
+### Requirement: Opt-in ML signal consumption
+The strategy configuration SHALL allow a watchlist entry to opt into the `candlestick-ml-signals`
+signal for its `security_id` and timeframes, including which trained model version to serve. When
+not opted in, no ML model SHALL be loaded or served for that entry, and the entry's existing
+indicator selection SHALL be unaffected.
+
+#### Scenario: Watchlist opts into the ML signal
+- **WHEN** a watchlist entry enables the ML signal with a model version for a timeframe
+- **THEN** that model version is loaded and `ml_signal(sid, tf)` returns its output for that entry
+
+#### Scenario: ML signal not requested
+- **WHEN** a watchlist entry does not enable the ML signal
+- **THEN** no ML model is loaded for that entry and `ml_signal(sid, tf)` returns `None`

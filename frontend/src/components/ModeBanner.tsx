@@ -1,19 +1,36 @@
 import { useTradeMode } from '../hooks/useTradeMode'
+import { Badge } from './ui/Badge'
+import { Tooltip } from './ui/Tooltip'
 
-export default function ModeBanner() {
+export default function ModeBanner({ collapsed = false }: { collapsed?: boolean }) {
   const mode = useTradeMode()
+
+  if (collapsed) {
+    if (mode === 'live') {
+      return (
+        <Tooltip content="Live Mode — Real money" placement="right">
+          <Badge variant="danger" size="sm" className="rounded-md px-1.5 py-1 font-bold">L</Badge>
+        </Tooltip>
+      )
+    }
+    return (
+      <Tooltip content="Paper Mode" placement="right">
+        <Badge variant="warning" size="sm" className="rounded-md px-1.5 py-1 text-black font-bold">P</Badge>
+      </Tooltip>
+    )
+  }
 
   if (mode === 'live') {
     return (
-      <div className="w-full bg-bearish text-white text-center text-xs py-1.5 font-bold tracking-widest uppercase shadow-md shadow-bearish/20 z-50 sticky top-0 border-b border-bearish/50">
-        Live Mode — Real money at risk
-      </div>
+      <Badge variant="danger" className="w-full flex justify-center py-1.5 rounded-md font-bold tracking-widest uppercase">
+        Live Mode
+      </Badge>
     )
   }
 
   return (
-    <div className="w-full bg-warning/90 backdrop-blur-sm text-background text-center text-xs py-1.5 font-bold tracking-widest uppercase shadow-md shadow-warning/20 z-50 sticky top-0 border-b border-warning/50">
-      Paper Mode — Trades are simulated
-    </div>
+    <Badge variant="warning" className="w-full flex justify-center py-1.5 rounded-md text-black font-bold tracking-widest uppercase">
+      Paper Mode
+    </Badge>
   )
 }

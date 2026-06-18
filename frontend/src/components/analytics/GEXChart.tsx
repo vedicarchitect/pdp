@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { Lock } from 'lucide-react'
+import { chartTheme } from '@/lib/chartTheme'
 
 interface Props {
   underlying: string
@@ -98,9 +99,9 @@ export function GEXChart({ underlying, expiry }: Props) {
             width={52}
           />
           <Tooltip
-            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
-            labelStyle={{ color: '#f1f5f9' }}
-            formatter={(v: number) => [(v / 1e9).toFixed(3) + 'B', 'GEX']}
+            contentStyle={{ background: chartTheme.tooltip.bg, border: `1px solid ${chartTheme.tooltip.border}`, borderRadius: 8 }}
+            labelStyle={{ color: chartTheme.axis.color }}
+            formatter={(v: any) => [(v / 1e9).toFixed(3) + 'B', 'Gamma']}
           />
           <ReferenceLine y={0} stroke="rgba(255,255,255,0.2)" />
           <Bar dataKey="gex" radius={[2, 2, 0, 0]}>

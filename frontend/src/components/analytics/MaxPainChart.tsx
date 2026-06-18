@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { Lock } from 'lucide-react'
+import { chartTheme } from '@/lib/chartTheme'
 
 interface Props {
   underlying: string
@@ -97,9 +98,9 @@ export function MaxPainChart({ underlying, expiry }: Props) {
             width={48}
           />
           <Tooltip
-            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
-            labelStyle={{ color: '#f1f5f9' }}
-            formatter={(v: number) => [(v / 1e6).toFixed(2) + 'M', 'Pain']}
+            contentStyle={{ background: chartTheme.tooltip.bg, border: `1px solid ${chartTheme.tooltip.border}`, borderRadius: 8 }}
+            labelStyle={{ color: chartTheme.tooltip.text }}
+            formatter={(v: any) => [(v / 1e6).toFixed(2) + 'M', 'Pain']}
           />
           <Bar dataKey="pain" fill="#6366f1" radius={[2, 2, 0, 0]} />
           {data.max_pain != null && (

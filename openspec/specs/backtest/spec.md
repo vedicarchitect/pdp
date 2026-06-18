@@ -4,19 +4,51 @@
 TBD - created by archiving change add-backtest-engine. Update Purpose after archive.
 ## Requirements
 ### Requirement: Backtest CLI invocation
-The system SHALL provide a CLI command to run historical backtests against a specified strategy.
+The system SHALL provide `backtest/run.py` as the canonical multi-day backtest runner, replacing
+both `backtest_multiday.py` (archived to `scripts/archive/`) and `scripts/backtest_sweep.py`
+(moved). The script SHALL accept: `--days N` (window size), `--start YYYY-MM-DD` (end date),
+`--config-file <path>` (load a named YAML config), `--config <json>` (inline JSON config),
+`--st`, `--tf`, `--moneyness` (grid axes), `--no-commission`, `--no-heal`. When neither
+`--config-file` nor `--config` is given and no grid flags are supplied, the script SHALL load
+the config from `settings.BACKTEST_DEFAULT_CONFIG` and run single-config detail mode for the
+last 7 days.
 
-#### Scenario: Valid backtest command
-- **WHEN** user runs `pdp backtest run <strategy_id> --from YYYY-MM-DD --to YYYY-MM-DD`
-- **THEN** system initiates backtest, replays historical data, and returns backtest_run_id
+#### Scenario: Single-config detail — default config
+- **WHEN** user runs `task backtest` with no arguments
+- **THEN** script loads `BACKTEST_DEFAULT_CONFIG`, runs last-7-day detail, prints per-trade
+  table + leg summary + day summary
 
-#### Scenario: Missing required parameters
-- **WHEN** user runs `pdp backtest run <strategy_id>` without `--from` and `--to`
-- **THEN** system returns error with required parameters message
+#### Scenario: Single-config detail — explicit config file
+- **WHEN** user runs `task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30`
+- **THEN** script loads that YAML, runs 30-day single-config detail
 
-#### Scenario: Invalid date range
-- **WHEN** user runs `pdp backtest run <strategy_id> --from 2026-06-10 --to 2026-06-08`
-- **THEN** system returns error indicating start date is after end date
+#### Scenario: Single-config detail — inline JSON
+- **WHEN** user runs `task backtest -- --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,"moneyness":1}'`
+- **THEN** script parses JSON, runs single-config detail with the specified params
+
+#### Scenario: Grid sweep
+- **WHEN** user runs `task backtest:sweep -- --days 90 --st "3,1;10,2" --tf "5,15" --moneyness "1,0,-1"`
+- **THEN** script runs the grid and prints a ranked comparison table
+
+#### Scenario: Legacy script archived
+- **WHEN** a developer looks for `backtest_multiday.py` at the repo root
+- **THEN** it is not present; `scripts/archive/backtest_multiday.py` exists with a header
+  comment noting it is superseded by `backtest/run.py`
+
+---
+
+### Requirement: Taskfile backtest tasks updated
+`task backtest` SHALL invoke `backtest/run.py` (default config, 7-day detail). `task backtest:sweep`
+SHALL invoke `backtest/run.py` with pass-through CLI args for grid mode. Both SHALL use
+`uv run python backtest/run.py`.
+
+#### Scenario: task backtest runs correctly
+- **WHEN** user runs `task backtest` from repo root
+- **THEN** `uv run python backtest/run.py` executes with default-config, 7-day detail
+
+#### Scenario: task backtest:sweep passes through args
+- **WHEN** user runs `task backtest:sweep -- --days 90 --st "10,2"`
+- **THEN** `uv run python backtest/run.py --days 90 --st "10,2"` executes
 
 ---
 
@@ -551,4 +583,22 @@ priced as one stable fixed-strike series across the days it is held.
 - **WHEN** a position is held across multiple days
 - **THEN** the same fixed `(expiry_date, strike, option_type)` contract is read for every day of the
   hold, without strike drift
+
+### Requirement: Backtest routes registered in main.py
+
+The existing `src/pdp/backtest/routes.py` router SHALL be registered in `src/pdp/main.py` so that read-only backtest result endpoints are accessible via the API. This includes any existing `GET` endpoints for listing and viewing past backtest results.
+
+#### Scenario: Backtest routes are accessible
+- **WHEN** the API starts
+- **THEN** `GET /api/v1/backtests` (if defined) is accessible and returns HTTP 200
+
+---
+
+### Requirement: Backtest run endpoint
+
+The backtest router SHALL include a `POST /api/v1/backtests/run` endpoint that accepts an options strategy configuration and executes the backtest. When the job runner (proposal #5) is available, this endpoint SHALL submit the backtest as an async job instead of running synchronously.
+
+#### Scenario: Synchronous execution before job runner
+- **WHEN** `POST /api/v1/backtests/run` is called and the job runner is not yet available
+- **THEN** the backtest runs synchronously and results are returned in the response body
 

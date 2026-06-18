@@ -31,7 +31,8 @@ export function usePnL(): PnLSummary | null {
     if (WS_DISABLED) return
 
     function connect() {
-      const ws = new WebSocket('/ws/portfolio')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/portfolio`)
       wsRef.current = ws
 
       ws.onmessage = (e) => {

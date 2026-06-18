@@ -14,6 +14,8 @@ Full stack/layout: [`openspec/project.md`](openspec/project.md)
 6. **structlog only** — no `print()` / `rich` in core modules.
 7. **Settings via `get_settings()`** — never `os.environ` directly.
 8. **DB split** — PostgreSQL = orders/trades/positions (ACID). MongoDB = bars/chains (time-series). Redis = hot cache/pub-sub.
+9. **Speed, quality, clean UI are core — no compromise.** Every data path must be fast (no N+1, no blocking on hot path). Every UI surface must be pixel-consistent and production-grade. Architecture decisions must optimise for these three properties first.
+10. **Frontend changes require Playwright verification.** After any frontend change, run `cd frontend && npx playwright test` before marking tasks done. Add e2e tests for new routes and components to `frontend/e2e/`.
 
 ## Key Commands
 
@@ -43,10 +45,12 @@ task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 | `src/pdp/backtest/` | BacktestEngine, sim, commissions → [`CLAUDE.md`](src/pdp/backtest/CLAUDE.md) |
 | `src/pdp/cli/` | Click CLI entry point → [`CLAUDE.md`](src/pdp/cli/CLAUDE.md) |
 | `src/pdp/db/` | SQLAlchemy base + async session → [`CLAUDE.md`](src/pdp/db/CLAUDE.md) |
+| `src/pdp/events/` | Live event publisher: position-aware realtime monitoring + WS/push → [`CLAUDE.md`](src/pdp/events/CLAUDE.md) |
 | `src/pdp/indicators/` | IndicatorEngine, SuperTrend, warmup → [`CLAUDE.md`](src/pdp/indicators/CLAUDE.md) |
 | `src/pdp/instruments/` | Dhan scrip master, expiry calendar → [`CLAUDE.md`](src/pdp/instruments/CLAUDE.md) |
 | `src/pdp/journal/` | Fill recording, daily stats → [`CLAUDE.md`](src/pdp/journal/CLAUDE.md) |
 | `src/pdp/market/` | Tick feed, bar agg, WS hub → [`CLAUDE.md`](src/pdp/market/CLAUDE.md) |
+| `src/pdp/ml/` | Offline LightGBM training + online inference (candlestick-ML signals) → [`CLAUDE.md`](src/pdp/ml/CLAUDE.md) |
 | `src/pdp/mongo/` | MongoDB client + collection init → [`CLAUDE.md`](src/pdp/mongo/CLAUDE.md) |
 | `src/pdp/options/` | Chain poller, Greeks, gap_backfill → [`CLAUDE.md`](src/pdp/options/CLAUDE.md) |
 | `src/pdp/orders/` | Paper + Dhan broker, order router → [`CLAUDE.md`](src/pdp/orders/CLAUDE.md) |

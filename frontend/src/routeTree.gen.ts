@@ -9,18 +9,23 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as TradingRouteImport } from './routes/trading'
 import { Route as StrategiesRouteImport } from './routes/strategies'
 import { Route as PositionalRouteImport } from './routes/positional'
 import { Route as PortfolioRouteImport } from './routes/portfolio'
+import { Route as OperationsRouteImport } from './routes/operations'
 import { Route as IntradayRouteImport } from './routes/intraday'
 import { Route as InstrumentsRouteImport } from './routes/instruments'
+import { Route as EventsRouteImport } from './routes/events'
+import { Route as BuilderRouteImport } from './routes/builder'
 import { Route as BacktestRouteImport } from './routes/backtest'
 import { Route as AnalyticsRouteImport } from './routes/analytics'
+import { Route as AlertsRouteImport } from './routes/alerts'
 import { Route as IndexRouteImport } from './routes/index'
 
-const AnalyticsRoute = AnalyticsRouteImport.update({
-  id: '/analytics',
-  path: '/analytics',
+const TradingRoute = TradingRouteImport.update({
+  id: '/trading',
+  path: '/trading',
   getParentRoute: () => rootRouteImport,
 } as any)
 const StrategiesRoute = StrategiesRouteImport.update({
@@ -38,6 +43,11 @@ const PortfolioRoute = PortfolioRouteImport.update({
   path: '/portfolio',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OperationsRoute = OperationsRouteImport.update({
+  id: '/operations',
+  path: '/operations',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IntradayRoute = IntradayRouteImport.update({
   id: '/intraday',
   path: '/intraday',
@@ -48,9 +58,29 @@ const InstrumentsRoute = InstrumentsRouteImport.update({
   path: '/instruments',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EventsRoute = EventsRouteImport.update({
+  id: '/events',
+  path: '/events',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BuilderRoute = BuilderRouteImport.update({
+  id: '/builder',
+  path: '/builder',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BacktestRoute = BacktestRouteImport.update({
   id: '/backtest',
   path: '/backtest',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AnalyticsRoute = AnalyticsRouteImport.update({
+  id: '/analytics',
+  path: '/analytics',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AlertsRoute = AlertsRouteImport.update({
+  id: '/alerts',
+  path: '/alerts',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -61,86 +91,121 @@ const IndexRoute = IndexRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/alerts': typeof AlertsRoute
   '/analytics': typeof AnalyticsRoute
   '/backtest': typeof BacktestRoute
+  '/builder': typeof BuilderRoute
+  '/events': typeof EventsRoute
   '/instruments': typeof InstrumentsRoute
   '/intraday': typeof IntradayRoute
+  '/operations': typeof OperationsRoute
   '/portfolio': typeof PortfolioRoute
   '/positional': typeof PositionalRoute
   '/strategies': typeof StrategiesRoute
+  '/trading': typeof TradingRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/alerts': typeof AlertsRoute
   '/analytics': typeof AnalyticsRoute
   '/backtest': typeof BacktestRoute
+  '/builder': typeof BuilderRoute
+  '/events': typeof EventsRoute
   '/instruments': typeof InstrumentsRoute
   '/intraday': typeof IntradayRoute
+  '/operations': typeof OperationsRoute
   '/portfolio': typeof PortfolioRoute
   '/positional': typeof PositionalRoute
   '/strategies': typeof StrategiesRoute
+  '/trading': typeof TradingRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/alerts': typeof AlertsRoute
   '/analytics': typeof AnalyticsRoute
   '/backtest': typeof BacktestRoute
+  '/builder': typeof BuilderRoute
+  '/events': typeof EventsRoute
   '/instruments': typeof InstrumentsRoute
   '/intraday': typeof IntradayRoute
+  '/operations': typeof OperationsRoute
   '/portfolio': typeof PortfolioRoute
   '/positional': typeof PositionalRoute
   '/strategies': typeof StrategiesRoute
+  '/trading': typeof TradingRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/alerts'
     | '/analytics'
     | '/backtest'
+    | '/builder'
+    | '/events'
     | '/instruments'
     | '/intraday'
+    | '/operations'
     | '/portfolio'
     | '/positional'
     | '/strategies'
+    | '/trading'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/alerts'
     | '/analytics'
     | '/backtest'
+    | '/builder'
+    | '/events'
     | '/instruments'
     | '/intraday'
+    | '/operations'
     | '/portfolio'
     | '/positional'
     | '/strategies'
+    | '/trading'
   id:
     | '__root__'
     | '/'
+    | '/alerts'
     | '/analytics'
     | '/backtest'
+    | '/builder'
+    | '/events'
     | '/instruments'
     | '/intraday'
+    | '/operations'
     | '/portfolio'
     | '/positional'
     | '/strategies'
+    | '/trading'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AlertsRoute: typeof AlertsRoute
   AnalyticsRoute: typeof AnalyticsRoute
   BacktestRoute: typeof BacktestRoute
+  BuilderRoute: typeof BuilderRoute
+  EventsRoute: typeof EventsRoute
   InstrumentsRoute: typeof InstrumentsRoute
   IntradayRoute: typeof IntradayRoute
+  OperationsRoute: typeof OperationsRoute
   PortfolioRoute: typeof PortfolioRoute
   PositionalRoute: typeof PositionalRoute
   StrategiesRoute: typeof StrategiesRoute
+  TradingRoute: typeof TradingRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/analytics': {
-      id: '/analytics'
-      path: '/analytics'
-      fullPath: '/analytics'
-      preLoaderRoute: typeof AnalyticsRouteImport
+    '/trading': {
+      id: '/trading'
+      path: '/trading'
+      fullPath: '/trading'
+      preLoaderRoute: typeof TradingRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/strategies': {
@@ -164,6 +229,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortfolioRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/operations': {
+      id: '/operations'
+      path: '/operations'
+      fullPath: '/operations'
+      preLoaderRoute: typeof OperationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/intraday': {
       id: '/intraday'
       path: '/intraday'
@@ -178,11 +250,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InstrumentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/events': {
+      id: '/events'
+      path: '/events'
+      fullPath: '/events'
+      preLoaderRoute: typeof EventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/builder': {
+      id: '/builder'
+      path: '/builder'
+      fullPath: '/builder'
+      preLoaderRoute: typeof BuilderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/backtest': {
       id: '/backtest'
       path: '/backtest'
       fullPath: '/backtest'
       preLoaderRoute: typeof BacktestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/analytics': {
+      id: '/analytics'
+      path: '/analytics'
+      fullPath: '/analytics'
+      preLoaderRoute: typeof AnalyticsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/alerts': {
+      id: '/alerts'
+      path: '/alerts'
+      fullPath: '/alerts'
+      preLoaderRoute: typeof AlertsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -197,13 +297,18 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AlertsRoute: AlertsRoute,
   AnalyticsRoute: AnalyticsRoute,
   BacktestRoute: BacktestRoute,
+  BuilderRoute: BuilderRoute,
+  EventsRoute: EventsRoute,
   InstrumentsRoute: InstrumentsRoute,
   IntradayRoute: IntradayRoute,
+  OperationsRoute: OperationsRoute,
   PortfolioRoute: PortfolioRoute,
   PositionalRoute: PositionalRoute,
   StrategiesRoute: StrategiesRoute,
+  TradingRoute: TradingRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

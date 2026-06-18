@@ -1,4 +1,7 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Card } from '@/components/ui/Card'
+import { Button } from '@/components/ui/Button'
+import { OrderEntry } from '@/components/orders/OrderEntry'
 import type { Position, StrategyGroup } from '../../types/intraday'
 
 interface Props {
@@ -36,19 +39,51 @@ function groupPositions(positions: Position[]): StrategyGroup[] {
   }))
 }
 
-function LegRow({ pos }: { pos: Position }) {
+function LegRow({ pos, onClose }: { pos: Position, onClose: (pos: Position) => void }) {
   const totalPnl = pos.realized_pnl + pos.unrealized_pnl
+  const prevLtpRef = useRef<number | null>(null)
+  const [ltpFlash, setLtpFlash] = useState('')
+
+  useEffect(() => {
+    const prev = prevLtpRef.current
+    const curr = pos.ltp ?? null
+    if (prev !== null && curr !== null && curr !== prev) {
+      const cls = curr > prev ? 'animate-flash-bullish' : 'animate-flash-bearish'
+      setLtpFlash(cls)
+      const timer = setTimeout(() => setLtpFlash(''), 800)
+      prevLtpRef.current = curr
+      return () => clearTimeout(timer)
+    }
+    prevLtpRef.current = curr
+  }, [pos.ltp])
+
   return (
     <tr className="bg-surface/50 border-t border-surface-border text-xs text-text-muted hover:bg-surface-hover transition-colors">
       <td className="pl-8 py-2 font-mono text-text-main">{pos.security_id}</td>
       <td className="py-2 text-center text-text-main font-medium">{pos.net_qty}</td>
       <td className="py-2 text-right font-mono">{fmt(pos.avg_price)}</td>
-      <td className="py-2 text-right font-mono">{pos.ltp != null ? fmt(pos.ltp) : '—'}</td>
+      <td className={`py-2 text-right font-mono transition-colors ${ltpFlash}`}>
+        {pos.ltp != null ? fmt(pos.ltp) : '—'}
+      </td>
       <td className="py-2 text-right font-mono text-text-muted/70">{pos.delta != null ? fmt(pos.delta, 3) : '—'}</td>
       <td className="py-2 text-right font-mono text-text-muted/70">{pos.gamma != null ? fmt(pos.gamma, 4) : '—'}</td>
       <td className="py-2 text-right font-mono text-text-muted/70">{pos.theta != null ? fmt(pos.theta, 3) : '—'}</td>
       <td className="py-2 text-right font-mono text-text-muted/70">{pos.vega != null ? fmt(pos.vega, 3) : '—'}</td>
       <td className={`py-2 text-right font-mono ${pnlColor(totalPnl)}`}>{fmt(totalPnl)}</td>
+      <td className="py-2 pr-4 text-right">
+        {pos.net_qty !== 0 && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClose(pos)
+            }}
+          >
+            Close
+          </Button>
+        )}
+      </td>
     </tr>
   )
 }
@@ -80,19 +115,21 @@ function StrategyRow({ group, expanded, onToggle }: { group: StrategyGroup; expa
       <td className={`py-2 text-right font-mono text-sm ${pnlColor(group.total_theta)}`}>{fmt(group.total_theta, 3)}</td>
       <td className={`py-2 text-right font-mono text-sm ${pnlColor(group.total_vega)}`}>{fmt(group.total_vega, 3)}</td>
       <td className={`py-2 text-right font-mono font-semibold ${pnlColor(group.total_pnl)}`}>{fmt(group.total_pnl)}</td>
+      <td className="py-2"></td>
     </tr>
   )
 }
 
-const COLUMNS = ['Security / Strategy', 'Qty', 'Avg', 'LTP', 'Δ', 'Γ', 'Θ', 'Vega', 'P&L']
+const COLUMNS = ['Security / Strategy', 'Qty', 'Avg', 'LTP', 'Δ', 'Γ', 'Θ', 'Vega', 'P&L', 'Action']
 
 export function PositionTable({ positions }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [closePosSecurity, setClosePosSecurity] = useState<{ id: string, side: "BUY" | "SELL", qty: number } | null>(null)
   const groups = useMemo(() => groupPositions(positions.filter((p) => p.net_qty !== 0)), [positions])
 
   if (groups.length === 0) {
     return (
-      <div className="text-center text-gray-600 py-12 text-sm">
+      <div className="text-center text-text-subtle py-12 text-sm">
         No open positions
       </div>
     )
@@ -111,7 +148,7 @@ export function PositionTable({ positions }: Props) {
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-surface-border glass-panel">
+    <Card className="overflow-x-auto rounded-xl">
       <table className="w-full text-sm text-left">
         <thead className="bg-surface text-xs text-text-muted uppercase tracking-wider font-semibold border-b border-surface-border">
           <tr>
@@ -131,12 +168,33 @@ export function PositionTable({ positions }: Props) {
                 onToggle={() => toggle(group.strategy_id)}
               />
               {expanded.has(group.strategy_id) && group.positions.map((pos) => (
-                <LegRow key={`${pos.security_id}-${pos.product}`} pos={pos} />
+                <LegRow 
+                  key={`${pos.security_id}-${pos.product}`} 
+                  pos={pos} 
+                  onClose={(p) => setClosePosSecurity({
+                    id: p.security_id,
+                    side: p.net_qty > 0 ? "SELL" : "BUY",
+                    qty: Math.abs(p.net_qty)
+                  })}
+                />
               ))}
             </React.Fragment>
           ))}
         </tbody>
       </table>
-    </div>
+
+      {closePosSecurity && (
+        <OrderEntry
+          open={!!closePosSecurity}
+          onOpenChange={(open) => !open && setClosePosSecurity(null)}
+          prefill={{
+            security_id: closePosSecurity.id,
+            side: closePosSecurity.side,
+            qty: closePosSecurity.qty,
+            order_type: "MARKET",
+          }}
+        />
+      )}
+    </Card>
   )
 }

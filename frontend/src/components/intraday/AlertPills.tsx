@@ -4,29 +4,27 @@ import type { Alert, AlertType, Position, PnLSummary, RiskSettings } from '../..
 const STORAGE_KEY = 'intraday_dismissed_alerts'
 const ALERT_TTL_MS = 60 * 60 * 1000 // alerts auto-expire after 1 hour
 
-function loadDismissed(): Set<string> {
+function loadDismissed(): Map<string, number> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return new Set()
+    if (!raw) return new Map()
     const arr = JSON.parse(raw) as Array<[string, number]>
     const now = Date.now()
-    return new Set(arr.filter(([, ts]) => now - ts < ALERT_TTL_MS).map(([id]) => id))
+    return new Map(arr.filter(([, ts]) => now - ts < ALERT_TTL_MS))
   } catch {
-    return new Set()
+    return new Map()
   }
 }
 
-function saveDismissed(ids: Set<string>) {
-  const now = Date.now()
-  const arr: Array<[string, number]> = Array.from(ids).map((id) => [id, now])
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(arr))
+function saveDismissed(map: Map<string, number>) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(Array.from(map.entries())))
 }
 
 function alertTypeColor(type: AlertType): string {
   switch (type) {
-    case 'price': return 'bg-blue-900 border-blue-600 text-blue-200'
-    case 'pnl': return 'bg-orange-900 border-orange-600 text-orange-200'
-    case 'time': return 'bg-purple-900 border-purple-600 text-purple-200'
+    case 'price': return 'bg-primary/10 border-primary/40 text-primary'
+    case 'pnl': return 'bg-warning/10 border-warning/40 text-warning'
+    case 'time': return 'bg-info/10 border-info/40 text-info'
   }
 }
 
@@ -102,7 +100,7 @@ function buildAlerts(positions: Position[], summary: PnLSummary | null, settings
 }
 
 export function AlertPills({ positions, summary, settings }: Props) {
-  const [dismissed, setDismissed] = useState<Set<string>>(() => loadDismissed())
+  const [dismissed, setDismissed] = useState<Map<string, number>>(() => loadDismissed())
   const alerts = buildAlerts(positions, summary, settings).filter((a) => !dismissed.has(a.id))
 
   useEffect(() => {
@@ -111,8 +109,8 @@ export function AlertPills({ positions, summary, settings }: Props) {
 
   function dismiss(id: string) {
     setDismissed((prev) => {
-      const next = new Set(prev)
-      next.add(id)
+      const next = new Map(prev)
+      next.set(id, Date.now())
       return next
     })
   }

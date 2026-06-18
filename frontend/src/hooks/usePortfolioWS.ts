@@ -31,7 +31,8 @@ export function usePortfolioWS(): PortfolioState {
 
     function connect() {
       if (mountedRef.current) setState((s) => ({ ...s, status: 'connecting' }))
-      const ws = new WebSocket('/ws/portfolio')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/portfolio`)
       wsRef.current = ws
 
       ws.onopen = () => {

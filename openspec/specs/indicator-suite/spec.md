@@ -5,9 +5,7 @@ Shared, single-compute indicator layer. The suite computes every requested techn
 once per closed bar per `(security_id, timeframe)` and caches a snapshot that strategies,
 the backtest engine, and the UI consume read-only. Rule: IndicatorEngine computes once;
 strategies consume, never recompute.
-
 ## Requirements
-
 ### Requirement: Shared single-compute layer
 The indicator suite SHALL compute every requested indicator once per closed bar in the
 `(security_id, timeframe)` it belongs to, before strategy dispatch, and expose the result
@@ -148,6 +146,81 @@ logged and SHALL NOT block application startup; an unprimed family SHALL report 
 - **WHEN** prior-session data is missing or a warmup fetch fails
 - **THEN** startup proceeds, the affected families report `None`, and a warning is logged
 
+### Requirement: Candlestick pattern detection
+The suite SHALL provide a candlestick-pattern family that detects, per closed bar, a configured
+set of classical single- and multi-bar patterns (including doji, hammer, shooting-star,
+bullish/bearish engulfing, harami, morning star, evening star, and marubozu) using only the
+current and preceding closed bars. It SHALL expose per-pattern boolean flags and a compact
+bullish/bearish/neutral classification for the latest bar, updated in O(1) per bar.
+
+#### Scenario: Detect a multi-bar pattern
+- **WHEN** the most recent closed bars form a bullish engulfing
+- **THEN** the candlestick family flags `bullish_engulfing` for the latest bar and classifies it bullish
+
+#### Scenario: No pattern present
+- **WHEN** the latest closed bar matches no configured pattern
+- **THEN** all pattern flags are false and the classification is neutral
+
+### Requirement: Elliott-Wave structure
+The suite SHALL provide an Elliott-Wave family that detects swing pivots via a ZigZag with a
+configurable percentage or ATR threshold and applies a heuristic wave labeling (impulse 1–5 and
+corrective A–B–C) with a confidence score. The labeling is heuristic and SHALL be treated as a
+probabilistic feature, not a deterministic rule.
+
+#### Scenario: Label the current wave
+- **WHEN** detected swings form a recognizable impulse sequence
+- **THEN** the family exposes the current wave label, the position within the sequence, and a
+  confidence score
+
+#### Scenario: Insufficient structure
+- **WHEN** too few swings exist to label a wave
+- **THEN** the family returns no wave label rather than a forced or zero value
+
+### Requirement: Fibonacci retracement and extension levels
+The suite SHALL provide a Fibonacci retracement/extension family that, from the latest detected
+swing leg, computes standard retracement levels (0.236, 0.382, 0.5, 0.618, 0.786) and extension
+levels (1.272, 1.618, 2.0), and reports the nearest level to price, the signed distance to it, and
+the most recently reacted-from level. This family is distinct from the suite's existing Fibonacci
+*pivot* levels.
+
+#### Scenario: Levels from the latest swing
+- **WHEN** a new swing leg is confirmed
+- **THEN** the family recomputes retracement and extension levels for that leg and reports the
+  nearest level and price's signed distance to it
+
+### Requirement: MACD
+The suite SHALL provide a MACD family computing the MACD line, signal line, and histogram from
+configurable fast, slow, and signal periods, updated incrementally per closed bar.
+
+#### Scenario: MACD updates per bar
+- **WHEN** a bar closes for a `(security_id, timeframe)` requesting MACD
+- **THEN** the family updates the MACD line, signal line, and histogram from the bar close
+
+### Requirement: Elder Impulse regime
+The suite SHALL provide an Elder Impulse family that combines the slope of a 13-period EMA (trend)
+with the slope of the MACD histogram (momentum) into a per-bar regime of green (both rising), red
+(both falling), or blue (mixed), and SHALL expose the regime together with its two component
+directions.
+
+#### Scenario: Green impulse
+- **WHEN** both the 13-EMA and the MACD histogram rise on the latest closed bar
+- **THEN** the Elder Impulse family reports a green regime
+
+#### Scenario: Mixed impulse
+- **WHEN** the 13-EMA and the MACD histogram disagree in direction on the latest closed bar
+- **THEN** the Elder Impulse family reports a blue regime
+
+### Requirement: Opt-in and single-compute for new families
+Each new family SHALL be built only when a watchlist entry requests it, SHALL be computed once
+per closed bar like every other suite family, and SHALL be consumed read-only. This applies to
+the candlestick-pattern, Elliott-Wave, Fibonacci retracement/extension, MACD, and Elder Impulse
+families. Strategies SHALL NOT recompute them.
+
+#### Scenario: Only requested new families are built
+- **WHEN** a `(security_id, timeframe)` requests only `candlestick` and `elder_impulse`
+- **THEN** the suite builds the candlestick and Elder Impulse trackers (and the MACD tracker Elder
+  Impulse depends on) and no other new family
+
 ### Requirement: Backtest parity
 The backtest engine SHALL compute suite indicators using the same tracker classes as the live
 suite, so that for an identical bar series the reported indicator states are identical between
@@ -166,3 +239,28 @@ accessor.
 - **WHEN** a strategy reads `ctx.indicators.supertrend(security_id, timeframe)` after the suite is added
 - **THEN** it receives the same SuperTrend value it would have before the suite, with no change
   in precision or behaviour
+
+### Requirement: period_levels indicator family
+
+The universal `IndicatorEngine` SHALL provide a `period_levels` family producing previous-period high/low levels — previous-day (PDH/PDL), previous-week (PWH/PWL), and previous-month (PMH/PML) — as a `PeriodLevelsState`. The tracker SHALL follow the standard family protocol `update(high, low, close, volume, bar_time) -> PeriodLevelsState | None`, freeze each completed period's high/low at the corresponding day/ISO-week/calendar-month boundary, and be seedable from MongoDB `market_bars` during warmup. The family SHALL be reachable via `IndicatorEngine.get_period_levels(sid, tf)`, included in `Snapshot.period_levels`, registered in `registry.py`, and accessible from strategies via `IndicatorReader.period_levels(sid, tf)`.
+
+#### Scenario: Previous-week high/low frozen at week boundary
+- **WHEN** the first bar of a new ISO week is processed
+- **THEN** `PeriodLevelsState.pwh` / `pwl` reflect the prior week's accumulated high/low and remain constant for the duration of the new week
+
+#### Scenario: Previous-month high/low frozen at month boundary
+- **WHEN** the first bar of a new calendar month is processed
+- **THEN** `PeriodLevelsState.pmh` / `pml` reflect the prior month's high/low
+
+#### Scenario: Seeded from warmup
+- **WHEN** the engine warms up from MongoDB `market_bars` for a security/timeframe with at least one prior week and month of data
+- **THEN** `get_period_levels` returns populated PWH/PWL/PMH/PML before the first live bar
+
+#### Scenario: Available in snapshot
+- **WHEN** `get_snapshot(sid, tf)` is called after `period_levels` is configured
+- **THEN** the returned `Snapshot.period_levels` is a populated `PeriodLevelsState` (or `None` if not yet seeded)
+
+#### Scenario: Strategies can read period levels
+- **WHEN** a strategy calls `ctx.indicators.period_levels(sid, tf)`
+- **THEN** the `PeriodLevelsState` is returned without error
+

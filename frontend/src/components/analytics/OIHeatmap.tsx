@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { Lock } from 'lucide-react'
+import { chartTheme } from '@/lib/chartTheme'
 
 interface Props {
   underlying: string
@@ -157,8 +158,9 @@ export function OIHeatmap({ underlying, expiry }: Props) {
               width={32}
             />
             <Tooltip
-              contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
-              formatter={(v: number) => [v?.toFixed(2), 'PCR']}
+              contentStyle={{ background: chartTheme.tooltip.bg, border: `1px solid ${chartTheme.tooltip.border}`, borderRadius: 8 }}
+              formatter={(v: any) => [Number(v)?.toFixed(2) ?? '—', 'PCR']}
+              labelStyle={{ color: chartTheme.tooltip.text }}
             />
             <Line
               type="monotone"

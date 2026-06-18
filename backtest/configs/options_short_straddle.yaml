@@ -1,0 +1,45 @@
+type: options-strategy
+name: "Short Straddle 9:20"
+underlying: NIFTY
+date_range:
+  from: "2026-01-01"
+  to: "2026-06-01"
+expiry_selection: weekly
+
+entry:
+  time_ist: "09:20"
+  legs:
+    - type: CE
+      side: SELL
+      lots: 1
+      strike_selection:
+        method: atm_offset
+        offset: 0
+    - type: PE
+      side: SELL
+      lots: 1
+      strike_selection:
+        method: atm_offset
+        offset: 0
+
+exit:
+  time_ist: "15:10"
+
+risk:
+  combined_sl:
+    type: points
+    value: 50
+  combined_target:
+    type: points
+    value: 30
+  per_leg_sl: null
+  trailing_sl:
+    enabled: true
+    trail_after: 20
+    trail_step: 5
+  re_entry:
+    enabled: true
+    max_count: 2
+
+lot_size: 75
+commissions: true

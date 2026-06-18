@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FeedStatus, PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
+import type { PositionalFeedState, PositionalLeg, StrategyGroup } from '../types/positional'
 import type { Position } from '../types/intraday'
 
 const WS_DISABLED = import.meta.env.VITE_WS_DISABLED === 'true'
@@ -78,7 +78,8 @@ export function usePositionalFeeds(): PositionalFeedState {
 
     function connect() {
       if (mountedRef.current) setState((s) => ({ ...s, connectionState: 'connecting' }))
-      const ws = new WebSocket('/ws/portfolio')
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/portfolio`)
       wsRef.current = ws
 
       ws.onopen = () => {

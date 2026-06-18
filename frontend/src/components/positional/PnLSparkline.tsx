@@ -27,7 +27,7 @@ export function PnLSparkline({ history }: Props) {
       height: 160,
     })
 
-    const series = chart.addLineSeries({
+    const series = (chart as any).addLineSeries({
       color: '#34d399',
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
