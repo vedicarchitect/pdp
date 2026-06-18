@@ -123,6 +123,7 @@ export function JobTable() {
                 size="sm"
                 onClick={() => setLogsJob(job)}
                 title="View logs"
+                aria-label="View logs"
               >
                 <FileText size={14} />
               </Button>
@@ -133,6 +134,7 @@ export function JobTable() {
                 size="sm"
                 onClick={() => cancel.mutate(job.id)}
                 title="Cancel job"
+                aria-label="Cancel job"
                 className="text-bearish hover:text-bearish"
               >
                 <X size={14} />
