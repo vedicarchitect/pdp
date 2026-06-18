@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from pdp.indicators.engine import IndicatorEngine
+from pdp.indicators.supertrend import UP
 from pdp.indicators.warmup import (
     _prior_trading_day,
     _TF_SESSION_BARS,
@@ -280,3 +281,57 @@ async def test_warmup_full_mongo_skips_dhan_fallback():
         await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
 
     mock_fetch.assert_not_called()
+
+
+# 3.1 — Mid-day restart inherits prior-session direction (not cold-start)
+
+@pytest.mark.asyncio
+async def test_mid_day_restart_inherits_prior_session_direction():
+    """3.1: Engine warmed from a prior up-session carries UP direction — not a cold-start None."""
+    engine = IndicatorEngine()
+    # 75 bars of strong uptrend — one full 5m session
+    docs = _bar_docs([22000 + 50 * i for i in range(75)])
+    db = _FakeDB(docs)
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["5m"]}]
+
+    await warm_up_indicator_engine(engine, db, _NO_CREDS, watchlist)
+
+    state = engine.get("13", "5m")
+    assert state is not None, "engine must be primed after a full prior session"
+    assert state.direction == UP, "prior uptrend must carry over as UP, not cold-start None"
+
+
+# 3.2 — Warmup path == direct seed path (parity)
+
+@pytest.mark.asyncio
+async def test_warmup_direction_matches_direct_seed_parity():
+    """3.2: Warmup path and direct seed_from_bars produce identical SuperTrend direction —
+    proving live direction matches the backtest's warmed series for the same bars."""
+    closes = [22000 + 50 * i for i in range(75)]
+    docs = _bar_docs(closes)
+
+    # Direct-seed path (backtest equivalent)
+    engine_ref = IndicatorEngine()
+    bars_ref = [
+        BarClosed(
+            security_id="13", timeframe="5m",
+            bar_time=doc["ts"],
+            open=Decimal(str(doc["open"])), high=Decimal(str(doc["high"])),
+            low=Decimal(str(doc["low"])), close=Decimal(str(doc["close"])),
+            volume=0, oi=0,
+        )
+        for doc in docs
+    ]
+    engine_ref.seed_from_bars(bars_ref)
+    ref_direction = engine_ref.get("13", "5m").direction
+
+    # Warmup path (live-process equivalent)
+    engine_live = IndicatorEngine()
+    db = _FakeDB(docs)
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["5m"]}]
+    await warm_up_indicator_engine(engine_live, db, _NO_CREDS, watchlist)
+    live_direction = engine_live.get("13", "5m").direction
+
+    assert live_direction == ref_direction, (
+        f"warmup direction ({live_direction}) must match direct-seed ({ref_direction})"
+    )

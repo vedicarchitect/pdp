@@ -54,8 +54,8 @@ class PortfolioService:
         self._hub = hub
         self._settings = settings
         self._mongo_db = mongo_db
-        self._cache: dict[tuple[str, str, str], PositionState] = {}
-        self._dirty: set[tuple[str, str, str]] = set()
+        self._cache: dict[tuple[str | None, str, str, str], PositionState] = {}
+        self._dirty: set[tuple[str | None, str, str, str]] = set()
         self._subscribed_sids: set[str] = set()
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
@@ -63,6 +63,7 @@ class PortfolioService:
         self._hard_cap_cb: Any = None
         self._hard_cap_inr: Decimal = Decimal("0")
         self._hard_cap_triggered: bool = False  # prevent repeated triggers
+        self._margin_warning_cb: Any = None
         # Flag to batched broadcasts, ensuring we only broadcast max 10 times per sec
         # Reduces JSON serialization and event loop blocking overhead during high tick rates
         self._needs_broadcast: bool = True
@@ -80,6 +81,10 @@ class PortfolioService:
         self._hard_cap_cb = callback
         self._hard_cap_inr = Decimal(str(daily_loss_cap_inr))
         self._hard_cap_triggered = False
+
+    def set_margin_warning_callback(self, callback: "Callable[[float], None]") -> None:
+        """Wire a callback invoked each MTM cycle with the current daily loss (float INR)."""
+        self._margin_warning_cb = callback
 
     def get_daily_loss(self) -> Decimal:
         """Current session loss (positive = net loss since day start)."""
@@ -148,8 +153,9 @@ class PortfolioService:
         positions = result.scalars().all()
         self._cache.clear()
         for pos in positions:
-            key = (pos.security_id, pos.exchange_segment, pos.product)
+            key = (pos.strategy_id, pos.security_id, pos.exchange_segment, pos.product)
             self._cache[key] = PositionState(
+                strategy_id=pos.strategy_id,
                 security_id=pos.security_id,
                 exchange_segment=pos.exchange_segment,
                 product=pos.product,
@@ -255,6 +261,11 @@ class PortfolioService:
                 await self._load_positions(session)
             await self._check_ltp_stale()
             await self._check_hard_cap()
+            if self._margin_warning_cb is not None:
+                try:
+                    self._margin_warning_cb(float(self.get_daily_loss()))
+                except Exception as exc:
+                    log.warning("margin_warning_cb_error", exc=str(exc))
 
     async def _flush_dirty(self) -> None:
         if not self._dirty:
@@ -271,6 +282,7 @@ class PortfolioService:
                     await session.execute(
                         update(Position)
                         .where(
+                            Position.strategy_id == ps.strategy_id,
                             Position.security_id == ps.security_id,
                             Position.exchange_segment == ps.exchange_segment,
                             Position.product == ps.product,

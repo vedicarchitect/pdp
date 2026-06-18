@@ -185,6 +185,7 @@ async def list_positions(
     return [
         {
             "id": p.id,
+            "strategy_id": p.strategy_id,
             "security_id": p.security_id,
             "exchange_segment": p.exchange_segment,
             "product": p.product,

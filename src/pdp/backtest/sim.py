@@ -223,8 +223,21 @@ def simulate_day(
             for _ft in suite_bundle.values():
                 _ft.update(wb["high"], wb["low"], wb["close"], wb.get("volume", 0.0), _wts)
 
-    # Build the in-session series: (ist_dt, open, high, low, close, st_state, suite_snapshot).
+    # ML inference loader (backtest parity): same feature builder + pinned artifact as live.
+    _ml_loader: Any = None
+    if cfg.ml_model_dir and cfg.ml_version:
+        try:
+            from pdp.ml.infer import ModelLoader
+            _ml_loader = ModelLoader(cfg.ml_model_dir, cfg.ml_version, cfg.ml_head)
+            _ml_loader.load()
+            if not _ml_loader.ready:
+                _ml_loader = None
+        except Exception:
+            _ml_loader = None
+
+    # Build the in-session series: (ist_dt, open, high, low, close, st_state, suite_snapshot, ml_signal).
     series = []
+    _prev_bar_raw: Any = None
     for b in nifty_bars:
         ts_utc = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         ist_dt = (ts_utc + _IST).replace(tzinfo=None)
@@ -234,9 +247,34 @@ def simulate_day(
             _skw = {_fam: _ft.update(b["high"], b["low"], b["close"], b.get("volume", 0.0), ts_utc)
                     for _fam, _ft in suite_bundle.items()}
             suite_snap = Snapshot(**_skw)
-        series.append(
-            (ist_dt, float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]), st, suite_snap)
-        )
+        # ML signal — same feature builder + artifact as live (backtest parity)
+        _ml_signal: Any = None
+        if _ml_loader is not None:
+            try:
+                from decimal import Decimal
+
+                from pdp.market.bars import BarClosed
+                _bc = BarClosed(
+                    security_id=b.get("metadata", {}).get("security_id", ""),
+                    timeframe=b.get("metadata", {}).get("timeframe", ""),
+                    bar_time=ts_utc,
+                    open=Decimal(str(b.get("open", b["close"]))),
+                    high=Decimal(str(b["high"])),
+                    low=Decimal(str(b["low"])),
+                    close=Decimal(str(b["close"])),
+                    volume=int(b.get("volume", 0)),
+                    oi=int(b.get("oi", 0)),
+                )
+                _prev_bc = _prev_bar_raw
+                _ml_signal = _ml_loader.infer(_bc, suite_snap, st, prev_bar=_prev_bc)
+                _prev_bar_raw = _bc
+            except Exception:  # noqa: S110
+                pass
+        series.append((
+            ist_dt,
+            float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]),
+            st, suite_snap, _ml_signal,
+        ))
 
     td = data.trade_date
     start_dt = datetime(td.year, td.month, td.day, cfg.start_ist.hour, cfg.start_ist.minute)
@@ -326,7 +364,7 @@ def simulate_day(
         for ot in list(legs.keys()):
             close_leg(ot, ist_dt, nifty_px, reason)
 
-    for ist_dt, bar_open, bar_high, bar_low, bar_close, st, _suite_snap in series:
+    for ist_dt, bar_open, bar_high, bar_low, bar_close, st, _suite_snap, _ml_signal in series:
         if st is None:
             continue
         if ist_dt < start_dt:

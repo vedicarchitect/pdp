@@ -339,6 +339,7 @@ async def upsert_position(
     """
     result = await session.execute(
         select(Position).where(
+            Position.strategy_id == order.strategy_id,
             Position.security_id == order.security_id,
             Position.exchange_segment == order.exchange_segment,
             Position.product == order.product,
@@ -348,6 +349,7 @@ async def upsert_position(
     qty = order.qty if order.side == Side.BUY else -order.qty
     if pos is None:
         pos = Position(
+            strategy_id=order.strategy_id,
             security_id=order.security_id,
             exchange_segment=order.exchange_segment,
             product=order.product,

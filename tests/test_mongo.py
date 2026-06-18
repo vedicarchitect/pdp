@@ -46,6 +46,9 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
     positional_col = MagicMock()
     positional_col.create_index = AsyncMock()
 
+    events_col = MagicMock()
+    events_col.create_index = AsyncMock()
+
     def _getitem(name: str):
         if name == "portfolio_snapshots":
             return portfolio_col
@@ -53,6 +56,8 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
             return option_bars_col
         if name == "positional_eod_snapshots":
             return positional_col
+        if name == "events":
+            return events_col
         return chains_col
 
     db = MagicMock()

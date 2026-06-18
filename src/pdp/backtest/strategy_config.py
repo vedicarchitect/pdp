@@ -78,6 +78,10 @@ class StrategyConfig:
     early_exit_ema_confirm_bars: int = 2      # bars needed for fast-EMA exit
     # Suite indicators replayed per-bar in backtest (same families as live engine)
     suite_indicators: list[dict] = field(default_factory=list)
+    # ML signal — when set, the same feature builder + pinned artifact run in backtest
+    ml_model_dir: str = ""       # e.g. "data/models"; empty → no ML in backtest
+    ml_version: str = ""         # artifact version to load; empty → no ML
+    ml_head: str = "directional" # "directional" or "expiry"
 
     def __post_init__(self) -> None:
         self.start_ist = _parse_hhmm(self.start_ist)
@@ -115,7 +119,9 @@ class StrategyConfig:
         if self.early_exit_ema_slow is not None and self.early_exit_ema_slow < 1:
             raise ValueError(f"early_exit_ema_slow must be >= 1, got {self.early_exit_ema_slow}")
         if self.early_exit_ema_confirm_bars < 1:
-            raise ValueError(f"early_exit_ema_confirm_bars must be >= 1, got {self.early_exit_ema_confirm_bars}")
+            raise ValueError(
+                f"early_exit_ema_confirm_bars must be >= 1, got {self.early_exit_ema_confirm_bars}"
+            )
 
     # -- (de)serialization ------------------------------------------------- #
     @classmethod

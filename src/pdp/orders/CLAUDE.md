@@ -37,14 +37,15 @@ OrderRouter.place_order(req)
 3. Wire into `OrderRouter.__init__()`.
 4. Add `BROKER` literal to `settings.py`.
 
-## Known Bug — Shared Position (UNFIXED as of 2026-06-16)
+## Shared Position Bug — FIXED 2026-06-18
 
-`PaperBroker` keys its in-memory position map by `security_id` only. When two strategies hold the **same** security (e.g. both st10_15m_otm3 and st10_5m_otm2_b3m7 sell CE24050), they share one position object. Effects:
-- Heartbeat `lots` = inflated sum across strategies
-- Stop-loss fires against the combined position → over-closes
-- When strategy A flips and clears the shared position, strategy B sees `lots=0` and re-enters immediately (cascading re-entry)
+`Position` rows are now keyed by `(strategy_id, security_id, exchange_segment, product)`.
 
-**Fix**: Key `_positions` and the DB `positions` table by `(strategy_id, security_id)` instead of `security_id` alone. All callers that look up position by `security_id` must also pass `strategy_id`.
+- `upsert_position()` in `paper.py` and `dhan_broker.py` sets and queries `strategy_id`.
+- `StrategyContext` position queries (`get_net_qty`, `get_position`, `get_realized_pnl`, `get_positions`) all filter by `strategy_id`.
+- `PortfolioService` cache key is now `(strategy_id, security_id, exchange_segment, product)`.
+- Migration `0012` adds the column and rekeyed unique constraint.
+- Run `task db:migrate` after pulling to apply the migration.
 
 ## Active Specs
 

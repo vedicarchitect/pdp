@@ -13,6 +13,7 @@
 | `logging.py` | structlog JSON setup |
 | `cli.py` | Click CLI entry point (`python -m pdp`) |
 | `alerts/` | Alert rules, evaluator, WebSocket hub |
+| `events/` | Live event publisher: position-aware realtime monitoring + WS/push |
 | `backtest/` | BacktestEngine, sim, commissions, output |
 | `cli/` | Click sub-commands (strategy, backtest, progress) |
 | `db/` | SQLAlchemy base + async session factory |

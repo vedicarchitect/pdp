@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pdp.strategy.registry import WatchlistEntry
 
 
-class RiskCapBreached(Exception):
+class RiskCapBreached(Exception):  # noqa: N818
     """Raised when a strategy's risk cap would be exceeded by a new order."""
 
 
@@ -71,6 +71,11 @@ class IndicatorReader:
             return None
         return self._engine.get_pivots(security_id, timeframe)
 
+    def period_levels(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_period_levels(security_id, timeframe)
+
     def fvg(self, security_id: str, timeframe: str) -> Any:
         if self._engine is None:
             return None
@@ -85,6 +90,37 @@ class IndicatorReader:
         if self._engine is None:
             return None
         return self._engine.get_volume_profile(security_id, timeframe)
+
+    def macd(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_macd(security_id, timeframe)
+
+    def candlestick(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_candlestick(security_id, timeframe)
+
+    def elliott(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_elliott(security_id, timeframe)
+
+    def fib_levels(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_fib_levels(security_id, timeframe)
+
+    def elder_impulse(self, security_id: str, timeframe: str) -> Any:
+        if self._engine is None:
+            return None
+        return self._engine.get_elder_impulse(security_id, timeframe)
+
+    def ml_signal(self, security_id: str, timeframe: str) -> Any:
+        """Read-only ML directional signal. Returns None when no model is loaded."""
+        if self._engine is None:
+            return None
+        return self._engine.get_ml_signal(security_id, timeframe)
 
 
 class MarketControl:
@@ -235,10 +271,13 @@ class StrategyOrderClient:
             )
 
     async def get_net_qty(self, security_id: str) -> int:
-        """Return net_qty from the positions table for this security (0 if no row)."""
+        """Return net_qty from the positions table for this strategy+security (0 if no row)."""
         async with self._session_maker() as session:
             result = await session.execute(
-                select(Position.net_qty).where(Position.security_id == security_id)
+                select(Position.net_qty).where(
+                    Position.strategy_id == self._strategy_id,
+                    Position.security_id == security_id,
+                )
             )
             row = result.first()
             return int(row[0]) if row else 0
@@ -252,7 +291,8 @@ class StrategyOrderClient:
         async with self._session_maker() as session:
             result = await session.execute(
                 select(Position.net_qty, Position.avg_price).where(
-                    Position.security_id == security_id
+                    Position.strategy_id == self._strategy_id,
+                    Position.security_id == security_id,
                 )
             )
             row = result.first()
@@ -264,40 +304,30 @@ class StrategyOrderClient:
         """Return cumulative realized P&L from the positions table (0 if no row)."""
         async with self._session_maker() as session:
             result = await session.execute(
-                select(Position.realized_pnl).where(Position.security_id == security_id)
+                select(Position.realized_pnl).where(
+                    Position.strategy_id == self._strategy_id,
+                    Position.security_id == security_id,
+                )
             )
             row = result.first()
             return Decimal(str(row[0])) if row else Decimal("0")
 
     async def get_realized_pnl_per_security(self) -> dict[str, Decimal]:
-        """Realized P&L from positions for every security this strategy has filled orders on."""
+        """Realized P&L from positions for this strategy keyed by security_id."""
         async with self._session_maker() as session:
-            subq = (
-                select(Order.security_id)
-                .distinct()
-                .where(
-                    Order.strategy_id == self._strategy_id,
-                    Order.status == OrderStatus.FILLED,
-                )
-            )
             result = await session.execute(
                 select(Position.security_id, Position.realized_pnl).where(
-                    Position.security_id.in_(subq)
+                    Position.strategy_id == self._strategy_id,
                 )
             )
             return {row[0]: Decimal(str(row[1])) for row in result.all()}
 
     async def get_positions(self) -> list[Position]:
-        """Positions with net_qty != 0 for securities this strategy has traded."""
+        """Positions with net_qty != 0 belonging to this strategy."""
         async with self._session_maker() as session:
-            subq = (
-                select(Order.security_id)
-                .distinct()
-                .where(Order.strategy_id == self._strategy_id)
-            )
             result = await session.execute(
                 select(Position).where(
-                    Position.security_id.in_(subq),
+                    Position.strategy_id == self._strategy_id,
                     Position.net_qty != 0,
                 )
             )

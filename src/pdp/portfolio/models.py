@@ -7,6 +7,7 @@ from decimal import Decimal
 
 @dataclass
 class PositionState:
+    strategy_id: str | None
     security_id: str
     exchange_segment: str
     product: str
@@ -19,6 +20,7 @@ class PositionState:
 
     def to_dict(self) -> dict:
         return {
+            "strategy_id": self.strategy_id,
             "security_id": self.security_id,
             "exchange_segment": self.exchange_segment,
             "product": self.product,

@@ -102,6 +102,7 @@ class StrategyHost:
         self._market_adapter: DhanTickerAdapter | None = None
         self._redis: Redis | None = None
         self._paper_broker: PaperBroker | None = None
+        self._event_service: Any = None
 
     def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
         """Wire the universal indicator engine read by strategies via ctx.indicators."""
@@ -118,6 +119,10 @@ class StrategyHost:
     def set_paper_broker(self, broker: PaperBroker | None) -> None:
         """Wire the paper broker so MarketControl.subscribe() pre-registers the sid."""
         self._paper_broker = broker
+
+    def set_event_service(self, event_service: Any) -> None:
+        """Wire the event service so STRATEGY_SIGNAL events are emitted on fills."""
+        self._event_service = event_service
 
     # ------------------------------------------------------------------ #
     # Registry                                                             #
@@ -257,6 +262,19 @@ class StrategyHost:
         strategy_id = payload.get("strategy_id")
         if not strategy_id or strategy_id not in self._running:
             return
+        # Emit STRATEGY_SIGNAL (task 11.5): a fill proves the strategy generated a signal.
+        if self._event_service is not None:
+            try:
+                side = payload.get("side", "")
+                symbol = payload.get("security_id", "")
+                price = payload.get("fill_price", "")
+                self._event_service.emit_strategy_signal(
+                    strategy_id=strategy_id,
+                    security_id=symbol,
+                    signal=f"{side} filled @ {price}",
+                )
+            except Exception:
+                pass
         fill = FillEvent(
             order_id=payload["order_id"],
             security_id=payload["security_id"],

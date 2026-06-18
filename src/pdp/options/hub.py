@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 import structlog
 
@@ -38,6 +40,12 @@ class _OptionsClient:
 class OptionsHub:
     def __init__(self) -> None:
         self._clients: set[_OptionsClient] = set()
+        # Non-WS listeners (e.g. the event publisher) invoked on every snapshot.
+        self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
+
+    def register_listener(self, cb: Callable[[str, dict[str, Any]], None]) -> None:
+        """Register ``cb(underlying, snapshot)`` run on each broadcast."""
+        self._listeners.append(cb)
 
     def add(self, client: _OptionsClient) -> None:
         self._clients.add(client)
@@ -48,6 +56,11 @@ class OptionsHub:
         log.info("ws_options_client_disconnected", addr=client.addr, total=len(self._clients))
 
     def broadcast(self, underlying: str, expiry: str, snapshot: dict) -> None:
+        for cb in self._listeners:
+            try:
+                cb(underlying, snapshot)
+            except Exception as exc:  # never let a listener break WS fan-out
+                log.warning("options_hub_listener_error", exc=str(exc))
         if not self._clients:
             return
         # Serialise datetime fields for JSON

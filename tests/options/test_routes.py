@@ -170,3 +170,50 @@ def test_oi_history_404_when_no_docs(client):
 
     resp = client.get("/api/v1/options/NIFTY/oi-history?expiry=2026-06-26")
     assert resp.status_code == 404
+
+
+def test_payoff_valid_request(client):
+    payload = {
+        "legs": [
+            {"strike": 24800.0, "expiry": "2026-06-26", "option_type": "CE", "side": "BUY", "lots": 1, "premium": 200.0, "iv": 0.18},
+            {"strike": 24800.0, "expiry": "2026-06-26", "option_type": "PE", "side": "BUY", "lots": 1, "premium": 180.0, "iv": 0.18},
+        ],
+        "spot": 24800.0,
+        "lot_size": 75,
+    }
+    resp = client.post("/api/v1/options/NIFTY/payoff", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "pnl_curve" in body
+    assert "breakevens" in body
+    assert "net_greeks" in body
+    assert "probability_of_profit" in body
+    assert len(body["pnl_curve"]) == 200
+
+
+def test_payoff_empty_legs_returns_422(client):
+    payload = {"legs": [], "spot": 24800.0, "lot_size": 75}
+    resp = client.post("/api/v1/options/NIFTY/payoff", json=payload)
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "at least one leg" in str(body).lower()
+
+
+def test_readymades_returns_at_least_10_strategies(client):
+    resp = client.get("/api/v1/options/NIFTY/readymades")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["strategies"]) >= 10
+    for s in body["strategies"]:
+        assert "name" in s
+        assert "legs" in s
+
+
+def test_fii_dii_stub_returns_unavailable(client):
+    # With StubFIIDIISource wired (or as fallback), endpoint returns available: false
+    from pdp.options.fii_dii import StubFIIDIISource
+    client.app.state.fii_dii_source = StubFIIDIISource()
+
+    resp = client.get("/api/v1/options/fii-dii")
+    assert resp.status_code == 200
+    assert resp.json() == {"available": False}

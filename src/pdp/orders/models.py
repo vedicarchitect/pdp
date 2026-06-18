@@ -91,12 +91,13 @@ class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (
         UniqueConstraint(
-            "security_id", "exchange_segment", "product",
-            name="uq_positions_sid_seg_product",
+            "strategy_id", "security_id", "exchange_segment", "product",
+            name="uq_positions_strategy_sid_seg_product",
         ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    strategy_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     security_id: Mapped[str] = mapped_column(String, nullable=False)
     exchange_segment: Mapped[str] = mapped_column(String, nullable=False)
     product: Mapped[str] = mapped_column(String, nullable=False)

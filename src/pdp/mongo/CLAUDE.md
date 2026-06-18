@@ -16,6 +16,7 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 | `market_bars` | Time-series | NIFTY 1m/5m/... OHLCV bars |
 | `option_bars` | Time-series | Option contract 1m OHLCV bars |
 | `option_chains` | Regular | Latest chain snapshot per underlying+expiry |
+| `oi_snapshots` | Time-series | Intraday ATM±N OI snapshots + derived events (scripts/expiry_analysis.py --track) |
 | `paper_journal` | Regular | Daily P&L journal (one doc per date) |
 
 ## Usage

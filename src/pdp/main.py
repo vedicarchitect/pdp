@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pdp.db.session import dispose_engine, get_engine, get_session_maker  # noqa: F401 (re-used in lifespan)
+from pdp.db.session import dispose_engine, get_engine, get_session_maker
 from pdp.logging import RequestIdMiddleware, configure_logging
 from pdp.mongo.client import connect as mongo_connect
 from pdp.mongo.client import disconnect as mongo_disconnect
@@ -40,6 +40,26 @@ async def lifespan(app: FastAPI):
         git_sha=settings.GIT_SHA,
     )
 
+    # Job Runner — stored on app.state (no class-level singleton)
+    from pdp.housekeeping.tasks import (
+        backfill_options,
+        backfill_spot,
+        reset_paper,
+        snapshot_instruments,
+        validate_warehouse,
+    )
+    from pdp.jobs.runner import JobRunner
+    from pdp.ml.routes import train_handler
+
+    job_runner = JobRunner(get_session_maker(), app.state.redis)
+    job_runner.register_handler("housekeeping:backfill-spot", backfill_spot)
+    job_runner.register_handler("housekeeping:backfill-options", backfill_options)
+    job_runner.register_handler("housekeeping:reset-paper", reset_paper)
+    job_runner.register_handler("housekeeping:validate-warehouse", validate_warehouse)
+    job_runner.register_handler("housekeeping:snapshot-instruments", snapshot_instruments)
+    job_runner.register_handler("ml_train", train_handler)
+    app.state.job_runner = job_runner
+
     # WebSocket hubs — always available
     from pdp.alerts.ws import AlertsHub
     from pdp.market.ws import WSHub
@@ -58,6 +78,10 @@ async def lifespan(app: FastAPI):
     app.state.portfolio_hub = portfolio_hub
     alerts_hub = AlertsHub()
     app.state.alerts_hub = alerts_hub
+
+    # FII/DII data source — stub by default; swap for a concrete source when one is configured
+    from pdp.options.fii_dii import StubFIIDIISource
+    app.state.fii_dii_source = StubFIIDIISource()
 
     # Paper broker + order router — always started (no external credentials needed)
     from pdp.orders.paper import PaperBroker
@@ -138,6 +162,22 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("indicator_warmup_failed", exc=str(exc))
 
+    # ML loaders — load requested artifacts per watchlist entry (opt-in, non-blocking)
+    if settings.ML_ENABLED and settings.ML_ACTIVE_VERSION:
+        from pdp.ml.infer import ModelLoader, register_loader
+        for _cfg in _all_configs:
+            for _w in _cfg.watchlist:
+                if _w.ml_signal.enabled:
+                    _ml_version = _w.ml_signal.version or settings.ML_ACTIVE_VERSION
+                    _ml_head = _w.ml_signal.head
+                    for _tf in _w.timeframes:
+                        _loader = ModelLoader(settings.ML_MODEL_DIR, _ml_version, _ml_head)
+                        _loader.load()
+                        if _loader.ready:
+                            register_loader(_w.security_id, _tf, _loader, _ml_head)
+                            log.info("ml_loader_registered", sid=_w.security_id, tf=_tf,
+                                     version=_ml_version, head=_ml_head)
+
     # Market feed — only starts when Dhan credentials are configured
     tick_router_task = None
     bar_writer = None
@@ -160,7 +200,7 @@ async def lifespan(app: FastAPI):
             # We'll look up the user_id from the alert record
             # For v1, we use a deferred approach: UI polls or subscribes to WebSocket
             # and receives backfill on connect
-            alerts_hub = app.state.alerts_hub
+            _alerts_hub = app.state.alerts_hub
             # TODO: Query alert from DB to get user_id and publish to hub
             log.debug("alert_notification", alert_id=notification.alert_id, status=notification.status)
 
@@ -219,12 +259,15 @@ async def lifespan(app: FastAPI):
 
     # Wire hard-cap auto-kill: when daily loss > RISK_DAILY_LOSS_CAP_INR the
     # kill-switch fires automatically (paper-safe — no real money at risk).
-    from pdp.risk.service import KillSwitchService as _KSS
+    from pdp.risk.service import KillSwitchService as _KSS  # noqa: N814
 
     _ks = _KSS()
 
     async def _auto_kill() -> None:
         await _ks.execute(get_session_maker(), order_router, {"trigger": "hard_cap_auto"})
+        _es = getattr(app.state, "event_service", None)
+        if _es is not None:
+            _es.emit_kill_switch("hard_cap_auto")
 
     portfolio_service.set_hard_cap_callback(_auto_kill, settings.RISK_DAILY_LOSS_CAP_INR)
 
@@ -245,10 +288,67 @@ async def lifespan(app: FastAPI):
         app.state.options_poller = None
         log.info("options_poller_disabled", live=settings.LIVE, has_credentials=bool(settings.DHAN_CLIENT_ID))
 
+    # Live event publisher — monitors manual positions + market, emits realtime events.
+    event_service = None
+    if settings.EVENTS_ENABLED:
+        from pdp.events.hub import EventsHub
+        from pdp.events.push import WebPushSender
+        from pdp.events.service import EventService
+        from pdp.events.store import EventStore
+
+        event_store = EventStore(mongo_db)
+        events_hub = EventsHub(store=event_store)
+        web_push_sender = WebPushSender(settings, get_session_maker())
+        app.state.events_hub = events_hub
+        app.state.event_store = event_store
+        app.state.web_push_sender = web_push_sender
+
+        event_service = EventService(
+            settings=settings,
+            engine=indicator_engine,
+            hub=events_hub,
+            store=event_store,
+            push_sender=web_push_sender,
+            session_maker=get_session_maker(),
+            adapter=app.state.dhan_adapter,
+            portfolio_service=portfolio_service,
+            journal_service=journal_service,
+            mongo_db=mongo_db,
+        )
+        app.state.event_service = event_service
+        await event_service.start()
+        options_hub.register_listener(event_service.on_chain)
+        _tr = getattr(app.state, "tick_router", None)
+        if _tr is not None:
+            _tr.event_service = event_service
+        # Wire ORDER_FILL events (task 11.1) and STRATEGY_SIGNAL (task 11.5)
+        orders_hub.register_fill_callback(event_service.on_order_fill)
+        strategy_host.set_event_service(event_service)
+        # Wire MARGIN_WARNING: emit when soft-cap % of daily loss cap is breached (task 11.4)
+        _soft_cap_pct = settings.RISK_SOFT_CAP_PCT / 100.0
+        _soft_cap_inr = settings.RISK_DAILY_LOSS_CAP_INR * _soft_cap_pct
+        _margin_warning_fired = False
+
+        def _check_margin_warning(daily_loss: float) -> None:
+            nonlocal _margin_warning_fired
+            if daily_loss >= _soft_cap_inr:
+                if not _margin_warning_fired:
+                    _margin_warning_fired = True
+                    event_service.emit_margin_warning(daily_loss, settings.RISK_DAILY_LOSS_CAP_INR)
+            else:
+                _margin_warning_fired = False  # re-arm if recovered
+
+        portfolio_service.set_margin_warning_callback(_check_margin_warning)
+        log.info("event_publisher_enabled")
+    else:
+        app.state.event_service = None
+
     try:
         yield
     finally:
         log.info("app_shutting_down")
+        if event_service is not None:
+            await event_service.stop()
         await journal_service.stop()
         await portfolio_service.stop()
         if tick_router_task is not None:
@@ -279,6 +379,8 @@ def create_app() -> FastAPI:
 
     from pdp.alerts.routes import router as alerts_router
     from pdp.alerts.ws import alerts_ws_router
+    from pdp.events.routes import events_ws_router
+    from pdp.events.routes import router as events_router
     from pdp.instruments.routes import router as instruments_router
     from pdp.journal.routes import router as journal_router
     from pdp.market.routes import router as market_router
@@ -292,9 +394,16 @@ def create_app() -> FastAPI:
     from pdp.positional.routes import router as positional_router
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
+    from pdp.backtest.routes import router as backtest_router
+    from pdp.jobs.routes import router as jobs_router
+    from pdp.jobs.ws import router as jobs_ws_router
+    from pdp.ml.routes import router as ml_router
+    from pdp.housekeeping.routes import router as housekeeping_router
 
     app.include_router(alerts_router)
     app.include_router(alerts_ws_router)
+    app.include_router(events_router)
+    app.include_router(events_ws_router)
     app.include_router(instruments_router)
     app.include_router(journal_router)
     app.include_router(market_router)
@@ -309,6 +418,11 @@ def create_app() -> FastAPI:
     app.include_router(risk_router)
     app.include_router(settings_router)
     app.include_router(strategy_router)
+    app.include_router(backtest_router)
+    app.include_router(jobs_router, prefix="/api/v1/jobs", tags=["Jobs"])
+    app.include_router(jobs_ws_router, prefix="/ws/jobs", tags=["Jobs WS"])
+    app.include_router(ml_router, prefix="/api/v1/ml", tags=["ML"])
+    app.include_router(housekeeping_router, prefix="/api/v1/housekeeping", tags=["Housekeeping"])
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

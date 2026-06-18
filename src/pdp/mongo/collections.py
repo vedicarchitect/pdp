@@ -15,8 +15,10 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_expired_option_bars(db)
     await _ensure_option_bars(db)
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
+    await _ensure_oi_snapshots(db)
     await _ensure_portfolio_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
+    await _ensure_events(db, settings.EVENTS_TTL_DAYS)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -125,6 +127,27 @@ async def _ensure_option_chains(
     )
 
 
+async def _ensure_oi_snapshots(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Time-series store for intraday ATM-relative OI snapshots (every ~5 min).
+
+    One document per (symbol, snapshot) carrying the ATM +/- N strikes' CE/PE OI plus the
+    events derived against the morning baseline. metadata = underlying symbol + expiry so a
+    whole day's series for one index reads back in time order.
+    """
+    try:
+        await db.create_collection(
+            "oi_snapshots",
+            timeseries={
+                "timeField": "ts",
+                "metaField": "metadata",
+                "granularity": "minutes",
+            },
+        )
+        log.info("mongo_collection_created", collection="oi_snapshots")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="oi_snapshots")
+
+
 async def _ensure_portfolio_snapshots(db: AsyncIOMotorDatabase, ttl_days: int = 90) -> None:  # type: ignore[type-arg]
     try:
         await db.create_collection("portfolio_snapshots")
@@ -158,6 +181,33 @@ async def _ensure_positional_eod_snapshots(db: AsyncIOMotorDatabase) -> None:  #
     )
 
 
+async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # type: ignore[type-arg]
+    """Realtime monitoring events emitted by the event-publisher (TTL-expired)."""
+    try:
+        await db.create_collection("events")
+        log.info("mongo_collection_created", collection="events")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="events")
+
+    await db["events"].create_index(
+        [("ts", DESCENDING)],
+        name="idx_ts_desc",
+    )
+    await db["events"].create_index(
+        [("ts", ASCENDING)],
+        expireAfterSeconds=ttl_days * 86400,
+        name="ttl_ts",
+    )
+    await db["events"].create_index(
+        [("security_id", ASCENDING), ("event_type", ASCENDING), ("ts", DESCENDING)],
+        name="idx_sid_type_ts",
+    )
+
+
+def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["events"]
+
+
 def get_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["market_bars"]
 
@@ -176,3 +226,7 @@ def get_chains_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  
 
 def get_positional_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["positional_eod_snapshots"]
+
+
+def get_oi_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["oi_snapshots"]

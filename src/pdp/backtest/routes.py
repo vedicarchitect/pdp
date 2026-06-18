@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import and_, desc, select
 
 from pdp.backtest.models import BacktestDaily, BacktestRun, BacktestTrade
+from pdp.backtest.options_replay import OptionsReplayEngine
+from pdp.backtest.options_strategy import OptionsStrategyConfig
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/api/backtests", tags=["backtests"])
+router = APIRouter(prefix="/api/v1/backtests", tags=["backtests"])
 
 
 @router.get("")
@@ -162,4 +164,46 @@ async def get_backtest_daily(
             }
             for daily in dailies
         ],
+    }
+
+
+@router.post("/run")
+async def run_backtest(request: Request, config: OptionsStrategyConfig) -> dict:
+    """Run an options strategy backtest synchronously and return results.
+
+    Date ranges exceeding 90 days are rejected; use the async job runner
+    for large backtests once it supports this endpoint.
+    """
+    from_date: date = config.date_range.from_
+    to_date: date = config.date_range.to
+    delta_days = (to_date - from_date).days
+    if delta_days > 90:
+        raise HTTPException(
+            status_code=400,
+            detail="Date range exceeds 90 days. Use async job runner for large backtests.",
+        )
+
+    mongo_db = request.app.state.mongo_db
+    engine = OptionsReplayEngine(mongo_db)
+    result = engine.run(config)
+
+    return {
+        "config_name": result.config_name,
+        "date_range": {
+            "from": result.date_range[0].isoformat(),
+            "to": result.date_range[1].isoformat(),
+        },
+        "summary": {
+            "total_pnl": result.total_pnl,
+            "total_trades": result.total_trades,
+            "win_rate": result.win_rate,
+            "max_drawdown": result.max_drawdown,
+            "max_drawdown_pct": result.max_drawdown_pct,
+            "sharpe_ratio": result.sharpe_ratio,
+            "commissions_total": result.commissions_total,
+        },
+        "equity_curve": result.equity_curve,
+        "daily_pnl": result.daily_pnl,
+        "weekday_stats": result.weekday_stats,
+        "trade_log": result.trade_log,
     }

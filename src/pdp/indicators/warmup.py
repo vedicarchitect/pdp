@@ -137,17 +137,20 @@ async def _warm_one(
     if not engine._suite_trackers.get((security_id, timeframe)):
         log.debug("indicator_warmup_suite_not_configured", security_id=security_id, timeframe=timeframe)
 
+    # Seed period_levels (PWH/PWL/PMH/PML) from the trailing ~40 days that predate
+    # the prior-session bars below, so week/month boundaries are correct on day one.
+    history = await _fetch_history_before(col, security_id, timeframe, since, days=40)
+    if history:
+        engine.seed_period_levels_history(security_id, timeframe, history)
+
     fed = engine.seed_from_bars(bars)
 
     # Derive prior-session HLC for PivotTrackers in the suite bundle.
-    # Bars are from prior_day 09:15 UTC onwards; their high/low/close give the prior HLC.
-    key = (security_id, timeframe)
-    bundle = engine._suite_trackers.get(key)
-    if bundle and "pivots" in bundle and bars:
+    if bars:
         prior_h = max(float(b.high) for b in bars)
         prior_l = min(float(b.low) for b in bars)
         prior_c = float(bars[-1].close)
-        bundle["pivots"].seed_prior_hlc(prior_h, prior_l, prior_c, prior_day)
+        engine.seed_prior_session_pivots(security_id, timeframe, prior_h, prior_l, prior_c, prior_day)
 
     log.info(
         "indicator_warmup_done",
@@ -180,6 +183,46 @@ async def _fetch_from_mongo(
                     security_id=security_id,
                     timeframe=timeframe,
                     bar_time=doc["ts"].replace(tzinfo=UTC) if doc["ts"].tzinfo is None else doc["ts"],
+                    open=Decimal(str(doc["open"])),
+                    high=Decimal(str(doc["high"])),
+                    low=Decimal(str(doc["low"])),
+                    close=Decimal(str(doc["close"])),
+                    volume=int(doc.get("volume", 0)),
+                    oi=int(doc.get("oi", 0)),
+                )
+            )
+        except Exception:  # noqa: S112
+            continue
+    bars.sort(key=lambda b: b.bar_time)
+    return bars
+
+
+async def _fetch_history_before(
+    col,
+    security_id: str,
+    timeframe: str,
+    before: datetime,
+    days: int,
+) -> list[BarClosed]:
+    """Fetch bars in ``[before - days, before)`` for period-level seeding (Mongo only)."""
+    lower = before - timedelta(days=days)
+    cursor = col.find(
+        {
+            "metadata.security_id": security_id,
+            "metadata.timeframe": timeframe,
+            "ts": {"$gte": lower, "$lt": before},
+        },
+        sort=[("ts", 1)],
+    )
+    bars: list[BarClosed] = []
+    async for doc in cursor:
+        try:
+            ts = doc["ts"].replace(tzinfo=UTC) if doc["ts"].tzinfo is None else doc["ts"]
+            bars.append(
+                BarClosed(
+                    security_id=security_id,
+                    timeframe=timeframe,
+                    bar_time=ts,
                     open=Decimal(str(doc["open"])),
                     high=Decimal(str(doc["high"])),
                     low=Decimal(str(doc["low"])),

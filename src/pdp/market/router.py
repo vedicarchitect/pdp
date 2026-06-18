@@ -12,6 +12,7 @@ from pdp.market.models import Tick
 
 if TYPE_CHECKING:
     from pdp.alerts.evaluator import AlertEvaluator
+    from pdp.events.service import EventService
     from pdp.indicators.engine import IndicatorEngine
     from pdp.market.bar_writer import BarWriter
     from pdp.market.bars import BarAggregator
@@ -42,6 +43,7 @@ class TickRouter:
         strategy_host: StrategyHost | None = None,
         alert_evaluator: AlertEvaluator | None = None,
         indicator_engine: IndicatorEngine | None = None,
+        event_service: EventService | None = None,
     ) -> None:
         self._running = False
         self._bar_aggregator = bar_aggregator
@@ -50,6 +52,8 @@ class TickRouter:
         self._strategy_host = strategy_host
         self._alert_evaluator = alert_evaluator
         self._indicator_engine = indicator_engine
+        # Set post-construction in main.py lifespan once positions/portfolio exist.
+        self.event_service = event_service
 
     async def run(self, queue: asyncio.Queue[Tick], redis: Redis) -> None:
         self._running = True
@@ -96,6 +100,10 @@ class TickRouter:
             from decimal import Decimal
             self._alert_evaluator.evaluate_price(sid, Decimal(str(tick.ltp)))
 
+        # 2.6 — event publisher LTP cache (O(1); position detectors run on a timer)
+        if self.event_service is not None:
+            self.event_service.on_tick(sid, float(tick.ltp))
+
         # 3+4+5+6 — bar aggregation, persistence, WS, and Redis streams
         if self._bar_aggregator is not None:
             closed_bars = self._bar_aggregator.push(tick)
@@ -134,6 +142,47 @@ class TickRouter:
                                 json.dumps(_snap_d),
                                 ex=900,
                             )
+
+                # 6c — ML inference (after on_bar caching; reuses computed snapshot; non-blocking)
+                if self._indicator_engine is not None:
+                    try:
+                        from pdp.ml.infer import infer_all
+                        _prev_bar = getattr(self, "_prev_bars", {}).get((bar.security_id, bar.timeframe))
+                        ml_results = infer_all(
+                            bar.security_id,
+                            bar.timeframe,
+                            bar,
+                            self._indicator_engine.get_snapshot(bar.security_id, bar.timeframe),
+                            self._indicator_engine.get(bar.security_id, bar.timeframe),
+                            prev_bar=_prev_bar,
+                        )
+                        if ml_results:
+                            import json as _json
+                            for head, ml_state in ml_results.items():
+                                await redis.set(
+                                    f"ml:{bar.security_id}:{bar.timeframe}:{head}",
+                                    _json.dumps({
+                                        "argmax": ml_state.argmax,
+                                        "probs": ml_state.probs,
+                                        "version": ml_state.version,
+                                        "bar_time": bar.bar_time.isoformat(),
+                                    }),
+                                    ex=900,
+                                )
+                            # Store the primary directional signal in the engine for strategy access
+                            primary = ml_results.get("directional")
+                            if primary is not None:
+                                self._indicator_engine.set_ml_signal(bar.security_id, bar.timeframe, primary)
+                        # Keep the previous bar for slope features
+                        if not hasattr(self, "_prev_bars"):
+                            self._prev_bars: dict = {}
+                        self._prev_bars[(bar.security_id, bar.timeframe)] = bar
+                    except Exception as _ml_exc:
+                        log.debug("ml_infer_skipped", exc=str(_ml_exc))
+
+                # 6d — event publisher detectors (uses engine snapshot + ml cached above)
+                if self.event_service is not None:
+                    self.event_service.on_bar(bar)
 
                 # 7b — strategy host bar dispatch
                 if self._strategy_host is not None:

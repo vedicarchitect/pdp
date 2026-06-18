@@ -17,6 +17,7 @@ New surface:
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -25,9 +26,15 @@ from pdp.indicators.snapshot import Snapshot
 from pdp.indicators.supertrend import SuperTrendState, SuperTrendTracker
 
 if TYPE_CHECKING:
+    from pdp.indicators.candlestick import CandlestickState
+    from pdp.indicators.elder_impulse import ElderImpulseState
+    from pdp.indicators.elliott import ElliottWaveState
     from pdp.indicators.ema import EMAState
+    from pdp.indicators.fib_levels import FibLevelsState
     from pdp.indicators.fvg import FVGState
+    from pdp.indicators.macd import MACDState
     from pdp.indicators.market_profile import MarketProfileState
+    from pdp.indicators.period_levels import PeriodLevelsState
     from pdp.indicators.pivots import PivotState
     from pdp.indicators.psar import ParabolicSARState
     from pdp.indicators.rsi import RSIState
@@ -41,7 +48,8 @@ log = structlog.get_logger()
 # Snapshot field names that correspond to indicator family names
 _SUITE_FAMILIES = frozenset({
     "ema", "rsi", "psar", "vwap", "vwma",
-    "pivots", "fvg", "volume_profile", "market_profile",
+    "pivots", "period_levels", "fvg", "volume_profile", "market_profile",
+    "macd", "candlestick", "elliott", "fib_levels", "elder_impulse",
 })
 
 
@@ -62,6 +70,8 @@ class IndicatorEngine:
         # Suite: per-(sid, tf) bundle of family trackers
         self._suite_trackers: dict[tuple[str, str], dict[str, Any]] = {}
         self._snapshots: dict[tuple[str, str], Snapshot] = {}
+        # ML signal cache: populated by the ML inference layer after on_bar
+        self._ml_signals: dict[tuple[str, str], Any] = {}
 
     # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -146,6 +156,40 @@ class IndicatorEngine:
             count += 1
         return count
 
+    def seed_prior_session_pivots(
+        self,
+        security_id: str,
+        timeframe: str,
+        prior_high: float,
+        prior_low: float,
+        prior_close: float,
+        prior_day: date | None = None,
+    ) -> None:
+        """Seed the PivotTracker with the prior session's HLC at warmup time."""
+        bundle = self._suite_trackers.get((security_id, timeframe))
+        if bundle and "pivots" in bundle:
+            bundle["pivots"].seed_prior_hlc(prior_high, prior_low, prior_close, prior_day)
+
+    def seed_period_levels_history(
+        self,
+        security_id: str,
+        timeframe: str,
+        bars: list[BarClosed],
+    ) -> None:
+        """Replay older bars (strictly before the warmup session) through the
+        ``period_levels`` tracker only, so PWH/PWL/PMH/PML are seeded from the
+        trailing week/month before the live session starts.
+
+        Bars MUST be chronologically ordered and predate the prior-session bars
+        fed via ``seed_from_bars`` to keep boundary detection monotonic.
+        """
+        bundle = self._suite_trackers.get((security_id, timeframe))
+        if not bundle or "period_levels" not in bundle:
+            return
+        tracker = bundle["period_levels"]
+        for bar in bars:
+            tracker.update(float(bar.high), float(bar.low), float(bar.close), 0.0, bar.bar_time)
+
     # ── Suite getters ─────────────────────────────────────────────────────────
 
     def get_snapshot(self, security_id: str, timeframe: str) -> Snapshot | None:
@@ -175,6 +219,10 @@ class IndicatorEngine:
         snap = self._snapshots.get((security_id, timeframe))
         return snap.pivots if snap is not None else None
 
+    def get_period_levels(self, security_id: str, timeframe: str) -> PeriodLevelsState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.period_levels if snap is not None else None
+
     def get_fvg(self, security_id: str, timeframe: str) -> FVGState | None:
         snap = self._snapshots.get((security_id, timeframe))
         return snap.fvg if snap is not None else None
@@ -186,3 +234,31 @@ class IndicatorEngine:
     def get_market_profile(self, security_id: str, timeframe: str) -> MarketProfileState | None:
         snap = self._snapshots.get((security_id, timeframe))
         return snap.market_profile if snap is not None else None
+
+    def get_macd(self, security_id: str, timeframe: str) -> MACDState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.macd if snap is not None else None
+
+    def get_candlestick(self, security_id: str, timeframe: str) -> CandlestickState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.candlestick if snap is not None else None
+
+    def get_elliott(self, security_id: str, timeframe: str) -> ElliottWaveState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.elliott if snap is not None else None
+
+    def get_fib_levels(self, security_id: str, timeframe: str) -> FibLevelsState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.fib_levels if snap is not None else None
+
+    def get_elder_impulse(self, security_id: str, timeframe: str) -> ElderImpulseState | None:
+        snap = self._snapshots.get((security_id, timeframe))
+        return snap.elder_impulse if snap is not None else None
+
+    def get_ml_signal(self, security_id: str, timeframe: str) -> Any:
+        """Return the cached MLSignalState for (sid, tf), or None if no model is loaded."""
+        return self._ml_signals.get((security_id, timeframe))
+
+    def set_ml_signal(self, security_id: str, timeframe: str, signal: Any) -> None:
+        """Cache an MLSignalState produced by the ML inference layer."""
+        self._ml_signals[(security_id, timeframe)] = signal

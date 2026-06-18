@@ -15,9 +15,15 @@
 | `vwap.py` | `VWAPTracker` / `VWAPState` — running ΣPV/ΣV, session-reset at session date boundary. |
 | `vwma.py` | `VWMATracker` / `VWMAState` — rolling window ΣPV/ΣV via ring buffer. |
 | `pivots.py` | `PivotTracker` / `PivotState` — standard/Camarilla/Fibonacci levels from prior HLC. |
+| `period_levels.py` | `PeriodLevelsTracker` / `PeriodLevelsState` — previous-day/week/month high-low (PDH/PDL, PWH/PWL, PMH/PML); frozen at day/ISO-week/month boundary; seeded from trailing ~40d of `market_bars` via `engine.seed_period_levels_history`. |
 | `fvg.py` | `FVGTracker` / `FVGState` — 3-bar gap detection + fill tracking. |
 | `volume_profile.py` | `VolumeProfileTracker` / `VolumeProfileState` — POC/VAH/VAL (opt-in). |
 | `market_profile.py` | `MarketProfileTracker` / `MarketProfileState` — TPO per session (opt-in). |
+| `macd.py` | `MACDTracker` / `MACDState` — fast/slow EMA lines + signal EMA + histogram (default 12/26/9). |
+| `candlestick.py` | `CandlestickTracker` / `CandlestickState` — per-bar single/multi-bar pattern detection (doji, hammer, shooting-star, engulfing, harami, morning/evening star, marubozu) + bullish/bearish/neutral signal code. |
+| `elliott.py` | `ElliottWaveTracker` / `ElliottWaveState` — ZigZag swing-pivot detection + heuristic 1–5/A–B–C wave labeler with confidence score. Heuristic and feature-only. |
+| `fib_levels.py` | `FibLevelsTracker` / `FibLevelsState` — retracements (0.236/0.382/0.5/0.618/0.786) and extensions (1.272/1.618/2.0) from the latest swing leg; nearest level + signed distance. Distinct from `pivots.py` Fibonacci pivot levels. |
+| `elder_impulse.py` | `ElderImpulseTracker` / `ElderImpulseState` — 13-EMA slope × MACD-histogram slope → green/red/blue regime; depends on `MACDTracker`. |
 | `__init__.py` | Exports `IndicatorEngine`, `Snapshot`, `SuperTrendState`. |
 
 ## Rules

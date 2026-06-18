@@ -14,6 +14,8 @@ See [README.md](README.md) for full arg reference.
 | `task audit:coverage` | `audit_options_coverage.py` | Coverage gap audit by date+strike |
 | `task validate:warehouse` | `validate_options_warehouse.py` | Integrity: missing days, bad prices, OI |
 | `task validate:migration` | `verify_nifty_migration.py` | Verify Abi → MongoDB completeness |
+| `task expiry` | `expiry_analysis.py` | Read-only expiry analysis (NIFTY+BANKNIFTY+SENSEX, max-pain/PCR/VIX/OI walls). `--symbol --expiry` |
+| `task oi:track` | `expiry_analysis.py --track` | OI snapshot tracker, ATM±N vs morning baseline → JSONL (always) + Mongo `oi_snapshots` TS + Redis `oi:{sym}`/`oi.events.{sym}`. `--strikes --interval --event-threshold-pct --store mongo,redis\|none` |
 | `task monitor` | `monitor.pl` | Perl live monitor (read-only Redis+API) |
 | `task reset-paper` | `reset_paper.py` | ⚠️ Clears paper orders/trades/positions from PG |
 

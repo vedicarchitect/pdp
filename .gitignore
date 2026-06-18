@@ -49,3 +49,7 @@ frontend/dist/
 .claude/settings.local.json
 pdp.code-workspace
 backtest/mutliplerunschecklog.txt
+test-results/
+frontend/test-results/
+scratch.py
+scratch2.py

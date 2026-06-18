@@ -13,14 +13,19 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-# Supported timeframes: label → window in minutes (60 = 1H)
+# Supported timeframes: label → window in minutes (60 = 1H).
+# "1D" uses IST calendar-day boundaries, not minute intervals.
 _TIMEFRAMES: dict[str, int] = {
     "1m": 1,
     "5m": 5,
     "15m": 15,
     "30m": 30,
     "1H": 60,
+    "1D": -1,  # sentinel: handled by _bar_boundary_1d
 }
+
+# IST = UTC+5:30
+_IST_OFFSET_MINUTES = 5 * 60 + 30
 
 # Maximum seconds ltt can lead ts_recv before we fall back to ts_recv
 _MAX_LTT_LEAD_S = 2.0
@@ -48,6 +53,20 @@ def _bar_boundary(dt: datetime, tf_minutes: int) -> datetime:
     return epoch + timedelta(minutes=truncated_minutes)
 
 
+def _bar_boundary_1d(dt: datetime) -> datetime:
+    """Return the IST calendar-day start (in UTC) for a given UTC datetime.
+
+    IST midnight = UTC 18:30 the previous calendar day. All NSE session bars
+    from ~03:45 UTC to ~10:00 UTC share the same IST date and are placed in the
+    same 1D bucket.
+    """
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    total_minutes = int(dt.timestamp() // 60) + _IST_OFFSET_MINUTES
+    ist_day_start_min = (total_minutes // (24 * 60)) * (24 * 60)
+    utc_day_start_min = ist_day_start_min - _IST_OFFSET_MINUTES
+    return epoch + timedelta(minutes=utc_day_start_min)
+
+
 class BarBuilder:
     """Accumulates ticks for one (security_id, timeframe) into OHLCV bars."""
 
@@ -55,6 +74,7 @@ class BarBuilder:
         "_bar_time",
         "_close",
         "_high",
+        "_is_daily",
         "_low",
         "_oi",
         "_open",
@@ -68,6 +88,7 @@ class BarBuilder:
         self.security_id = security_id
         self.timeframe = timeframe
         self._tf_minutes = _TIMEFRAMES[timeframe]
+        self._is_daily = timeframe == "1D"
         self._bar_time: datetime | None = None
         self._open = self._high = self._low = self._close = Decimal("0")
         self._volume = 0
@@ -89,7 +110,11 @@ class BarBuilder:
         else:
             effective_dt = tick.ltt if tick.ltt.tzinfo else tick.ltt.replace(tzinfo=UTC)
 
-        boundary = _bar_boundary(effective_dt, self._tf_minutes)
+        boundary = (
+            _bar_boundary_1d(effective_dt)
+            if self._is_daily
+            else _bar_boundary(effective_dt, self._tf_minutes)
+        )
 
         closed_bar: BarClosed | None = None
 

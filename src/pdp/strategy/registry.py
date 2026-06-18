@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any  # noqa: F401 (Any used in WatchlistEntry.indicators)
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -11,11 +11,19 @@ if TYPE_CHECKING:
     from pdp.strategy.abc import Strategy
 
 
+class MLSignalConfig(BaseModel):
+    """Opt-in ML signal configuration for a watchlist entry."""
+    enabled: bool = False
+    version: str = ""          # artifact version to serve; empty = use ML_ACTIVE_VERSION
+    head: str = "directional"  # "directional" or "expiry"
+
+
 class WatchlistEntry(BaseModel):
     security_id: str
     exchange_segment: str
     timeframes: list[str]
     indicators: list[dict[str, Any]] = []
+    ml_signal: MLSignalConfig = MLSignalConfig()
 
 
 class RiskConfig(BaseModel):

@@ -133,7 +133,7 @@ class IndicatorCache:
     def _ema(prices: list, period: int) -> list:
         """Exponential Moving Average."""
         ema = []
-        multiplier = 2 / (period + 1)
+        multiplier = Decimal("2") / Decimal(period + 1)
 
         for i in range(len(prices)):
             if i < period - 1:
@@ -142,7 +142,7 @@ class IndicatorCache:
                 sma = sum(prices[:period]) / period
                 ema.append(sma)
             else:
-                ema_val = prices[i] * multiplier + ema[-1] * (1 - multiplier)
+                ema_val = prices[i] * multiplier + ema[-1] * (Decimal("1") - multiplier)
                 ema.append(ema_val)
         return ema
 

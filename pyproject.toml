@@ -27,6 +27,8 @@ dependencies = [
     "asyncpg>=0.31.0",
     "py-vollib-vectorized>=0.1.1",
     "rich>=13.7",
+    "lightgbm>=4.3",
+    "pywebpush>=2.0",
 ]
 
 [project.optional-dependencies]
