@@ -91,6 +91,8 @@ export default function Sidebar() {
       {/* Mobile Hamburger Button */}
       <button 
         onClick={toggleMobile}
+        aria-label="Open mobile menu"
+        aria-expanded={mobileOpen}
         className="md:hidden fixed top-4 left-4 z-50 p-2 bg-surface rounded-md border border-surface-border shadow-sm text-text-main"
       >
         <Menu size={20} />
@@ -127,6 +129,7 @@ export default function Sidebar() {
           
           <button 
             onClick={toggleCollapse}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             className="hidden md:flex p-1.5 rounded-md hover:bg-surface-hover text-text-muted hover:text-text-main transition-colors"
           >
             {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
@@ -134,6 +137,7 @@ export default function Sidebar() {
           
           <button 
             onClick={closeMobile}
+            aria-label="Close mobile menu"
             className="md:hidden p-1.5 rounded-md hover:bg-surface-hover text-text-muted hover:text-text-main"
           >
             <X size={18} />
