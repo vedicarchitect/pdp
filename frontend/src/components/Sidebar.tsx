@@ -92,6 +92,7 @@ export default function Sidebar() {
       <button 
         onClick={toggleMobile}
         className="md:hidden fixed top-4 left-4 z-50 p-2 bg-surface rounded-md border border-surface-border shadow-sm text-text-main"
+        aria-label="Toggle mobile menu"
       >
         <Menu size={20} />
       </button>
@@ -128,6 +129,7 @@ export default function Sidebar() {
           <button 
             onClick={toggleCollapse}
             className="hidden md:flex p-1.5 rounded-md hover:bg-surface-hover text-text-muted hover:text-text-main transition-colors"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
           </button>
@@ -135,6 +137,7 @@ export default function Sidebar() {
           <button 
             onClick={closeMobile}
             className="md:hidden p-1.5 rounded-md hover:bg-surface-hover text-text-muted hover:text-text-main"
+            aria-label="Close mobile menu"
           >
             <X size={18} />
           </button>

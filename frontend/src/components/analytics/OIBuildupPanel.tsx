@@ -88,6 +88,7 @@ export function OIBuildupPanel({ underlying }: Props) {
                       onClick={() => setSelectedLeg({ id: s.ce.security_id || `${underlying}_${s.strike}_CE`, side: "BUY" })}
                       className="opacity-0 group-hover:opacity-100 transition-opacity text-primary hover:text-bullish"
                       title="Buy Call"
+                      aria-label="Buy Call"
                     >
                       <ShoppingCart className="w-3 h-3" />
                     </button>
@@ -122,6 +123,7 @@ export function OIBuildupPanel({ underlying }: Props) {
                       onClick={() => setSelectedLeg({ id: s.pe.security_id || `${underlying}_${s.strike}_PE`, side: "BUY" })}
                       className="opacity-0 group-hover:opacity-100 transition-opacity text-primary hover:text-bullish"
                       title="Buy Put"
+                      aria-label="Buy Put"
                     >
                       <ShoppingCart className="w-3 h-3" />
                     </button>
