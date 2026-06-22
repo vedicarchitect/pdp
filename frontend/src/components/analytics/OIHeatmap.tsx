@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   LineChart,
@@ -94,6 +94,20 @@ export function OIHeatmap({ underlying, expiry }: Props) {
     pcr: snap.pcr,
   }))
 
+  // Bolt: Performance optimization
+  // Pre-compute an O(1) lookup structure for the render loop to avoid
+  // O(N*M*K) bottlenecks caused by Array.prototype.find() in the nested render map.
+  // This Map relates [snapshotIndex] -> [strike] -> total_oi
+  const snapStrikeOIMap = useMemo(() => {
+    const map = new Map<number, Map<number, number>>()
+    snapshots.forEach((snap, ci) => {
+      const strikeMap = new Map<number, number>()
+      snap.strikes.forEach(s => strikeMap.set(s.strike, s.total_oi))
+      map.set(ci, strikeMap)
+    })
+    return map
+  }, [snapshots])
+
   return (
     <div className="flex flex-col gap-4">
       {/* Heatmap */}
@@ -122,8 +136,7 @@ export function OIHeatmap({ underlying, expiry }: Props) {
                 {strike}
               </div>
               {snapshots.map((snap, ci) => {
-                const s = snap.strikes.find((x) => x.strike === strike)
-                const oi = s?.total_oi ?? 0
+                const oi = snapStrikeOIMap.get(ci)?.get(strike) ?? 0
                 const opacity = oi / colMaxOI[ci]
                 return (
                   <div
