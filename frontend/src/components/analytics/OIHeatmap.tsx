@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   LineChart,
@@ -78,21 +78,31 @@ export function OIHeatmap({ underlying, expiry }: Props) {
   const { snapshots } = data
   if (snapshots.length === 0) return <PaperModePlaceholder />
 
-  // Collect all strikes sorted descending for rows
-  const allStrikes = Array.from(
-    new Set(snapshots.flatMap((s) => s.strikes.map((x) => x.strike)))
-  ).sort((a, b) => b - a)
+  // Memoize derived data and create O(1) lookup maps
+  const { allStrikes, colMaxOI, pcrData, snapshotMaps } = useMemo(() => {
+    const strikes = Array.from(
+      new Set(snapshots.flatMap((s) => s.strikes.map((x) => x.strike)))
+    ).sort((a, b) => b - a)
 
-  // Per-column max OI for normalisation
-  const colMaxOI = snapshots.map((snap) =>
-    snap.strikes.reduce((m, s) => Math.max(m, s.total_oi), 1)
-  )
+    const maxOIs = snapshots.map((snap) =>
+      snap.strikes.reduce((m, s) => Math.max(m, s.total_oi), 1)
+    )
 
-  // PCR line data
-  const pcrData = snapshots.map((snap) => ({
-    ts: formatTs(snap.ts),
-    pcr: snap.pcr,
-  }))
+    const pcrs = snapshots.map((snap) => ({
+      ts: formatTs(snap.ts),
+      pcr: snap.pcr,
+    }))
+
+    const maps = snapshots.map(snap => {
+      const map = new Map<number, OIStrike>()
+      for (const s of snap.strikes) {
+        map.set(s.strike, s)
+      }
+      return map
+    })
+
+    return { allStrikes: strikes, colMaxOI: maxOIs, pcrData: pcrs, snapshotMaps: maps }
+  }, [snapshots])
 
   return (
     <div className="flex flex-col gap-4">
@@ -122,7 +132,7 @@ export function OIHeatmap({ underlying, expiry }: Props) {
                 {strike}
               </div>
               {snapshots.map((snap, ci) => {
-                const s = snap.strikes.find((x) => x.strike === strike)
+                const s = snapshotMaps[ci].get(strike)
                 const oi = s?.total_oi ?? 0
                 const opacity = oi / colMaxOI[ci]
                 return (
