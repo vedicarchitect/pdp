@@ -1,0 +1,72 @@
+Rules for selling
+
+VIX not spike > 5% for the day 
+VIX should not be at day high
+VIX should not increase in the last 3 5m candles, it should be decreasing or stable for 15
+
+1 hour alignment
+ - if price above 50 ema, emas are aligned 9,20,50 its bullish bias
+ - if price below 50 ema, emas are aligned 9,20,50 its bearish bias
+
+15 min alignment
+ - if price above 50 ema, emas are aligned 9,20,50 its bullish bias
+ - if price below 50 ema, emas are aligned 9,20,50 its bearish bias
+
+5 min 
+ - price should be above 50 ema for bullish bias
+ - price should be below 50 ema for bearish bias
+ 
+ Camrilla pivot Daily
+  - if price break above R3 or R4 with candle close above it then bias is bullish
+  - if price break below R3 or R4 with candle close below it then bias is bearish
+
+Camrilla pivot Weekly
+  - if price break above R3 or R4 with candle close above it then bias is bullish
+  - if price break below R3 or R4 with candle close below it then bias is bearish
+
+Swing high & low
+ if price close above PDH,PWH then bullish
+ if price close below PDH,PWL then bearish
+
+Vwap 
+ - when vwap low is broken bearish
+ - when vwap high is broken bullish
+
+ ORB
+  - when 15m orb broken above by 15m candle then bullish
+  - when 15m orb broken below by 15m candle then bearish
+PCR 
+  if pcr above 1.1, then its bullish
+  if pcr below 0.9, then its bearish
+
+ Entry Rules:
+  - Additional Bearish entry allowed after R3 or R4 rejection or 50 ema or 20 ema or 9ema  with upper wick candle from above (resistance)
+  - Additional Bullish entry allowed after S3 or S4 breakout or 50 ema or 20 ema or 9ema  with lower wick candle from below (support)
+ -  Entry after 10.15 1 hour candle complete  
+Adjustment or change of trend
+ - When 15m 50 ema broken or crossed 9ema and 20 ema in opposite direction then adjust or change of trend
+ - When 1h 50 ema broken or crossed 9ema and 20 ema in opposite direction then adjust or change of trend
+
+
+Option selling with directional strangle strategy:
+
+Based on bias, enter into option selling
+
+  Strike selection:
+   - if bullish bias is strong choose 0.6 delta and above based on bias strength or choose strikes near R3 or R4 or Supertrend resistance having premium more than 50 
+   - if bearish bias is strong choose 0.6 delta and above based on bias strength or choose strikes near S3 or S4 or Supertrend support having premium more than 50 
+   Based on bullish and bearish, after 1 hour candle complete, create strangle - 
+   - if more bullish prefer sell more pe and less ce 3 pe: 2ce
+    -most bullish 4pe:2ce
+
+   Complete bullish - sell ATM pe - 5pe
+   Bearish
+   - most bearish 2pe:4ce
+   - more bearish 2pe:3ce
+   complete bearish - sell ATM ce - 5ce
+
+   Rollup - when premium < 20
+   Exit when trend getting strong one side and when premium is doubled or major support or resistance broken
+
+   Exit when loss > 15000 for the day
+   

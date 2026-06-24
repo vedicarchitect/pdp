@@ -9,8 +9,28 @@ and version-controlled config files. The Python package lives in `src/pdp/backte
 |------|------|
 | `run.py` | Single entry point: single-config per-trade detail OR grid sweep |
 | `compare.py` | Replay one day, compare vs paper journal (side-by-side, no DB writes) |
+| `strangle_run.py` | **Directional-strangle** multi-year runner — loads spot+chains+VIX once, replays per day; `--hedge/--no-hedge`, `--trace` |
 | `configs/st10_15m_otm1.yaml` | **Default / promoted config** — ST(10,2)/15m/OTM1 |
 | `configs/st3_1_5m_otm1.yaml` | Legacy anchor baseline — ST(3,1)/5m/OTM1 (regression anchor) |
+| `configs/strangle_premium*.yaml` | Directional-strangle, premium-strike (naked + `_hedged` 2–5₹ wing) |
+| `configs/strangle_delta*.yaml` | Directional-strangle, delta-strike (naked + `_hedged`) |
+
+## Directional strangle (bias-driven option selling)
+
+Codifies `strategies/MultiTimeFrameSelling.txt`: a multi-timeframe weighted bias score →
+7 buckets → PE:CE sell-lot ratio, India-VIX gate, optional protective hedges. Shared bias
+engine in `src/pdp/signals/bias.py` (used by both backtest and the future live strategy).
+
+```bash
+task backtest:strangle -- --from 2026-05-01 --to 2026-06-23            # naked
+task backtest:strangle -- --config-file backtest/configs/strangle_premium_hedged.yaml
+task backtest:strangle -- --from 2026-05-01 --to 2026-06-23 --hedge    # force hedges on
+task backtest:strangle -- --start 2026-06-20 --days 3 --trace          # every-minute status
+```
+
+Data prerequisites (Mongo): NIFTY spot (sid 13) + options (`option_bars`) + India VIX
+(`task backfill:vix`, sid 21 — intraday history begins ~Aug-2021). Run `task audit:strangle`
+to confirm per-year coverage before a multi-year walk.
 
 ## How to run
 

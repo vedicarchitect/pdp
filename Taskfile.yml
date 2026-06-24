@@ -115,6 +115,11 @@ tasks:
     cmds:
       - uv run python scripts/backfill_expired_options.py {{.CLI_ARGS}}
 
+  backfill:vix:
+    desc: "Backfill India VIX 1m → market_bars. Args: -- --from YYYY-MM-DD [--to] [--vix-sid 21] [--resolve] [--only-missing] [--dry-run]"
+    cmds:
+      - uv run python scripts/backfill_vix.py {{.CLI_ARGS}}
+
   migrate:abi:
     desc: "Migrate NIFTY options Abi DuckDB → MongoDB option_bars. Args: -- --from YYYY-MM-DD --to YYYY-MM-DD"
     cmds:
@@ -126,6 +131,11 @@ tasks:
     desc: Audit option_bars coverage by date + strike (identifies gaps)
     cmds:
       - uv run python scripts/audit_options_coverage.py {{.CLI_ARGS}}
+
+  audit:strangle:
+    desc: "Per-year spot/options/VIX coverage for the strangle backtest. Args: -- --from YYYY-MM-DD [--to] [--vix-sid 21]"
+    cmds:
+      - uv run python scripts/audit_strangle_data.py {{.CLI_ARGS}}
 
   validate:warehouse:
     desc: Validate warehouse integrity — missing days, bad prices, OI anomalies
@@ -143,6 +153,11 @@ tasks:
     desc: "Backtest vs paper journal for a date. Args: -- [--date YYYY-MM-DD]"
     cmds:
       - uv run python backtest/compare.py {{.CLI_ARGS}}
+
+  backtest:strangle:
+    desc: "Directional-strangle backtest. Args: -- [--config-file PATH] [--days N | --from --to] [--trace] [--vix-sid 21]"
+    cmds:
+      - uv run python backtest/strangle_run.py {{.CLI_ARGS}}
 
   backtest:sweep:
     desc: "Multi-config parameter sweep — pass grid flags after --. Args: -- [--days N] [--st 10,2;3,1] [--tf 5,15,30] [--moneyness -1,0,1] [--no-commission] [--no-heal]"
