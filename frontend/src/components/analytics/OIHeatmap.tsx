@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   LineChart,
@@ -78,15 +78,30 @@ export function OIHeatmap({ underlying, expiry }: Props) {
   const { snapshots } = data
   if (snapshots.length === 0) return <PaperModePlaceholder />
 
-  // Collect all strikes sorted descending for rows
-  const allStrikes = Array.from(
-    new Set(snapshots.flatMap((s) => s.strikes.map((x) => x.strike)))
-  ).sort((a, b) => b - a)
+  // Pre-compute O(1) lookup for strikes to avoid O(N*M*K) find() in render loop
+  const { allStrikes, colMaxOI, strikeOIMap } = useMemo(() => {
+    const strikes = new Set<number>()
+    const maxOI = new Array<number>(snapshots.length)
+    const map = new Map<number, Map<number, number>>()
 
-  // Per-column max OI for normalisation
-  const colMaxOI = snapshots.map((snap) =>
-    snap.strikes.reduce((m, s) => Math.max(m, s.total_oi), 1)
-  )
+    snapshots.forEach((snap, ci) => {
+      let currentMax = 1
+      const snapMap = new Map<number, number>()
+      snap.strikes.forEach((s) => {
+        strikes.add(s.strike)
+        currentMax = Math.max(currentMax, s.total_oi)
+        snapMap.set(s.strike, s.total_oi)
+      })
+      maxOI[ci] = currentMax
+      map.set(ci, snapMap)
+    })
+
+    return {
+      allStrikes: Array.from(strikes).sort((a, b) => b - a),
+      colMaxOI: maxOI,
+      strikeOIMap: map,
+    }
+  }, [snapshots])
 
   // PCR line data
   const pcrData = snapshots.map((snap) => ({
@@ -122,8 +137,7 @@ export function OIHeatmap({ underlying, expiry }: Props) {
                 {strike}
               </div>
               {snapshots.map((snap, ci) => {
-                const s = snap.strikes.find((x) => x.strike === strike)
-                const oi = s?.total_oi ?? 0
+                const oi = strikeOIMap.get(ci)?.get(strike) ?? 0
                 const opacity = oi / colMaxOI[ci]
                 return (
                   <div
