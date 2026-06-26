@@ -24,8 +24,27 @@
 - [x] 3.4 Implement `strike_method=premium` (most-OTM strike with premium > floor; ATM at extreme buckets)
 - [ ] 3.5 Implement `strike_method=delta` (solve IV from premium, use `src/pdp/options/greeks.py` for 0.6Δ targeting) — _scaffolded; currently falls back to premium method, TODO to wire IV solve_
 - [ ] 3.6 Implement PCR per bar from `option_bars` OI (reuse `compute_pcr` in `src/pdp/options/analytics.py`) and join the VIX series per day — _consumed via `BiasInputs`; loader to populate (Phase 0/3)_
-- [x] 3.7 Implement exits: rollup (<20), take-profit (% credit), premium-doubled stop, trend-flip adjustment (bias sign flip), ₹15,000 daily-loss cap, session square-off
+- [x] 3.7 Implement exits: rollup (<20), take-profit (% credit), tiered premium stop, trend-flip adjustment (bias sign flip), ₹15,000 daily-loss cap, session square-off
+  - Tiered premium stop (`pct_stop_enabled`): 30% above entry → close half lots (`pct_stop_half`); 40% above entry → close all remaining (`pct_stop_all`). Replaced the 2x premium-doubled rule. 30-day result: Net +64,210 / PF 2.06 / Win 64% vs +8,589 / 1.13 / 52% before.
+  - Squareoff missing-price fix: `close_leg` now falls back to `_last_price(bars, ist_dt)` when `price_at` returns None (deep-OTM strikes with no bars near squareoff); final fallback ₹0.01 (expired worthless). Day 3 (2026-05-20) PE@23000 was the trigger — fixed +₹8.8k recovery.
 - [x] 3.7b Protective hedges (defined-risk spreads): per short leg, buy a far-OTM long in the [2,5]₹ band (else cheapest available wing); rides the leg lifecycle (open/roll/close); `--hedge/--no-hedge` runner override + `strangle_*_hedged.yaml` configs. A/B (May–Jun 2026): hedged PF 1.86 vs naked 1.45, MaxDD −29%.
+- [ ] 3.7c **PLANNED** — Stop-recovery re-entry gate (15m sustained below exit price)
+  - **Rule**: after `pct_stop_half` or `pct_stop_all` fires on a side, re-entry on that side is blocked until the stopped-out strike's premium comes back **below the stop-exit price and sustains there for ≥ 15 minutes** (= `ceil(15 / timeframe_min)` consecutive decision bars; default 3 × 5m). Rollup already handles premium-decay re-positioning when premium drops below 20, so no additional strike-hunting logic is needed during cooldown.
+  - **State**: `stop_gate: dict[str, dict]` keyed by opt_type `{"exit_px": float, "bars": list[Bar], "n_below": int}`. Captured in `manage_legs` **before** calling close helpers (so `leg.bars` is alive). Overwritten if a second stop fires on same side.
+  - **Tick loop** (every bar, before entry gate, for each `ot` in `stop_gate`):
+    ```
+    px = price_at(gate["bars"], ist_dt)   # stopped strike's live premium
+    if px is not None and px < gate["exit_px"]:
+        gate["n_below"] += 1
+        if gate["n_below"] >= ceil(15 / timeframe_min):
+            del stop_gate[ot]             # gate cleared — re-entry allowed
+    else:
+        gate["n_below"] = 0              # at/above exit_px → restart the 15m count
+    ```
+  - **Entry guard**: `"PE" not in stop_gate` / `"CE" not in stop_gate` checked per side independently before `open_leg`. Blocked side logs `stop_gate_wait:{ot}`. Ungated side opens normally per bias.
+  - **Cleanup**: `stop_gate.clear()` at squareoff — no carryover.
+  - **Known limitation (v1)**: if a roll fires on the remaining half after `pct_stop_half`, `gate["bars"]` points to the pre-roll strike. Acceptable — noted in code comment.
+  - Files: `src/pdp/backtest/strangle_sim.py`; `WAIT·GATE` tag in scratchpad `gen_daily_flow.py`.
 - [x] 3.8 Detailed every-minute status logging: `BarStatus`/`LegStatus` trace + `format_status_line` (score, each signal vote, VIX/PCR, legs LTP/MTM, day P&L, action)
 - [x] 3.9 Unit tests `tests/backtest/test_strangle_sim.py` — leg counts per bucket, gates, each exit path, status trace (10+ tests passing)
 
@@ -35,13 +54,21 @@
 - [x] 4.1b Create `src/pdp/backtest/strangle_loader.py` — multi-timeframe `BiasInputs` assembly (5m/15m/1h EMAs warmed 20 days, daily+weekly Camarilla, swing, VWAP, ORB, VIX); smoke-tested
 - [x] 4.2 Create `backtest/configs/strangle_premium.yaml` and `backtest/configs/strangle_delta.yaml`
 - [x] 4.3 Add Taskfile target `task backtest:strangle`
-- [ ] 4.4 Run the full audited window for both strike methods; confirm completion + sane metrics — _needs Phase-0 data_
+- [x] 4.4 `--dte-max N` CLI flag + `dte_max: int | None` in `StrangleConfig` — filter to DTE ≤ N calendar days before expiry (DTE 0 = expiry/Tue, DTE 1 = Mon; DTE 2 = Sun/non-trading so `--dte-max 1` is the operative 0DTE+1DTE filter). Applies per-day in the runner before `build_strangle_day`; skipped days counted in the skipped total.
+- [ ] 4.5 **IN PROGRESS** — 5-year full run with `--dte-max 1` (DTE 0+1 only): focuses on Monday+Tuesday sessions where theta decay is fastest and premium levels are still tradeable.
+
+## 4b. Run archival (extensive per-day logs + timing)
+
+- [x] 4b.1 `src/pdp/backtest/strangle_report.py` (`RunWriter`) — per-day status.log/trades.csv/legs.csv/day.json + run-level summary.csv/equity.csv/manifest.json with build/sim timing
+- [x] 4b.2 Wire `--out-dir` into `strangle_run.py` with quarter-chunked loading (multi-year runs don't hold all chains in RAM); git-ignore `backtest/runs/`
 
 ## 5. Walk-forward optimization (Phase 4 — go/no-go gate)
 
-- [ ] 5.1 Create `backtest/strangle_walkforward.py`: rolling IS/OOS split over the audited window; optimize weights/thresholds/strike params on IS only
-- [ ] 5.2 Report IS-vs-OOS PF/Sharpe/max-DD side by side; constrain free-parameter count (grouped weights)
-- [ ] 5.3 Produce the OOS report and record the decision (proceed to Phase 5 only if OOS is robustly profitable)
+- [x] 5.1 Create `backtest/strangle_walkforward.py`: rolling fixed-size IS window + sliding OOS; selects grouped params on IS only (day-data built once per fold, candidates are cheap re-sims)
+- [x] 5.2 Report IS-vs-OOS net/PF/Sharpe/maxDD per fold + stitched-OOS equity; grouped knobs (weight profile × aggressiveness × take-profit × hedge) keep free params low; `task backtest:strangle:wf`
+- [ ] 5.3 Run the optimizer over the full window and record the decision (proceed to Phase 5 only if stitched OOS is robustly profitable).
+  - Previous run (all-days, calmar objective, 16 folds IS=12m OOS=3m): stitched OOS net +314,953 / PF 1.11 / maxDD 195,593 / sharpe 0.47 / positive folds 12/16 → **REVIEW** (not PASS).
+  - Blocking issues: 4 losing OOS folds (folds 7,9,10,14) concentrated in 2024 trending-bull markets; shape/drawdown unacceptable even where net is positive. Next lever = DTE filter (0DTE+1DTE only) + stop-recovery gate (3.7c) before re-running OOS.
 
 ## 6. Paper strategy (Phase 5 — only if 5.3 passes)
 

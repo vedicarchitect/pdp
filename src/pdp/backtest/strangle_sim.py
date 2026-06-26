@@ -36,9 +36,23 @@ from pdp.backtest.sim import (
     select_strike,
 )
 from pdp.backtest.strangle_config import STRIKE_DELTA, StrangleConfig
-from pdp.signals.bias import BiasBucket, BiasInputs, BiasResult, score_bias
+from pdp.signals.bias import BiasBucket, BiasInputs, BiasResult, CamLevels, score_bias
 
 _EXTREME = (BiasBucket.COMPLETE_BULL, BiasBucket.COMPLETE_BEAR)
+
+
+def _last_price(bars: list, before_dt: datetime) -> float | None:
+    """Last close price at or before *before_dt* with no time-window limit.
+
+    Used as a fallback when ``price_at`` returns ``None`` (deep-OTM strikes that
+    stopped trading mid-session).  Scanning all bars is intentional: we want the
+    most recent traded price even if it is hours old.
+    """
+    best: float | None = None
+    for b in bars:
+        if b[0] <= before_dt:
+            best = b[4]   # close field
+    return best
 
 
 @dataclass
@@ -96,6 +110,10 @@ class BarStatus:
     votes: dict[str, int]  # per-signal conditions (-1/0/+1)
     pcr: float | None
     vix_now: float | None
+    cam_daily: CamLevels | None    # daily Camarilla R3/R4/S3/S4 (from prior session HLC)
+    cam_weekly: CamLevels | None   # weekly Camarilla R3/R4/S3/S4 (from prior week HLC)
+    orb_high: float | None         # 15m opening range high
+    orb_low: float | None          # 15m opening range low
     legs: list[LegStatus]
     day_pnl: float
     action: str            # what happened this bar: hold/entry/take_profit/roll/...
@@ -113,9 +131,20 @@ def format_status_line(s: BarStatus) -> str:
     vix = f"{s.vix_now:.2f}" if s.vix_now is not None else "-"
     pcr = f"{s.pcr:.2f}" if s.pcr is not None else "-"
     gate = " GATED" if s.gated else ""
+    # Camarilla + ORB levels — show actual values so rejections are auditable
+    dc = s.cam_daily
+    wc = s.cam_weekly
+    cam_str = ""
+    if dc is not None:
+        cam_str += f" dR3={dc.r3:.0f} dS3={dc.s3:.0f}"
+    if wc is not None:
+        cam_str += f" wR3={wc.r3:.0f} wS3={wc.s3:.0f}"
+    orb_str = ""
+    if s.orb_high is not None:
+        orb_str = f" orb={s.orb_low:.0f}-{s.orb_high:.0f}"
     return (
         f"{s.ist_dt:%H:%M} spot={s.spot:.1f} score={s.score:+.3f} {s.bucket}{gate} "
-        f"vix={vix} pcr={pcr} | [{cond}] | {legs} | day={s.day_pnl:+.0f} | {s.action}"
+        f"vix={vix} pcr={pcr}{cam_str}{orb_str} | [{cond}] | {legs} | day={s.day_pnl:+.0f} | {s.action}"
     )
 
 
@@ -235,6 +264,12 @@ def simulate_strangle_day(
     done_reason = ""
     pos_sign = 0  # sign of bias score when the current position was opened
 
+    # Re-entry gate after a pct_stop: blocks re-entry on a side until the stopped
+    # strike's premium has been BELOW the stop-exit price for 15 consecutive minutes.
+    # {opt_type: {"exit_px": float, "bars": list[Bar], "n_below": int}}
+    stop_gate: dict[str, dict] = {}
+    _gate_bars_needed = max(1, -(-15 // cfg.timeframe_min))  # ceil(15 / tf_min)
+
     def open_leg(opt_type: str, ist_dt: datetime, spot: float, lots: int,
                  bucket: BiasBucket, note: str) -> bool:
         if lots <= 0:
@@ -316,7 +351,9 @@ def simulate_strangle_day(
         close_hedge(opt_type, ist_dt, spot, reason)
         close_px = price_at(leg.bars, ist_dt, prefer="close")
         if close_px is None:
-            return
+            # Deep-OTM strike: no bar within 15 min — fall back to last traded price.
+            # If no price ever existed, treat as expired worthless (₹0.01).
+            close_px = _last_price(leg.bars, ist_dt) or 0.01
         qty = leg.total_qty
         leg_pnl = (leg.avg_entry - close_px) * qty
         day_pnl += leg_pnl
@@ -341,8 +378,43 @@ def simulate_strangle_day(
         for ot in list(legs.keys()):
             close_leg(ot, ist_dt, spot, reason)
 
+    def close_partial_leg(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
+        """Close half the lots on one side; keep the rest open (re-entry allowed)."""
+        nonlocal day_pnl
+        leg = legs.get(opt_type)
+        if leg is None:
+            return
+        close_lots = max(1, leg.lots // 2)
+        if close_lots >= leg.lots:
+            # 1-lot position or rounding → full close
+            close_leg(opt_type, ist_dt, spot, reason)
+            return
+        close_px = price_at(leg.bars, ist_dt, prefer="close")
+        if close_px is None:
+            close_px = _last_price(leg.bars, ist_dt) or 0.01
+        qty = close_lots * lot
+        leg_pnl = (leg.avg_entry - close_px) * qty
+        day_pnl += leg_pnl
+        comm = commission_fn("BUY", qty * close_px)
+        remaining = leg.lots - close_lots
+        trades.append(Trade(
+            side="BUY", opt_type=opt_type, strike=leg.strike, bar_time=ist_dt, qty=qty,
+            price=close_px, nifty=spot, note=reason, cum_lots=remaining,
+            avg_entry=leg.avg_entry, leg_pnl=leg_pnl, day_pnl=day_pnl, commission_inr=comm,
+        ))
+        if leg.entry_ist is not None:
+            leg_records.append(LegRecord(
+                opt_type=leg.opt_type, strike=leg.strike, entry_ist=leg.entry_ist,
+                exit_ist=ist_dt, lots=close_lots, avg_entry=leg.avg_entry, exit_px=close_px,
+                leg_pnl=leg_pnl, reason=reason,
+            ))
+        # Reduce remaining position in-place (avg_entry is preserved — cost/qty both halve).
+        leg.lots = remaining
+        leg.total_qty = remaining * lot
+        leg.total_cost = leg.avg_entry * leg.total_qty
+
     def manage_legs(ist_dt: datetime, spot: float) -> None:
-        """Per-bar exits on each open leg: take-profit, premium-doubled stop, rollup."""
+        """Per-bar exits on each open leg: take-profit, tiered pct stop, rollup."""
         for ot in list(legs.keys()):
             leg = legs.get(ot)
             if leg is None:
@@ -356,10 +428,18 @@ def simulate_strangle_day(
             if credit > 0 and captured >= cfg.take_profit_pct * credit:
                 close_leg(ot, ist_dt, spot, "take_profit")
                 continue
-            # Premium-doubled stop.
-            if cfg.premium_double_stop and px >= 2.0 * leg.avg_entry:
-                close_leg(ot, ist_dt, spot, "premium_doubled")
-                continue
+            # Tiered premium stop: 30% → close half; 40% → close all.
+            # After close, re-entry on this side is gated until the stopped strike's
+            # premium sustains below the exit price for 15m (see stop_gate tick loop).
+            if cfg.pct_stop_enabled and leg.avg_entry > 0:
+                if px >= leg.avg_entry * (1.0 + cfg.pct_stop_all):
+                    stop_gate[ot] = {"exit_px": px, "bars": leg.bars, "n_below": 0}
+                    close_leg(ot, ist_dt, spot, "pct_stop_all")
+                    continue
+                if px >= leg.avg_entry * (1.0 + cfg.pct_stop_half):
+                    stop_gate[ot] = {"exit_px": px, "bars": leg.bars, "n_below": 0}
+                    close_partial_leg(ot, ist_dt, spot, "pct_stop_half")
+                    continue
             # Rollup on premium decay.
             if cfg.roll_enabled and px < cfg.roll_trigger_prem:
                 _roll_leg(ot, ist_dt, spot)
@@ -423,6 +503,8 @@ def simulate_strangle_day(
             reason=bias.reason if bias else action,
             votes=dict(bias.votes) if bias else {},
             pcr=db.bias.pcr, vix_now=db.bias.vix_now,
+            cam_daily=db.bias.cam_daily, cam_weekly=db.bias.cam_weekly,
+            orb_high=db.bias.orb_high, orb_low=db.bias.orb_low,
             legs=leg_snaps, day_pnl=day_pnl, action=action,
         ))
 
@@ -430,6 +512,7 @@ def simulate_strangle_day(
         ist_dt, spot = db.ist_dt, db.close
 
         if ist_dt >= sqoff_dt:
+            stop_gate.clear()
             close_all(ist_dt, db.open, "squareoff")
             emit(ist_dt, spot, None, "squareoff")
             break
@@ -448,6 +531,23 @@ def simulate_strangle_day(
                 emit(ist_dt, spot, None, action)
                 continue
 
+        # Stop-gate tick: advance the 15m cooldown counter for each gated side.
+        # Gate clears when the stopped strike's premium has been below exit_px for
+        # _gate_bars_needed consecutive bars. Bouncing above exit_px resets the count.
+        gated_sides: list[str] = []
+        for ot in list(stop_gate.keys()):
+            gate = stop_gate[ot]
+            px = price_at(gate["bars"], ist_dt, prefer="close")
+            if px is not None and px < gate["exit_px"]:
+                gate["n_below"] += 1
+                if gate["n_below"] >= _gate_bars_needed:
+                    del stop_gate[ot]   # 15m sustained — gate cleared
+                else:
+                    gated_sides.append(ot)
+            else:
+                gate["n_below"] = 0     # still at/above exit price — restart count
+                gated_sides.append(ot)
+
         bias: BiasResult = score_bias(db.bias, cfg.weights, _ratio_table(cfg))
 
         # Adjustment: confirmed bias sign flip vs the open position -> re-enter.
@@ -460,6 +560,7 @@ def simulate_strangle_day(
                 continue
 
         # Entry gate: after the 10:15 1h candle, flat, not VIX-gated.
+        # Each side is independently blocked while its stop_gate cooldown is active.
         if not legs and ist_dt >= entry_after_dt:
             if bias.gated:
                 action = "gated"
@@ -468,15 +569,17 @@ def simulate_strangle_day(
             else:
                 pe_lots, ce_lots = cfg.ratio_for(bias.bucket)
                 opened = False
-                if pe_lots > 0:
+                if pe_lots > 0 and "PE" not in stop_gate:
                     opened |= open_leg("PE", ist_dt, spot, pe_lots, bias.bucket,
                                        f"open {pe_lots}PE [{bias.bucket.value}]")
-                if ce_lots > 0:
+                if ce_lots > 0 and "CE" not in stop_gate:
                     opened |= open_leg("CE", ist_dt, spot, ce_lots, bias.bucket,
                                        f"open {ce_lots}CE [{bias.bucket.value}]")
                 if opened:
                     pos_sign = _sign(bias.score)
                     action = ";".join(t.note for t in trades if t.bar_time == ist_dt) or "entry"
+                elif gated_sides and not bias.gated:
+                    action = f"stop_gate_wait:{','.join(gated_sides)}"
 
         emit(ist_dt, spot, bias, action)
 

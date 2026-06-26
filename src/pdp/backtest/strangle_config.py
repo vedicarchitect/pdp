@@ -57,7 +57,12 @@ class StrangleConfig:
     roll_trigger_prem: float = 20.0     # rollup when premium < this
     roll_target_min_prem: float = 50.0  # new strike must have premium >= this
     take_profit_pct: float = 0.5        # close leg at this fraction of credit captured
-    premium_double_stop: bool = True    # close leg when premium >= 2x entry
+    # Tiered premium stop (replaces premium_doubled 2x rule).
+    # At pct_stop_half: close half the lots, keep the rest open (re-entry allowed).
+    # At pct_stop_all:  close all remaining lots (re-entry allowed on bias signal).
+    pct_stop_enabled: bool = True
+    pct_stop_half: float = 0.30         # close half when price >= entry * (1 + this)
+    pct_stop_all: float = 0.40          # close all  when price >= entry * (1 + this)
     adjustment_on_flip: bool = True     # roll tested side on bias sign flip
     day_loss_limit: float = 15_000.0    # flatten + halt when day P&L <= -this
 
@@ -68,6 +73,12 @@ class StrangleConfig:
     hedge_enabled: bool = False
     hedge_prem_min: float = 2.0
     hedge_prem_max: float = 5.0
+
+    # Session filter — only trade on days where calendar DTE ≤ this.
+    # DTE 0 = expiry day, DTE 1 = day before (Mon for Tue-expiry NIFTY weekly).
+    # DTE 2 = Sunday (non-trading), so dte_max=1 vs dte_max=2 is equivalent in practice.
+    # None = no filter (all trading days).
+    dte_max: int | None = None
 
     # Behaviour
     neutral_no_trade: bool = True       # skip the neutral bucket
@@ -96,6 +107,12 @@ class StrangleConfig:
             raise ValueError(f"strike_method must be one of {_STRIKE_METHODS}, got {self.strike_method}")
         if not 0.0 < self.take_profit_pct <= 1.0:
             raise ValueError(f"take_profit_pct must be in (0, 1], got {self.take_profit_pct}")
+        if self.pct_stop_enabled:
+            if not 0.0 < self.pct_stop_half < self.pct_stop_all:
+                raise ValueError(
+                    f"pct_stop_half must be < pct_stop_all and both > 0; "
+                    f"got half={self.pct_stop_half} all={self.pct_stop_all}"
+                )
         if self.day_loss_limit <= 0:
             raise ValueError(f"day_loss_limit must be > 0, got {self.day_loss_limit}")
         if self.hedge_enabled and not 0.0 < self.hedge_prem_min <= self.hedge_prem_max:

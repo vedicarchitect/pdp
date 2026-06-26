@@ -20,7 +20,7 @@ import pytest
 
 from pdp.market.bars import BarClosed
 from pdp.options.warehouse import KEY_FIELDS
-from pdp.warehouse.writer import ContractMeta, NIFTY_INDEX_SID, OptionBarWriter
+from pdp.warehouse.writer import ContractMeta, INDEX_SID, OptionBarWriter
 
 
 # ── Stub collection ──────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ def test_spot_bar_goes_to_market_bars() -> None:
     writer = OptionBarWriter(opt_col, mkt_col)  # type: ignore[arg-type]
     writer.set_band({})  # no option band needed for spot test
 
-    bar = _make_bar(NIFTY_INDEX_SID)  # sid "13"
+    bar = _make_bar(INDEX_SID)  # sid "13"
     writer.enqueue(bar)
 
     _run(writer._flush_spot())
@@ -148,7 +148,7 @@ def test_spot_bar_goes_to_market_bars() -> None:
     docs = mkt_col.insert_many_calls[0]
     assert len(docs) == 1
     doc = docs[0]
-    assert doc["metadata"]["security_id"] == NIFTY_INDEX_SID
+    assert doc["metadata"]["security_id"] == INDEX_SID
     assert doc["metadata"]["timeframe"] == "1m"
     assert doc["close"] == 153.0
 

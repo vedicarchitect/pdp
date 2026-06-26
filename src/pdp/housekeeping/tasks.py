@@ -77,7 +77,7 @@ async def backfill_spot(
         args.append("--only-missing")
     if params.get("dry_run"):
         args.append("--dry-run")
-    return await _run_script(job_id, "scripts/backfill_nifty_spot.py", args, progress_cb)
+    return await _run_script(job_id, "scripts/backfill_spot.py", args, progress_cb)
 
 
 async def backfill_options(

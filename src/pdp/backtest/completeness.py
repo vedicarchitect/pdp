@@ -1,10 +1,10 @@
 """Input-data completeness gate for the multi-day backtest.
 
-A trade day is only simulated when its NIFTY 1m spot series is materially complete:
+A trade day is only simulated when its index 1m spot series is materially complete:
 ≥ ``MIN_BARS_FRAC`` of the expected full-session count AND no intraday hole ≥ ``MAX_GAP_MIN``.
 SuperTrend on a gapped series freezes and cannot flip when it should, so trading such a day
 would fabricate P&L. Incomplete days are reported as ``data_incomplete`` (no trades) rather than
-silently traded; backfill is an explicit step (``scripts/backfill_nifty_spot.py``), never a hidden
+silently traded; backfill is an explicit step (``scripts/backfill_spot.py``), never a hidden
 hot-path fetch.
 
 This lives in a small importable module (separate from ``backtest_multiday.py``, which executes on

@@ -13,7 +13,7 @@ All scripts are run from the **repo root** with `uv run python scripts/<name>.py
 
 | Script | Purpose |
 |--------|---------|
-| `backfill_nifty_spot.py` | Backfill NIFTY 1m spot bars (`market_bars`) from Dhan for a date range. `--from`, `--to`, `--only-missing` |
+| `backfill_spot.py` | Backfill index 1m spot bars (`market_bars`) from Dhan for a date range. `--symbol NIFTY\|BANKNIFTY\|SENSEX`, `--from`, `--to`, `--only-missing` |
 | `backfill_options_gap.py` | Backfill missing `option_bars` dates from Dhan for a date range. |
 | `backfill_expired_options.py` | Backfill expired-contract option bars (historical). |
 | `migrate_abi_options.py` | One-time: migrate NIFTY options OHLCV from Abi DuckDB → MongoDB `option_bars`. |

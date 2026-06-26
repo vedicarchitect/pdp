@@ -57,7 +57,9 @@ task db:down             Stop containers
 task db:migrate          alembic upgrade head
 task db:tools            Start pgAdmin (:5050)
 
-task backfill:spot       Backfill NIFTY 1m spot → market_bars
+task backfill:nifty      Backfill NIFTY 1m spot → market_bars
+task backfill:banknifty  Backfill BANKNIFTY 1m spot → market_bars
+task backfill:sensex     Backfill SENSEX 1m spot → market_bars
 task backfill:options    Gap-fill option_bars from Dhan
 task backfill:expired    Backfill expired-contract option bars
 task migrate:abi         Abi DuckDB → MongoDB option_bars
@@ -77,7 +79,7 @@ task openspec:archive    Archive a completed change
 
 Pass args to parameterised tasks with `--`:
 ```powershell
-task backfill:spot -- --from 2026-02-09 --to 2026-06-12 --only-missing
+task backfill:nifty -- --from 2026-02-09 --to 2026-06-12 --only-missing
 task backtest:compare -- --date 2026-06-10
 task openspec:validate -- configurable-strategy-backtest-sweep --strict
 ```
@@ -117,7 +119,7 @@ PDP/
 ├── strategies/                 # Strategy YAML configs (auto-loaded)
 │   └── supertrend_short.yaml   # Active: ST(3,1) NIFTY OTM selling
 ├── scripts/                    # Operational scripts (see scripts/README.md)
-│   ├── backfill_nifty_spot.py
+│   ├── backfill_spot.py
 │   ├── backfill_options_gap.py
 │   ├── backtest_compare.py
 │   ├── backtest_sweep.py
@@ -177,7 +179,7 @@ See [openspec/project.md](openspec/project.md) for full architecture and convent
 
 ```powershell
 # Spot bars first (options depend on spot for strike derivation)
-task backfill:spot -- --from 2026-02-09 --to 2026-06-12 --only-missing
+task backfill:nifty -- --from 2026-02-09 --to 2026-06-12 --only-missing
 
 # Options bars (post Abi cutoff)
 task backfill:options -- --only-missing

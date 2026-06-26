@@ -9,7 +9,8 @@ and version-controlled config files. The Python package lives in `src/pdp/backte
 |------|------|
 | `run.py` | Single entry point: single-config per-trade detail OR grid sweep |
 | `compare.py` | Replay one day, compare vs paper journal (side-by-side, no DB writes) |
-| `strangle_run.py` | **Directional-strangle** multi-year runner — loads spot+chains+VIX once, replays per day; `--hedge/--no-hedge`, `--trace` |
+| `strangle_run.py` | **Directional-strangle** multi-year runner — quarter-chunked load, replays per day; `--hedge/--no-hedge`, `--trace`, `--out-dir` archives per-day logs |
+| `strangle_walkforward.py` | Walk-forward IS/OOS optimizer (go/no-go gate) — grouped-knob grid, stitched OOS equity + verdict |
 | `configs/st10_15m_otm1.yaml` | **Default / promoted config** — ST(10,2)/15m/OTM1 |
 | `configs/st3_1_5m_otm1.yaml` | Legacy anchor baseline — ST(3,1)/5m/OTM1 (regression anchor) |
 | `configs/strangle_premium*.yaml` | Directional-strangle, premium-strike (naked + `_hedged` 2–5₹ wing) |
@@ -28,9 +29,39 @@ task backtest:strangle -- --from 2026-05-01 --to 2026-06-23 --hedge    # force h
 task backtest:strangle -- --start 2026-06-20 --days 3 --trace          # every-minute status
 ```
 
-Data prerequisites (Mongo): NIFTY spot (sid 13) + options (`option_bars`) + India VIX
+Data prerequisites (Mongo): index spot (NIFTY sid 13) + options (`option_bars`) + India VIX
 (`task backfill:vix`, sid 21 — intraday history begins ~Aug-2021). Run `task audit:strangle`
 to confirm per-year coverage before a multi-year walk.
+
+### Archived runs (`--out-dir`, git-ignored under `backtest/runs/`)
+
+`--out-dir backtest/runs` lays every run down as a self-describing, auditable folder:
+
+```
+backtest/runs/<run_id>/            # run_id = strangle_YYYYMMDD-HHMMSS
+  manifest.json    config + window + metrics + timing totals + git sha
+  summary.csv      one row/day: P&L, trades, drawdown, build_ms, sim_ms
+  equity.csv       cumulative realized equity + peak + drawdown by day
+  run.log          high-level run log
+  days/<YYYY-MM-DD>/
+    status.log     every-minute BarStatus trace (score, votes, VIX/PCR, legs, P&L, action)
+    trades.csv     every fill: time, side, type, strike, qty, price, leg/day P&L, commission
+    legs.csv       closed-leg records (entry/exit/lots/pnl/reason; incl. hedges)
+    day.json       that day's summary + per-day build/sim timing
+```
+
+Keep these out of git (they're reproducible). For long-term keeping, retain `manifest.json` +
+`summary.csv` + `equity.csv` per run (tiny) and prune the per-day `days/` tree once verified.
+
+### Walk-forward (the go/no-go gate)
+
+```bash
+task backtest:strangle:wf -- --from 2021-09-01 --to 2026-06-23 --out logs/wf.csv
+```
+
+Rolls a fixed IS window forward, selects grouped params on IS only, scores the next unseen OOS
+slice; stitches all OOS slices into one honest equity curve and prints a PASS/REVIEW verdict.
+Only promote to the Phase-5 paper strategy if OOS is robustly profitable.
 
 ## How to run
 

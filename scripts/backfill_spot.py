@@ -1,12 +1,7 @@
-"""Dhan backfill for NIFTY index 1-minute spot into `market_bars`.
+"""Dhan backfill for index 1-minute spot into `market_bars` (NIFTY, BANKNIFTY, SENSEX).
 
-The local `market_bars` cache is systematically incomplete for the NIFTY index
-(`security_id="13"`): some trade days have zero bars, others have intraday holes
-(e.g. 2026-06-12 missing 10:10→11:38). SuperTrend(3,1) on a gapped series freezes and
-fails to flip when it should, so the backtest anchors entries to a stale direction.
-
-Dhan holds the full history. This script fetches NIFTY index 1m bars
-(`intraday_minute_data(security_id="13", IDX_I, INDEX, interval=1)`) over a configurable
+Dhan holds the full history. This script fetches index 1m bars
+(`intraday_minute_data(security_id, IDX_I, INDEX, interval=1)`) over a configurable
 range, converts epoch seconds → **UTC-naive** `datetime` (matching the existing schema, where
 09:15 IST is stored as `ts=03:45 UTC`), and **upserts** keyed on
 `(ts, metadata.security_id, metadata.timeframe)` so already-complete days are never duplicated.
@@ -15,9 +10,11 @@ Run this BEFORE `scripts/backfill_options_gap.py` — option strike derivation r
 1m close at the same minute, so spot must be complete first.
 
 Usage:
-  python scripts/backfill_nifty_spot.py --dry-run
-  python scripts/backfill_nifty_spot.py --from 2026-06-04 --to 2026-06-12
-  python scripts/backfill_nifty_spot.py --from 2026-06-04 --to 2026-06-12 --only-missing
+  python scripts/backfill_spot.py --dry-run
+  python scripts/backfill_spot.py --from 2026-06-04 --to 2026-06-12
+  python scripts/backfill_spot.py --from 2026-06-04 --only-missing
+  python scripts/backfill_spot.py --symbol BANKNIFTY --from 2021-06-01 --only-missing
+  python scripts/backfill_spot.py --symbol SENSEX    --from 2021-06-01 --only-missing
 """
 from __future__ import annotations
 
@@ -39,7 +36,11 @@ from pdp.settings import get_settings  # noqa: E402
 load_dotenv()
 log = structlog.get_logger()
 
-SECURITY_ID = "13"          # NIFTY 50 index
+SYMBOL_MAP: dict[str, str] = {
+    "NIFTY":     "13",
+    "BANKNIFTY": "25",
+    "SENSEX":    "51",
+}
 EXCHANGE_SEGMENT = "IDX_I"
 INSTRUMENT_TYPE = "INDEX"
 TIMEFRAME = "1m"
@@ -68,8 +69,8 @@ def _chunks(days: list[date], size: int) -> list[tuple[date, date]]:
     return out
 
 
-def _fetch_chunk(dhan: Any, from_d: date, to_d: date) -> list[dict[str, Any]]:
-    """Fetch NIFTY index 1m bars for [from_d, to_d]; return docs ready to upsert.
+def _fetch_chunk(dhan: Any, from_d: date, to_d: date, security_id: str) -> list[dict[str, Any]]:
+    """Fetch index 1m bars for [from_d, to_d]; return docs ready to upsert.
 
     Throttles to the Data-API limit and retries with backoff on DH-904 rate-limit.
     Dhan's `to_date` is exclusive on the day boundary, so pass to_d + 1.
@@ -82,7 +83,7 @@ def _fetch_chunk(dhan: Any, from_d: date, to_d: date) -> list[dict[str, Any]]:
         last_call = time.monotonic()
 
         raw: object = dhan.intraday_minute_data(
-            security_id=SECURITY_ID,
+            security_id=security_id,
             exchange_segment=EXCHANGE_SEGMENT,
             instrument_type=INSTRUMENT_TYPE,
             from_date=from_d.isoformat(),
@@ -123,7 +124,7 @@ def _fetch_chunk(dhan: Any, from_d: date, to_d: date) -> list[dict[str, Any]]:
             ts = datetime.fromtimestamp(float(ts_raw), tz=UTC).replace(tzinfo=None)
             docs.append({
                 "ts": ts,
-                "metadata": {"security_id": SECURITY_ID, "timeframe": TIMEFRAME},
+                "metadata": {"security_id": security_id, "timeframe": TIMEFRAME},
                 "open": float(opens[i]) if i < len(opens) else float(closes[i]),
                 "high": float(highs[i]) if i < len(highs) else float(closes[i]),
                 "low": float(lows[i]) if i < len(lows) else float(closes[i]),
@@ -138,13 +139,13 @@ def _fetch_chunk(dhan: Any, from_d: date, to_d: date) -> list[dict[str, Any]]:
     return []
 
 
-def _existing_count(col: Any, day: date) -> int:
-    """Count NIFTY 1m bars already stored for a trade day (UTC-naive window)."""
+def _existing_count(col: Any, day: date, security_id: str) -> int:
+    """Count 1m bars already stored for a trade day (UTC-naive window)."""
     # IST session 09:15–15:30 == UTC 03:45–10:00.
     lo = datetime(day.year, day.month, day.day, 3, 45)
     hi = datetime(day.year, day.month, day.day, 10, 1)
     return col.count_documents({
-        "metadata.security_id": SECURITY_ID,
+        "metadata.security_id": security_id,
         "metadata.timeframe": TIMEFRAME,
         "ts": {"$gte": lo, "$lte": hi},
     })
@@ -156,18 +157,18 @@ def _day_bounds(day: date) -> tuple[datetime, datetime]:
     return lo, lo + timedelta(days=1)
 
 
-def _write_day(col: Any, day: date, docs: list[dict[str, Any]]) -> int:
+def _write_day(col: Any, day: date, docs: list[dict[str, Any]], security_id: str) -> int:
     """Idempotent write for one trade day into the time-series `market_bars`.
 
     MongoDB time-series collections do not support upsert/non-multi update
     (error code 72), so idempotency is delete-the-day-then-insert: remove any
-    existing NIFTY 1m bars in the day's window, then insert the fresh fetch.
+    existing bars in the day's window, then insert the fresh fetch.
     """
     if not docs:
         return 0
     lo, hi = _day_bounds(day)
     col.delete_many({
-        "metadata.security_id": SECURITY_ID,
+        "metadata.security_id": security_id,
         "metadata.timeframe": TIMEFRAME,
         "ts": {"$gte": lo, "$lt": hi},
     })
@@ -176,7 +177,9 @@ def _write_day(col: Any, day: date, docs: list[dict[str, Any]]) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Dhan backfill for NIFTY index 1m spot.")
+    ap = argparse.ArgumentParser(description="Dhan backfill for index 1m spot (NIFTY/BANKNIFTY/SENSEX).")
+    ap.add_argument("--symbol", default="NIFTY", choices=list(SYMBOL_MAP),
+                    help="Index to backfill (default: NIFTY).")
     ap.add_argument("--from", dest="date_from", required=True)
     ap.add_argument("--to", dest="date_to", default=date.today().isoformat())
     ap.add_argument("--only-missing", action="store_true",
@@ -185,6 +188,7 @@ def main() -> int:
                     help="Print the planned trade-day range; no Dhan calls or writes.")
     a = ap.parse_args()
 
+    security_id = SYMBOL_MAP[a.symbol]
     s = get_settings()
     days = trading_days(
         date.fromisoformat(a.date_from),
@@ -193,7 +197,8 @@ def main() -> int:
     )
 
     if a.dry_run:
-        log.info("dry_run", trading_days=len(days),
+        log.info("dry_run", symbol=a.symbol, security_id=security_id,
+                 trading_days=len(days),
                  first=str(days[0]) if days else None,
                  last=str(days[-1]) if days else None,
                  chunks=len(_chunks(days, CHUNK_DAYS)))
@@ -208,18 +213,20 @@ def main() -> int:
     target_days = days
     if a.only_missing:
         threshold = int(EXPECTED_BARS * MISSING_FRAC)
-        target_days = [d for d in days if _existing_count(col, d) < threshold]
-        log.info("only_missing_filter", total=len(days), to_fill=len(target_days),
-                 threshold=threshold)
+        target_days = [d for d in days if _existing_count(col, d, security_id) < threshold]
+        log.info("only_missing_filter", symbol=a.symbol, total=len(days),
+                 to_fill=len(target_days), threshold=threshold)
 
     if not target_days:
-        log.info("nothing_to_backfill")
+        log.info("nothing_to_backfill", symbol=a.symbol)
         return 0
 
+    log.info("backfill_start", symbol=a.symbol, security_id=security_id,
+             days=len(target_days))
     target_set = set(target_days)
     total_written = 0
     for from_d, to_d in _chunks(target_days, CHUNK_DAYS):
-        docs = _fetch_chunk(dhan, from_d, to_d)
+        docs = _fetch_chunk(dhan, from_d, to_d, security_id)
         # Group fetched bars by IST trade day; write each day idempotently.
         by_day: dict[date, list[dict[str, Any]]] = {}
         for d in docs:
@@ -228,11 +235,12 @@ def main() -> int:
             if day in target_set:
                 by_day.setdefault(day, []).append(d)
         for day, day_docs in sorted(by_day.items()):
-            written = _write_day(col, day, day_docs)
+            written = _write_day(col, day, day_docs, security_id)
             total_written += written
-            log.info("day_done", day=str(day), bars=written)
+            log.info("day_done", symbol=a.symbol, day=str(day), bars=written)
 
-    log.info("backfill_summary", days=len(target_days), rows_written=total_written)
+    log.info("backfill_summary", symbol=a.symbol, days=len(target_days),
+             rows_written=total_written)
     return 0
 
 

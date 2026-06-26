@@ -8,7 +8,9 @@ hedge_prem_min: 2.0
 lot_size: 65
 neutral_no_trade: true
 otm_steps: 2
-premium_double_stop: true
+pct_stop_all: 0.4
+pct_stop_enabled: true
+pct_stop_half: 0.3
 premium_floor: 50.0
 ratio_table:
   complete_bear:

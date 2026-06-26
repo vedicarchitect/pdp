@@ -14,8 +14,8 @@ The system SHALL expose `POST /api/v1/housekeeping/{task}` for tasks: `backfill-
 
 ### Requirement: Script refactoring preserves CLI
 
-Existing CLI scripts (`scripts/backfill_nifty_spot.py`, etc.) SHALL continue to work as standalone CLI tools after refactoring. The core logic SHALL be extracted into importable async functions callable by both the CLI entry point and the job runner.
+Existing CLI scripts (`scripts/backfill_spot.py`, etc.) SHALL continue to work as standalone CLI tools after refactoring. The core logic SHALL be extracted into importable async functions callable by both the CLI entry point and the job runner.
 
 #### Scenario: CLI still works after refactoring
-- **WHEN** `task backfill:spot -- --from 2026-01-01 --only-missing` is run from the terminal
+- **WHEN** `task backfill:nifty -- --from 2026-01-01 --only-missing` is run from the terminal
 - **THEN** the backfill executes successfully, identical to before the refactor

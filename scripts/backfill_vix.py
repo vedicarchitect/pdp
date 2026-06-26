@@ -6,7 +6,7 @@ fetches India VIX 1m bars from Dhan (`intraday_minute_data(security_id=<vix>, ID
 a configurable range and upserts them into `market_bars` under a dedicated `security_id` (default
 "21", the India VIX index id on Dhan; override with --vix-sid or resolve from the scrip master).
 
-It mirrors `backfill_nifty_spot.py`: epoch seconds -> UTC-naive `ts` (09:15 IST == 03:45 UTC),
+It mirrors `backfill_spot.py`: epoch seconds -> UTC-naive `ts` (09:15 IST == 03:45 UTC),
 Data-API throttling with DH-904 backoff, and idempotent delete-then-insert per trade day.
 
 Usage:

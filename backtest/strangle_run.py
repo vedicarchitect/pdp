@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -32,6 +33,7 @@ from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalcula
 from pdp.backtest.day_loader import biz_days, load_window  # noqa: E402
 from pdp.backtest.strangle_config import StrangleConfig  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day  # noqa: E402
+from pdp.backtest.strangle_report import RunWriter  # noqa: E402
 from pdp.backtest.strangle_sim import BarStatus, format_status_line, simulate_strangle_day  # noqa: E402
 from pdp.instruments.expiry_calendar import NiftyExpiryCalendar  # noqa: E402
 from pdp.settings import get_settings  # noqa: E402
@@ -106,6 +108,14 @@ def _last_biz_day(d: date) -> date:
     return d
 
 
+def _quarter_chunks(days: list[date]) -> list[list[date]]:
+    """Group days by calendar quarter so multi-year runs load one quarter of chains at a time."""
+    chunks: dict[tuple[int, int], list[date]] = {}
+    for d in days:
+        chunks.setdefault((d.year, (d.month - 1) // 3), []).append(d)
+    return [chunks[k] for k in sorted(chunks)]
+
+
 def _print_summary(results: list, m: dict) -> None:
     print(f"\n{'='*92}")
     print(f"  DIRECTIONAL STRANGLE  —  {m['days']} traded days")
@@ -133,18 +143,32 @@ def main() -> int:
     ap.add_argument("--from", dest="from_date", type=str, default=None, help="Window start YYYY-MM-DD")
     ap.add_argument("--to", dest="to_date", type=str, default=None, help="Window end YYYY-MM-DD")
     ap.add_argument("--trace", action="store_true", help="Print the every-minute status trace per day")
+    ap.add_argument("--out-dir", type=str, default=None, metavar="DIR",
+                    help="Archive per-day logs/trades/timing under DIR/<run_id>/ (e.g. backtest/runs)")
     ap.add_argument("--vix-sid", type=str, default=_DEFAULT_VIX_SID, help="India VIX security id")
     ap.add_argument("--hedge", dest="hedge", action="store_true", default=None,
                     help="Force protective hedges ON (override config)")
     ap.add_argument("--no-hedge", dest="hedge", action="store_false",
                     help="Force protective hedges OFF (override config)")
     ap.add_argument("--no-commission", action="store_true")
+    ap.add_argument("--dte-max", dest="dte_max", type=int, default=None,
+                    help="Only trade on days with calendar DTE <= this (0=expiry, 1=Mon for Tue-expiry)")
+    ap.add_argument("--day-loss-limit", dest="day_loss_limit", type=float, default=None,
+                    help="Daily loss cap in Rs before halt (default 15000; set 0 to disable)")
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
     if args.hedge is not None:
         cfg = StrangleConfig.from_dict({**cfg.to_dict(), "hedge_enabled": args.hedge})
-    log.info("hedges: %s", "ON" if cfg.hedge_enabled else "OFF")
+    if args.dte_max is not None:
+        cfg = StrangleConfig.from_dict({**cfg.to_dict(), "dte_max": args.dte_max})
+    if args.day_loss_limit is not None:
+        limit = args.day_loss_limit if args.day_loss_limit > 0 else 1e9
+        cfg = StrangleConfig.from_dict({**cfg.to_dict(), "day_loss_limit": limit})
+    dll = "OFF" if cfg.day_loss_limit >= 1e8 else f"Rs{cfg.day_loss_limit:,.0f}"
+    log.info("hedges: %s  dte_max: %s  day_loss_limit: %s",
+             "ON" if cfg.hedge_enabled else "OFF",
+             cfg.dte_max if cfg.dte_max is not None else "ALL", dll)
 
     s = get_settings()
     mdb = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]
@@ -161,37 +185,84 @@ def main() -> int:
         return float(calc.calculate(side, Decimal(str(turnover))).total_inr)
 
     days = _parse_days(args)
-    log.info("loading window: %d biz days (%s .. %s)", len(days), days[0], days[-1])
-    window = load_window(mdb, cal, days)
-    vix_by_day = load_vix_window(mdb, args.vix_sid, days)
-    log.info("window: %d valid days, %d skipped; VIX days: %d",
-             len(window.valid_days), len(window.skipped), len(vix_by_day))
-    if not window.valid_days:
-        print("No valid trading days in window (run the Phase-0 backfill first).")
-        return 1
-    if not vix_by_day:
-        log.warning("no India VIX data found for sid=%s — VIX gate will be inactive", args.vix_sid)
+    chunks = _quarter_chunks(days)
+    log.info("window: %d biz days (%s .. %s) in %d quarter-chunks; hedges=%s out=%s",
+             len(days), days[0], days[-1], len(chunks),
+             "ON" if cfg.hedge_enabled else "OFF", args.out_dir or "-")
 
-    results = []
-    for d in window.valid_days:
-        data = build_strangle_day(window, cfg, d, vix_by_day)
-        if data is None:
-            continue
-        trace: list[BarStatus] | None = [] if args.trace else None
-        r = simulate_strangle_day(cfg, data, commission_fn, trace=trace)
-        if r is None:
-            continue
-        results.append(r)
-        if trace is not None:
-            print(f"\n----- {d} every-minute status -----")
-            for st in trace:
-                print("  " + format_status_line(st))
+    # Archive every-minute logs/trades/timing when --out-dir is given (always traces then).
+    writer = RunWriter(args.out_dir, cfg) if args.out_dir else None
+    want_trace = bool(args.trace) or writer is not None
+    if writer:
+        writer.log(f"run start: {days[0]}..{days[-1]} ({len(days)} biz days, {len(chunks)} chunks)")
 
+    results: list = []
+    skipped = 0
+    vix_days_seen = 0
+    for ci, chunk in enumerate(chunks, 1):
+        window = load_window(mdb, cal, chunk)
+        vix_by_day = load_vix_window(mdb, args.vix_sid, chunk)
+        vix_days_seen += len(vix_by_day)
+        skipped += len(window.skipped)
+        msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]}: "
+               f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, VIX {len(vix_by_day)}")
+        log.info(msg)
+        if writer:
+            writer.log(msg)
+        for d in window.valid_days:
+            # DTE filter: skip days where calendar days to expiry exceed dte_max.
+            if cfg.dte_max is not None:
+                expiry = window.expiry_by_day.get(d)
+                if expiry is not None and (expiry - d).days > cfg.dte_max:
+                    skipped += 1
+                    continue
+            t0 = time.perf_counter()
+            data = build_strangle_day(window, cfg, d, vix_by_day)
+            build_ms = (time.perf_counter() - t0) * 1000.0
+            if data is None:
+                continue
+            trace: list[BarStatus] | None = [] if want_trace else None
+            t1 = time.perf_counter()
+            r = simulate_strangle_day(cfg, data, commission_fn, trace=trace)
+            sim_ms = (time.perf_counter() - t1) * 1000.0
+            if r is None:
+                continue
+            results.append(r)
+            if writer:
+                writer.write_day(r, trace, build_ms, sim_ms)
+            if args.trace:
+                print(f"\n----- {d} every-minute status -----")
+                for st in (trace or []):
+                    print("  " + format_status_line(st))
+        del window  # free this quarter's raw chains before loading the next
+
+    if not vix_days_seen:
+        log.warning("no India VIX data found for sid=%s — VIX gate was inactive", args.vix_sid)
     if not results:
         print("No results (no decision bars / chain data in window).")
         return 1
-    _print_summary(results, aggregate(results))
+    m = aggregate(results)
+    _print_summary(results, m) if not writer else _print_summary_compact(results, m)
+    if writer:
+        out = writer.finalize(
+            window={"from": str(days[0]), "to": str(days[-1]), "biz_days": len(days),
+                    "traded_days": len(results), "skipped": skipped, "vix_days": vix_days_seen},
+            metrics=m,
+        )
+        print(f"\nArtifacts: {out}")
+        print("  summary.csv / equity.csv / manifest.json + days/<date>/"
+              "{status.log,trades.csv,legs.csv,day.json}")
     return 0
+
+
+def _print_summary_compact(results: list, m: dict) -> None:
+    """Headline-only summary (the per-day detail is in the archived summary.csv)."""
+    pf = "inf" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
+    print(f"\n{'='*92}")
+    print(f"  DIRECTIONAL STRANGLE  —  {m['days']} traded days")
+    print(f"  Net {m['net']:>+.0f}  |  PF {pf}  |  Win {m['win_rate']:.0f}%  |  "
+          f"MaxDD {m['max_dd']:.0f}  |  Trades {m['trades']}  |  Halted {m['halted']}")
+    print(f"{'='*92}")
 
 
 if __name__ == "__main__":

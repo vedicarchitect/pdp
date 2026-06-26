@@ -6,11 +6,12 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 
 | File | Role |
 |------|------|
-| `sim.py` | **Active NIFTY simulation engine** — config-driven tick-by-tick replay, fill logic, P&L tracking |
+| `sim.py` | **Active index simulation engine** — config-driven tick-by-tick replay, fill logic, P&L tracking |
 | `strangle_sim.py` | **Directional-strangle engine** — bias-driven multi-leg ratio strangle (PE:CE per bucket), protective hedges, rollup/take-profit/premium-doubled/trend-flip exits, every-minute `BarStatus` trace |
 | `strangle_config.py` | `StrangleConfig` dataclass — bias weights, ratio table, strike method, hedge band, exits; `from_yaml`/`to_yaml` |
 | `strangle_loader.py` | Assembles per-bar multi-timeframe `BiasInputs` (5m/15m/1h EMAs, daily+weekly Camarilla, swing, VWAP, ORB, India VIX) from a cached Mongo window for `strangle_sim.py` |
-| `day_loader.py` | Loads one trading day of NIFTY spot + option bars from MongoDB for `sim.py` |
+| `strangle_report.py` | `RunWriter` — archives per-day artifacts (status.log, trades.csv, legs.csv, day.json) + run-level summary.csv/equity.csv/manifest.json with build/sim timing |
+| `day_loader.py` | Loads one trading day of index spot + option bars from MongoDB for `sim.py` |
 | `strategy_config.py` | `StrategyConfig` dataclass — all strategy knobs; `from_dict` / `to_dict` / `from_yaml` / `to_yaml` |
 | `commissions.py` | `CommissionCalculator` — uses `settings.backtest_commission.*` |
 | `execution.py` | Fill execution (no look-ahead: fills on next bar open after signal) |
@@ -18,7 +19,7 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | `chain_loader.py` | Loads option chain snapshots for a day |
 | `indicators.py` | Backtest-time indicator compute (replays bars to rebuild ST state) |
 | `models.py` | `BacktestResult`, `Trade`, `DayResult` dataclasses |
-| `engine.py` | Generic strategy-replay framework (`BacktestEngine`) — not used by NIFTY sim directly |
+| `engine.py` | Generic strategy-replay framework (`BacktestEngine`) — not used by the index sim directly |
 | `output.py` | Result formatting, console table, CSV/JSON export |
 | `routes.py` | `/backtest` FastAPI endpoints |
 

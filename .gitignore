@@ -37,6 +37,7 @@ Thumbs.db
 data/
 logs/
 *.log
+backtest/runs/          # archived per-day backtest artifacts (reproducible, not source)
 *.duckdb
 *.db-shm
 *.db-wal

@@ -28,7 +28,9 @@ task reset-paper  # ⚠️ clears paper DB
 task backtest     # 7-day per-trade detail (BACKTEST_DEFAULT_CONFIG)
 task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30
 task backtest:sweep  -- --st "3,1;10,2" --tf "5,15" --moneyness "1,0,-1" [--days N]
-task backfill:spot   -- --from YYYY-MM-DD [--only-missing] [--dry-run]
+task backfill:nifty     -- --from YYYY-MM-DD [--only-missing] [--dry-run]
+task backfill:banknifty -- --from YYYY-MM-DD [--only-missing]
+task backfill:sensex    -- --from YYYY-MM-DD [--only-missing]
 task backfill:options -- [--from] [--only-missing]
 task backtest:compare -- [--date YYYY-MM-DD]
 task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
