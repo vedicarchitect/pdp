@@ -5,7 +5,7 @@ routes each closed bar to either:
 
 * ``option_bars``  — for option contracts (NSE_FNO), using
   :func:`pdp.options.warehouse.build_option_bar_doc` + first-write-wins upserts.
-* ``market_bars``  — for the NIFTY spot index (security_id ``"13"``), via the same
+* ``market_bars``  — for the index spot (security_id from settings), via the same
   batched insert pattern as :class:`~pdp.market.bar_writer.BarWriter`.
 """
 from __future__ import annotations
@@ -32,8 +32,8 @@ _FLUSH_INTERVAL = 1.0   # seconds between periodic flushes
 _FLUSH_BATCH = 500      # max docs per flush
 _MAX_BUFFER = 10_000    # drop-oldest threshold per buffer
 
-# Security ID for the NIFTY index (IDX_I segment)
-NIFTY_INDEX_SID = "13"
+# Security ID for the primary index (IDX_I segment); warehouse subscribes to this for spot bars.
+INDEX_SID = "13"
 
 
 @dataclass(slots=True)
@@ -97,7 +97,7 @@ class OptionBarWriter:
         try:
             existing = await self._mkt_col.distinct(
                 "ts",
-                {"metadata.security_id": NIFTY_INDEX_SID, "ts": {"$gte": cutoff}},
+                {"metadata.security_id": INDEX_SID, "ts": {"$gte": cutoff}},
             )
             self._flushed_spot_ts = set(existing)
             log.info("spot_writer_dedup_loaded", count=len(self._flushed_spot_ts))
@@ -117,7 +117,7 @@ class OptionBarWriter:
 
     def enqueue(self, bar: BarClosed) -> None:
         """Route a closed bar to the appropriate buffer."""
-        if bar.security_id == NIFTY_INDEX_SID:
+        if bar.security_id == INDEX_SID:
             self._enqueue_spot(bar)
         else:
             self._enqueue_option(bar)

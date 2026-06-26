@@ -358,13 +358,13 @@ BACKTEST_COMMISSION__GST_RATE=0.18
 
 ```powershell
 # Dry-run — check planned days without fetching
-uv run python scripts/backfill_nifty_spot.py --dry-run --from 2026-02-09 --to 2026-06-12
+uv run python scripts/backfill_spot.py --dry-run --from 2026-02-09 --to 2026-06-12
 
 # Full backfill
-uv run python scripts/backfill_nifty_spot.py --from 2026-02-09 --to 2026-06-12
+uv run python scripts/backfill_spot.py --from 2026-02-09 --to 2026-06-12
 
 # Only fill days below 95% bar coverage (faster, skips complete days)
-uv run python scripts/backfill_nifty_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
+uv run python scripts/backfill_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
 ```
 
 **Args:**
@@ -612,8 +612,8 @@ Log: market_feed_skipped reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set"
 The IndicatorEngine warms up from MongoDB `market_bars` on startup. If bars are missing:
 
 ```powershell
-# Backfill NIFTY spot first
-uv run python scripts/backfill_nifty_spot.py --from 2026-01-01 --only-missing
+# Backfill spot first
+uv run python scripts/backfill_spot.py --from 2026-01-01 --only-missing
 ```
 
 ### Backtest shows [DATA INCOMPLETE] days
@@ -621,7 +621,7 @@ uv run python scripts/backfill_nifty_spot.py --from 2026-01-01 --only-missing
 Missing spot bars for those dates. Run:
 
 ```powershell
-uv run python scripts/backfill_nifty_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
+uv run python scripts/backfill_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
 ```
 
 Then re-run backtest. If options also missing:

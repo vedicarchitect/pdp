@@ -13,7 +13,7 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 
 | Collection | Type | Purpose |
 |-----------|------|---------|
-| `market_bars` | Time-series | NIFTY 1m/5m/... OHLCV bars |
+| `market_bars` | Time-series | Index 1m/5m/... OHLCV bars (NIFTY, BANKNIFTY, SENSEX, VIX) |
 | `option_bars` | Time-series | Option contract 1m OHLCV bars |
 | `option_chains` | Regular | Latest chain snapshot per underlying+expiry |
 | `oi_snapshots` | Time-series | Intraday ATM±N OI snapshots + derived events (scripts/expiry_analysis.py --track) |
@@ -33,4 +33,4 @@ col = db["market_bars"]
 ## Note
 
 MongoDB time-series collections **do not support upsert/update**.
-Idempotent writes use **delete-then-insert** per day window (see `backfill_nifty_spot.py`).
+Idempotent writes use **delete-then-insert** per day window (see `backfill_spot.py`).

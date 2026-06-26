@@ -17,6 +17,7 @@
 - Hard-cap auto-kill: `set_hard_cap_callback(fn, RISK_DAILY_LOSS_CAP_INR)` → triggers `KillSwitchService` when daily loss exceeds cap.
 - EOD snapshot controlled by `PORTFOLIO_EOD_SNAPSHOT=True` setting.
 - LTP source: Redis key `ltp:<security_id>` (set by TickRouter, TTL 5s).
+- **Position cache key**: `(strategy_id, security_id, exchange_segment, product)` — fixed 2026-06-18 (migration `0012`). Each strategy has its own position row; the portfolio sums across all strategies for total MTM.
 
 ## P&L Flow
 

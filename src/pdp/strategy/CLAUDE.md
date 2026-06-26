@@ -62,4 +62,5 @@ ctx.session      # AsyncSession (PostgreSQL)
 - Strategies **consume** indicators from `ctx.indicators` — never compute inside `on_bar()`.
 - Place orders only via `ctx.order_router` or `ctx.buy/sell` helpers.
 - Crash recovery is automatic — `recovery.py` restores positions on `StrategyHost` restart.
-- Active specs: `live-supertrend-session-warmup`, `supertrend-scalein-gate-and-rollup`, `strategy-crash-recovery`.
+- **Position isolation**: all `StrategyContext` position queries (`get_net_qty`, `get_position`, `get_realized_pnl`, `get_positions`) filter by `strategy_id`. Each strategy sees only its own rows — no cross-strategy bleed. Fixed 2026-06-18 via migration `0012`.
+- Active specs: `live-supertrend-session-warmup`.

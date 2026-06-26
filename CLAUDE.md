@@ -28,7 +28,9 @@ task reset-paper  # ⚠️ clears paper DB
 task backtest     # 7-day per-trade detail (BACKTEST_DEFAULT_CONFIG)
 task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30
 task backtest:sweep  -- --st "3,1;10,2" --tf "5,15" --moneyness "1,0,-1" [--days N]
-task backfill:spot   -- --from YYYY-MM-DD [--only-missing] [--dry-run]
+task backfill:nifty     -- --from YYYY-MM-DD [--only-missing] [--dry-run]
+task backfill:banknifty -- --from YYYY-MM-DD [--only-missing]
+task backfill:sensex    -- --from YYYY-MM-DD [--only-missing]
 task backfill:options -- [--from] [--only-missing]
 task backtest:compare -- [--date YYYY-MM-DD]
 task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
@@ -53,18 +55,23 @@ task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 | `src/pdp/ml/` | Offline LightGBM training + online inference (candlestick-ML signals) → [`CLAUDE.md`](src/pdp/ml/CLAUDE.md) |
 | `src/pdp/mongo/` | MongoDB client + collection init → [`CLAUDE.md`](src/pdp/mongo/CLAUDE.md) |
 | `src/pdp/options/` | Chain poller, Greeks, gap_backfill → [`CLAUDE.md`](src/pdp/options/CLAUDE.md) |
+| `src/pdp/housekeeping/` | Async housekeeping tasks + REST routes |
+| `src/pdp/jobs/` | Async job runner: submit/track tasks + WS progress stream |
+| `src/pdp/ml/` | Offline LightGBM training + online candlestick-pattern inference → [`CLAUDE.md`](src/pdp/ml/CLAUDE.md) |
 | `src/pdp/orders/` | Paper + Dhan broker, order router → [`CLAUDE.md`](src/pdp/orders/CLAUDE.md) |
 | `src/pdp/portfolio/` | MTM P&L, kill-switch → [`CLAUDE.md`](src/pdp/portfolio/CLAUDE.md) |
 | `src/pdp/positional/` | Swing F&O + equity positions → [`CLAUDE.md`](src/pdp/positional/CLAUDE.md) |
 | `src/pdp/risk/` | KillSwitchService, hard-cap → [`CLAUDE.md`](src/pdp/risk/CLAUDE.md) |
+| `src/pdp/signals/` | Pure bias-scoring engine (directional strangle): multi-TF votes → 7 buckets → PE:CE ratio + VIX gate |
 | `src/pdp/strategies/` | Strategy implementations (Python) → [`CLAUDE.md`](src/pdp/strategies/CLAUDE.md) |
 | `src/pdp/strategy/` | StrategyHost, BaseStrategy ABC → [`CLAUDE.md`](src/pdp/strategy/CLAUDE.md) |
 | `src/pdp/warehouse/` | Abi DuckDB → MongoDB pipeline → [`CLAUDE.md`](src/pdp/warehouse/CLAUDE.md) |
 | `alembic/` | DB migrations (alembic.ini stays at root) → [`CLAUDE.md`](alembic/CLAUDE.md) |
 | `docs/` | Supplementary feature docs → [`CLAUDE.md`](docs/CLAUDE.md) |
-| `frontend/` | Vite + React 19 + TanStack + shadcn → [`CLAUDE.md`](frontend/CLAUDE.md) |
+| `frontend/` | Vite + React 19 + TanStack + hand-rolled CVA UI kit → [`CLAUDE.md`](frontend/CLAUDE.md) |
 | `backtest/` | Runnable backtest scripts + YAML configs → [`CLAUDE.md`](backtest/CLAUDE.md) |
 | `backtest/run.py` | Canonical multi-day runner: single-config detail or grid sweep |
+| `backtest/strangle_run.py` | Directional-strangle runner (bias-driven option selling; `--hedge`, `--trace`) |
 | `backtest/compare.py` | Single-day backtest vs paper journal |
 | `backtest/configs/` | Named YAML strategy configs (one file per named config) |
 | `scripts/` | Operational scripts → [`CLAUDE.md`](scripts/CLAUDE.md) |

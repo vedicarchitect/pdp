@@ -1,0 +1,62 @@
+adjustment_on_flip: true
+day_loss_limit: 15000.0
+entry_after_ist: '10:15'
+extreme_atm: true
+hedge_enabled: false
+hedge_prem_max: 5.0
+hedge_prem_min: 2.0
+lot_size: 65
+neutral_no_trade: true
+otm_steps: 2
+pct_stop_all: 0.4
+pct_stop_enabled: true
+pct_stop_half: 0.3
+premium_floor: 50.0
+ratio_table:
+  complete_bear:
+  - 0
+  - 5
+  complete_bull:
+  - 5
+  - 0
+  more_bear:
+  - 2
+  - 3
+  more_bull:
+  - 3
+  - 2
+  most_bear:
+  - 2
+  - 4
+  most_bull:
+  - 4
+  - 2
+  neutral:
+  - 1
+  - 1
+roll_enabled: true
+roll_target_min_prem: 50.0
+roll_trigger_prem: 20.0
+squareoff_ist: '15:10'
+strike_method: premium
+strike_step: 50
+take_profit_pct: 0.5
+target_delta: 0.6
+timeframe_min: 5
+weights:
+  pcr_bear: 0.9
+  pcr_bull: 1.1
+  th_complete: 0.75
+  th_more: 0.2
+  th_most: 0.5
+  vix_day_high_eps: 1.0e-06
+  vix_spike_pct: 0.05
+  w_cam_daily: 1.5
+  w_cam_weekly: 1.5
+  w_ema_15m: 1.5
+  w_ema_1h: 2.0
+  w_ema_5m: 1.0
+  w_orb: 1.0
+  w_pcr: 1.0
+  w_swing: 1.0
+  w_vwap: 1.0

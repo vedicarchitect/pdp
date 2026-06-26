@@ -23,10 +23,14 @@
 | `market/` | TickRouter, BarAggregator, WebSocket hub |
 | `mongo/` | MongoDB client singleton + collection init |
 | `options/` | OptionsChainPoller, Greeks, gap_backfill |
-| `orders/` | PaperBroker, DhanBroker, OrderRouter |
-| `portfolio/` | PortfolioService, MTM P&L, kill-switch |
+| `housekeeping/` | Async housekeeping tasks (DB vacuum, Mongo TTL) + REST routes |
+| `jobs/` | Async job runner: submit/track long-running tasks (ML train, backfill); WS progress stream |
+| `ml/` | Offline LightGBM training + online candlestick-pattern inference |
+| `orders/` | PaperBroker, DhanBroker, OrderRouter; positions keyed by (strategy_id, security_id) |
+| `portfolio/` | PortfolioService, MTM P&L, kill-switch; cache keyed by (strategy_id, sid, seg, product) |
 | `positional/` | Swing F&O + equity position tracking |
 | `risk/` | KillSwitchService, hard-cap auto-kill |
+| `signals/` | Pure bias-scoring engine (`bias.py`) — multi-TF weighted votes → 7 buckets → PE:CE ratio + VIX gate; shared by backtest + live |
 | `strategies/` | Concrete strategy implementations (Python) |
 | `strategy/` | StrategyHost, BaseStrategy ABC, StrategyContext |
 | `warehouse/` | Abi DuckDB → MongoDB migration pipeline |

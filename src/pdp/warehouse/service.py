@@ -2,7 +2,7 @@
 
 Responsibilities
 ----------------
-1. Subscribe to the NIFTY index (sid ``"13"``, segment ``IDX_I``) and the current+next-week
+1. Subscribe to the primary index (sid ``INDEX_SID``, segment ``IDX_I``) and the current+next-week
    ATM±N × {CE, PE} band, using one :class:`~pdp.market.dhan_ws.DhanTickerAdapter` connection.
 2. Route incoming ticks through a :class:`~pdp.market.bars.BarAggregator` (1-minute only) and
    hand closed bars to :class:`~pdp.warehouse.writer.OptionBarWriter`.
@@ -30,7 +30,7 @@ from pdp.instruments.symbols import symbol_for
 from pdp.market.bars import BarAggregator
 from pdp.market.dhan_ws import DhanTickerAdapter
 from pdp.strategy.strikes import atm_strike
-from pdp.warehouse.writer import NIFTY_INDEX_SID, ContractMeta, OptionBarWriter
+from pdp.warehouse.writer import INDEX_SID, ContractMeta, OptionBarWriter
 
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
@@ -111,7 +111,7 @@ class WarehouseService:
         # Subscribe the index feed before rolling the band so that incoming ticks
         # populate _spot_ltp before ATM computation needs a spot price.
         async with self._session_maker() as session:
-            await self._adapter.subscribe(NIFTY_INDEX_SID, _SEGMENT_IDX, session)
+            await self._adapter.subscribe(INDEX_SID, _SEGMENT_IDX, session)
 
         # Start tick consumer now so any buffered index ticks warm the LTP cache
         # before _roll_band calls _get_spot.
@@ -272,7 +272,7 @@ class WarehouseService:
 
         async with self._session_maker() as session:
             # Subscribe index if not already done
-            await self._adapter.subscribe(NIFTY_INDEX_SID, _SEGMENT_IDX, session)
+            await self._adapter.subscribe(INDEX_SID, _SEGMENT_IDX, session)
             for sid in new_sids - old_sids:
                 await self._adapter.subscribe(sid, _SEGMENT_FNO, session)
             for sid in old_sids - new_sids:
@@ -329,7 +329,7 @@ class WarehouseService:
         try:
             col = self._mongo_db["market_bars"]
             doc = await col.find_one(
-                {"metadata.security_id": NIFTY_INDEX_SID},
+                {"metadata.security_id": INDEX_SID},
                 sort=[("ts", -1)],
             )
             if doc and doc.get("close"):
@@ -351,7 +351,7 @@ class WarehouseService:
             except TimeoutError:
                 continue
             try:
-                if tick.security_id == NIFTY_INDEX_SID:
+                if tick.security_id == INDEX_SID:
                     self._spot_ltp = tick.ltp
                 bars = self._aggregator.push(tick)
                 for bar in bars:

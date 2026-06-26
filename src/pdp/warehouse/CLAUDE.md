@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Bridges the **Abi DuckDB** (sibling project, historical NIFTY options data) into PDP's **MongoDB `option_bars`** collection. Also runs the self-healing gap-backfill loop from Dhan API.
+Bridges the **Abi DuckDB** (sibling project, historical options data) into PDP's **MongoDB `option_bars`** collection. Also runs the self-healing gap-backfill loop from Dhan API.
 
 ## Files
 
@@ -29,7 +29,7 @@ Abi DuckDB (../Abi/data/historicaldata/nifty.db)
 ```python
 {
   "security_id": str,
-  "underlying": str,       # "NIFTY"
+  "underlying": str,       # e.g. "NIFTY", "BANKNIFTY"
   "expiry": date,
   "strike": int,
   "option_type": "CE"|"PE",
@@ -48,7 +48,7 @@ Abi DuckDB (../Abi/data/historicaldata/nifty.db)
 | `ABI_CUTOFF_DATE` | `2026-05-23` | Gap-fill starts from this date |
 | `EXPIRY_CACHE_PATH` | `data/expiry/nifty_expiries.json` | Built via OI-reset detection |
 | `WAREHOUSE_STRIKE_BAND` | 10 | ATM ± N strikes stored |
-| `WAREHOUSE_STRIKE_STEP` | 50 | Strike increment (NIFTY = 50) |
+| `WAREHOUSE_STRIKE_STEP` | 50 | Strike increment (50 for NIFTY; 100 for BANKNIFTY/SENSEX) |
 | `WAREHOUSE_INCLUDE_MONTHLY` | False | Include monthly expiry |
 | `WAREHOUSE_GAP_BACKFILL_ENABLED` | True | Auto gap-heal loop |
 | `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS` | 4.0 | How often to scan for gaps |
@@ -61,8 +61,8 @@ Abi DuckDB (../Abi/data/historicaldata/nifty.db)
 # Migrate full historical window from Abi DuckDB
 uv run python -m pdp.warehouse --from 2024-01-01 --to 2026-05-23
 
-# Backfill spot (NIFTY 1m bars from Dhan — Phase 0 of active plan)
-python scripts/backfill_nifty_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
+# Backfill spot (index 1m bars from Dhan)
+python scripts/backfill_spot.py --from 2026-02-09 --to 2026-06-12 --only-missing
 ```
 
 ## Active Specs
