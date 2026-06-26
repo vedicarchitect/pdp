@@ -255,9 +255,14 @@ def run_fold(
     pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, window.valid_days)
 
     # Build each day's inputs once (parameter-independent); split IS vs OOS by date.
+    # DTE filter applied here: skip days outside the dte_max window.
     is_data: list[StrangleDayData] = []
     oos_data: list[StrangleDayData] = []
     for d in window.valid_days:
+        if base.dte_max is not None:
+            expiry = window.expiry_by_day.get(d)
+            if expiry is not None and (expiry - d).days > base.dte_max:
+                continue
         data = build_strangle_day(window, base, d, vix_by_day, pcr_by_day)
         if data is None:
             continue
@@ -373,6 +378,8 @@ def main() -> int:
                     help="Include neutral bucket as 3PE:3CE in the base config")
     ap.add_argument("--scale-lots", dest="scale_lots", type=int, default=None,
                     help="Multiply all ratio_table lots by this factor")
+    ap.add_argument("--dte-max", dest="dte_max", type=int, default=None,
+                    help="Only include days with calendar DTE <= this (0=expiry/Tue, 1=Mon)")
     args = ap.parse_args()
 
     base = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
@@ -383,6 +390,8 @@ def main() -> int:
         base = StrangleConfig.from_dict(d)
     if args.scale_lots is not None:
         base = StrangleConfig.from_dict({**base.to_dict(), "scale_lots": args.scale_lots})
+    if args.dte_max is not None:
+        base = StrangleConfig.from_dict({**base.to_dict(), "dte_max": args.dte_max})
     candidates = build_candidates(base)
     log.info("candidate grid: %d configs", len(candidates))
 

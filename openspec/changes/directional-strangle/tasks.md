@@ -55,7 +55,7 @@
 - [x] 4.2 Create `backtest/configs/strangle_premium.yaml` and `backtest/configs/strangle_delta.yaml`
 - [x] 4.3 Add Taskfile target `task backtest:strangle`
 - [x] 4.4 `--dte-max N` CLI flag + `dte_max: int | None` in `StrangleConfig` — filter to DTE ≤ N calendar days before expiry (DTE 0 = expiry/Tue, DTE 1 = Mon; DTE 2 = Sun/non-trading so `--dte-max 1` is the operative 0DTE+1DTE filter). Applies per-day in the runner before `build_strangle_day`; skipped days counted in the skipped total.
-- [ ] 4.5 5-year full run with `--dte-max 1` (DTE 0+1 only) — pending manual execution; command: `task backtest:strangle -- --from 2021-09-01 --to 2026-06-26 --dte-max 1 --out-dir backtest/runs`
+- [x] 4.5 5-year full run with `--dte-max 1` (DTE 0+1 only, Mon+Tue only) — DONE: config `strangle_tren_cons_tp05_hedged.yaml`, 2021-09-01→2026-06-25, hedges=ON, scale_lots=2. **Net +Rs 29.4L | PF 4.67 | Win 76% | MaxDD Rs 52,282 | 314 traded days | 29 halted days.** Artifacts: `backtest/runs/strangle_20260626-210031`. DTE filter cuts 74% of days but retains strong edge (PF 4.67 vs 5.72 all-days — lower vol, tighter MaxDD).
 
 ## 4b. Run archival (extensive per-day logs + timing)
 
