@@ -45,8 +45,8 @@ from strangle_run import load_vix_window  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
 from pdp.backtest.day_loader import load_window  # noqa: E402
-from pdp.backtest.strangle_config import StrangleConfig  # noqa: E402
-from pdp.backtest.strangle_loader import build_strangle_day  # noqa: E402
+from pdp.backtest.strangle_config import StrangleConfig, nifty_lot_size  # noqa: E402
+from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_sim import StrangleDayData, simulate_strangle_day  # noqa: E402
 from pdp.instruments.expiry_calendar import NiftyExpiryCalendar  # noqa: E402
 from pdp.settings import get_settings  # noqa: E402
@@ -252,12 +252,13 @@ def run_fold(
         log.warning("fold %d: no valid days in span", fold.idx)
         return None
     vix_by_day = load_vix_window(mdb, vix_sid, window.valid_days)
+    pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, window.valid_days)
 
     # Build each day's inputs once (parameter-independent); split IS vs OOS by date.
     is_data: list[StrangleDayData] = []
     oos_data: list[StrangleDayData] = []
     for d in window.valid_days:
-        data = build_strangle_day(window, base, d, vix_by_day)
+        data = build_strangle_day(window, base, d, vix_by_day, pcr_by_day)
         if data is None:
             continue
         (is_data if d < fold.oos_start else oos_data).append(data)
@@ -268,10 +269,22 @@ def run_fold(
                     fold.idx, len(is_data), len(oos_data))
         return None
 
+    # Per-day lot-size-corrected config cache (keyed by (candidate_label, lot_size)).
+    _cfg_cache: dict[tuple[str, int], StrangleConfig] = {}
+
+    def sim_with_lot(cfg: StrangleConfig, label: str, dd: StrangleDayData):
+        lot = nifty_lot_size(dd.trade_date)
+        if lot == cfg.lot_size:
+            return simulate_strangle_day(cfg, dd, commission_fn)
+        key = (label, lot)
+        if key not in _cfg_cache:
+            _cfg_cache[key] = StrangleConfig.from_dict({**cfg.to_dict(), "lot_size": lot})
+        return simulate_strangle_day(_cfg_cache[key], dd, commission_fn)
+
     # In-sample selection.
     best: tuple[float, Candidate, Metrics] | None = None
     for cand in candidates:
-        res = [simulate_strangle_day(cand.cfg, dd, commission_fn) for dd in is_data]
+        res = [sim_with_lot(cand.cfg, cand.label, dd) for dd in is_data]
         m = compute_metrics(res)
         score = objective(m, obj_kind)
         if best is None or score > best[0]:
@@ -280,7 +293,7 @@ def run_fold(
     _, chosen, is_m = best
 
     # Out-of-sample evaluation of the IS-chosen config.
-    oos_res = [simulate_strangle_day(chosen.cfg, dd, commission_fn) for dd in oos_data]
+    oos_res = [sim_with_lot(chosen.cfg, chosen.label, dd) for dd in oos_data]
     oos_m = compute_metrics(oos_res)
 
     log.info(
@@ -356,9 +369,20 @@ def main() -> int:
     ap.add_argument("--vix-sid", default=os.getenv("VIX_SECURITY_ID", "21"))
     ap.add_argument("--no-commission", action="store_true")
     ap.add_argument("--out", default=None, help="Write the per-fold report to this CSV path")
+    ap.add_argument("--neutral-trade", dest="neutral_trade", action="store_true", default=False,
+                    help="Include neutral bucket as 3PE:3CE in the base config")
+    ap.add_argument("--scale-lots", dest="scale_lots", type=int, default=None,
+                    help="Multiply all ratio_table lots by this factor")
     args = ap.parse_args()
 
     base = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
+    if args.neutral_trade:
+        d = base.to_dict()
+        d["neutral_no_trade"] = False
+        d["ratio_table"]["neutral"] = [3, 3]
+        base = StrangleConfig.from_dict(d)
+    if args.scale_lots is not None:
+        base = StrangleConfig.from_dict({**base.to_dict(), "scale_lots": args.scale_lots})
     candidates = build_candidates(base)
     log.info("candidate grid: %d configs", len(candidates))
 

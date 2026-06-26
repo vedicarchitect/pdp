@@ -7,7 +7,7 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | File | Role |
 |------|------|
 | `sim.py` | **Active index simulation engine** — config-driven tick-by-tick replay, fill logic, P&L tracking |
-| `strangle_sim.py` | **Directional-strangle engine** — bias-driven multi-leg ratio strangle (PE:CE per bucket), protective hedges, rollup/take-profit/premium-doubled/trend-flip exits, every-minute `BarStatus` trace |
+| `strangle_sim.py` | **Directional-strangle engine** — bias-driven multi-leg ratio strangle (PE:CE per bucket), protective hedges, rollup/take-profit/tiered-pct-stop/trend-flip exits, every-minute `BarStatus` trace |
 | `strangle_config.py` | `StrangleConfig` dataclass — bias weights, ratio table, strike method, hedge band, exits; `from_yaml`/`to_yaml` |
 | `strangle_loader.py` | Assembles per-bar multi-timeframe `BiasInputs` (5m/15m/1h EMAs, daily+weekly Camarilla, swing, VWAP, ORB, India VIX) from a cached Mongo window for `strangle_sim.py` |
 | `strangle_report.py` | `RunWriter` — archives per-day artifacts (status.log, trades.csv, legs.csv, day.json) + run-level summary.csv/equity.csv/manifest.json with build/sim timing |
@@ -28,11 +28,14 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | Field | Default |
 |-------|---------|
 | `brokerage_per_order` | ₹20.00 |
-| `stt_rate` | 0.001 (0.1%) |
-| `txn_charge_rate` | 0.0003553 |
-| `sebi_rate` | 0.00001 |
-| `stamp_duty_rate` | 0.00004 |
+| `stt_rate` | 0.0015 (0.15% on sell premium) |
+| `txn_charge_rate` | 0.000355299 (0.0355299% NSE options) |
+| `sebi_rate` | 0.000001 (0.0001% of turnover) |
+| `stamp_duty_rate` | 0.00003 (0.003% on buy turnover) |
+| `ipft_rate` | 0.000000001 (negligible) |
 | `gst_rate` | 0.18 (18%) |
+
+Rates verified against Dhan charge schedule 2026-06-26.
 
 Override via `.env`: `BACKTEST_COMMISSION__BROKERAGE_PER_ORDER=15`
 

@@ -177,16 +177,16 @@ def test_take_profit_closes_leg():
     assert res.gross_pnl > 0
 
 
-def test_premium_doubled_stop():
+def test_pct_stop_closes_leg():
     times = [_t(10, 15), _t(11, 0)]
-    # PE ATM premium 120 -> 250 (>2x) -> stop.
+    # PE ATM premium 120 -> 250 (108% above entry > pct_stop_all=40%) -> full close.
     pe = {20000.0: [(_t(10, 15), 120.0), (_t(11, 0), 250.0)]}
     chain = _varying_chain({"PE": pe, "CE": {20000.0: [(t, 120.0) for t in times]}})
     data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
     res = simulate_strangle_day(StrangleConfig(), data)
     assert res is not None
     reasons = [t.note for t in res.trades if t.side == "BUY"]
-    assert "premium_doubled" in reasons
+    assert "pct_stop_all" in reasons
     assert res.gross_pnl < 0
 
 
@@ -318,3 +318,63 @@ def test_premium_method_picks_strike_above_floor():
     # most-OTM strike with premium > 50: PE 19900 (60), CE 20100 (60).
     assert sells["PE"] == (19900.0, 4 * StrangleConfig().lot_size)
     assert sells["CE"] == (20100.0, 2 * StrangleConfig().lot_size)
+
+
+def test_delta_method_picks_nearest_delta():
+    """Delta method must pick the strike whose solved BSM delta is closest to target_delta.
+
+    Uses a most_bull bias (4PE:2CE, non-extreme) so both sides open.  Chain premiums decrease
+    monotonically OTM; the delta method should pick a near-ATM strike (high delta) rather than
+    the cheapest far-OTM one that the premium-floor rule would also reject.
+    """
+    from datetime import date as _date
+
+    from pdp.backtest.strangle_config import STRIKE_DELTA, StrangleConfig
+
+    try:
+        import vollib  # noqa: F401
+    except ImportError:
+        import pytest
+        pytest.skip("vollib not installed — delta method falls back to premium, skip delta test")
+
+    # most_bull bias: ema_1h bull + ema_15m bull + vwap slightly bearish → score ~0.55
+    # → most_bull bucket (4PE:2CE), non-extreme so delta method is used.
+    def most_bull_bias():
+        return BiasInputs(spot=SPOT, ema_1h=_bull_ema(), ema_15m=_bull_ema(), vwap=SPOT + 10)
+
+    # Chain: strikes 50 pts apart, premiums mimic realistic near-ATM options.
+    # Higher premium = closer to ATM = higher absolute delta.
+    pe_prems = {
+        20000.0: 180,  # ATM    -> |delta| ~0.50
+        19950.0: 150,  # 1-step -> |delta| ~0.45
+        19900.0: 110,  # 2-step -> |delta| ~0.35
+        19850.0: 75,   # 3-step -> |delta| ~0.25
+        19800.0: 45,   # 4-step -> |delta| ~0.15  ← cheapest
+    }
+    ce_prems = {
+        20000.0: 180,
+        20050.0: 150,
+        20100.0: 110,
+        20150.0: 75,
+        20200.0: 45,   # cheapest
+    }
+    times = [_t(10, 15), _t(10, 20)]
+    chain = _flat_chain({"PE": pe_prems, "CE": ce_prems}, times)
+
+    expiry = _date(TD.year, TD.month, TD.day + 2)  # 2 days to expiry → valid T
+    # target_delta=0.35 → should pick a mid-OTM strike, not the 4-step far-OTM
+    cfg = StrangleConfig(strike_method=STRIKE_DELTA, target_delta=0.35, lot_size=25,
+                        extreme_atm=False)
+
+    data = StrangleDayData(TD, expiry, _bars(most_bull_bias, times), chain)
+    res = simulate_strangle_day(cfg, data)
+    assert res is not None
+    sells = {t.opt_type: t.strike for t in res.trades if t.side == "SELL" and "open" in t.note}
+    assert "PE" in sells and "CE" in sells
+
+    # Delta method must not pick the lowest-delta (cheapest) far-OTM strike.
+    assert sells["PE"] != 19800.0, "delta method selected the lowest-delta PE strike"
+    assert sells["CE"] != 20200.0, "delta method selected the lowest-delta CE strike"
+    # Selected strikes must come from the chain.
+    assert sells["PE"] in pe_prems
+    assert sells["CE"] in ce_prems

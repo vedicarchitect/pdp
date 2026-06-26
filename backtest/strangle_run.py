@@ -31,8 +31,8 @@ from pymongo import MongoClient  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
 from pdp.backtest.day_loader import biz_days, load_window  # noqa: E402
-from pdp.backtest.strangle_config import StrangleConfig  # noqa: E402
-from pdp.backtest.strangle_loader import build_strangle_day  # noqa: E402
+from pdp.backtest.strangle_config import StrangleConfig, nifty_lot_size  # noqa: E402
+from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_report import RunWriter  # noqa: E402
 from pdp.backtest.strangle_sim import BarStatus, format_status_line, simulate_strangle_day  # noqa: E402
 from pdp.instruments.expiry_calendar import NiftyExpiryCalendar  # noqa: E402
@@ -155,6 +155,14 @@ def main() -> int:
                     help="Only trade on days with calendar DTE <= this (0=expiry, 1=Mon for Tue-expiry)")
     ap.add_argument("--day-loss-limit", dest="day_loss_limit", type=float, default=None,
                     help="Daily loss cap in Rs before halt (default 15000; set 0 to disable)")
+    ap.add_argument("--take-profit-pct", dest="take_profit_pct", type=float, default=None,
+                    help="Close leg when this fraction of credit captured (default 0.5; set 0 to disable)")
+    ap.add_argument("--neutral-trade", dest="neutral_trade", action="store_true", default=False,
+                    help="Trade neutral bucket as 3PE:3CE symmetric strangle instead of skipping")
+    ap.add_argument("--take-profit-extreme", dest="take_profit_extreme", action="store_true", default=False,
+                    help="Apply take-profit only on complete_bull/bear legs; let balanced legs run to expiry")
+    ap.add_argument("--scale-lots", dest="scale_lots", type=int, default=None,
+                    help="Multiply all ratio_table lots by this factor (1=base, 2=double, 3=triple)")
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
@@ -165,10 +173,25 @@ def main() -> int:
     if args.day_loss_limit is not None:
         limit = args.day_loss_limit if args.day_loss_limit > 0 else 1e9
         cfg = StrangleConfig.from_dict({**cfg.to_dict(), "day_loss_limit": limit})
+    if args.take_profit_pct is not None:
+        tp = args.take_profit_pct if args.take_profit_pct > 0 else 999.0
+        cfg = StrangleConfig.from_dict({**cfg.to_dict(), "take_profit_pct": tp})
+    if args.neutral_trade:
+        d = cfg.to_dict()
+        d["neutral_no_trade"] = False
+        d["ratio_table"]["neutral"] = [3, 3]
+        cfg = StrangleConfig.from_dict(d)
+    if args.take_profit_extreme:
+        cfg = StrangleConfig.from_dict({**cfg.to_dict(), "take_profit_extreme_only": True})
+    if args.scale_lots is not None:
+        cfg = StrangleConfig.from_dict({**cfg.to_dict(), "scale_lots": args.scale_lots})
     dll = "OFF" if cfg.day_loss_limit >= 1e8 else f"Rs{cfg.day_loss_limit:,.0f}"
-    log.info("hedges: %s  dte_max: %s  day_loss_limit: %s",
+    tp = "OFF" if cfg.take_profit_pct >= 999 else f"{cfg.take_profit_pct*100:.0f}%"
+    tp = f"{tp}·extreme-only" if cfg.take_profit_extreme_only else tp
+    neutral = "3:3" if not cfg.neutral_no_trade else "skip"
+    log.info("hedges: %s  dte_max: %s  day_loss_limit: %s  take_profit: %s  neutral: %s  scale_lots: %s",
              "ON" if cfg.hedge_enabled else "OFF",
-             cfg.dte_max if cfg.dte_max is not None else "ALL", dll)
+             cfg.dte_max if cfg.dte_max is not None else "ALL", dll, tp, neutral, cfg.scale_lots)
 
     s = get_settings()
     mdb = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]
@@ -203,9 +226,11 @@ def main() -> int:
         window = load_window(mdb, cal, chunk)
         vix_by_day = load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
+        pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk)
         skipped += len(window.skipped)
         msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]}: "
-               f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, VIX {len(vix_by_day)}")
+               f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, "
+               f"VIX {len(vix_by_day)} PCR {len(pcr_by_day)}")
         log.info(msg)
         if writer:
             writer.log(msg)
@@ -216,14 +241,18 @@ def main() -> int:
                 if expiry is not None and (expiry - d).days > cfg.dte_max:
                     skipped += 1
                     continue
+            # Apply correct NSE lot size for this trade date (lot size changes over time).
+            day_lot = nifty_lot_size(d)
+            day_cfg = (cfg if day_lot == cfg.lot_size
+                       else StrangleConfig.from_dict({**cfg.to_dict(), "lot_size": day_lot}))
             t0 = time.perf_counter()
-            data = build_strangle_day(window, cfg, d, vix_by_day)
+            data = build_strangle_day(window, day_cfg, d, vix_by_day, pcr_by_day)
             build_ms = (time.perf_counter() - t0) * 1000.0
             if data is None:
                 continue
             trace: list[BarStatus] | None = [] if want_trace else None
             t1 = time.perf_counter()
-            r = simulate_strangle_day(cfg, data, commission_fn, trace=trace)
+            r = simulate_strangle_day(day_cfg, data, commission_fn, trace=trace)
             sim_ms = (time.perf_counter() - t1) * 1000.0
             if r is None:
                 continue

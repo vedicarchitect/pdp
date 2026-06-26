@@ -128,6 +128,7 @@ def build_strangle_day(
     cfg: StrangleConfig,
     trade_date: date,
     vix_1m_by_day: dict[date, list[dict]] | None = None,
+    pcr_by_day: dict[date, list[tuple[datetime, float]]] | None = None,
 ) -> StrangleDayData | None:
     """Assemble one trade day of decision bars with multi-timeframe ``BiasInputs``."""
     raw1 = window.spot_1m_by_day.get(trade_date)
@@ -169,6 +170,11 @@ def build_strangle_day(
     # VIX series for the day, resampled to the decision timeframe.
     vix_times, vix_close, vix_open, vix_high = _vix_for_day(vix_1m_by_day, trade_date, tf)
 
+    # PCR series for the day (1m OI-based; None when not loaded).
+    pcr_day = pcr_by_day.get(trade_date) if pcr_by_day else None
+    pcr_times = [t for t, _ in pcr_day] if pcr_day else []
+    pcr_vals = [v for _, v in pcr_day] if pcr_day else []
+
     # Running VWAP over the decision bars (typical price; volume if present else equal-weight).
     vwap_run = _VWAP()
 
@@ -183,6 +189,9 @@ def build_strangle_day(
         vix_now = vix_close[vix_i] if vix_i is not None else None
         vix_recent = vix_close[max(0, vix_i - 2): vix_i + 1] if vix_i is not None else []
 
+        pcr_i = _asof(pcr_times, ist) if pcr_times else None
+        pcr = pcr_vals[pcr_i] if pcr_i is not None else None
+
         bias = BiasInputs(
             spot=c,
             ema_1h=_tf_ema_at(t60, v60, ist, c),
@@ -193,7 +202,7 @@ def build_strangle_day(
             pdh=pdh, pdl=pdl, pwh=pwh, pwl=pwl,
             vwap=vwap_run.value(),
             orb_high=orb_high, orb_low=orb_low,
-            pcr=None,  # OI-based PCR is a follow-up (cached chain is OHLC-only)
+            pcr=pcr,
             vix_now=vix_now, vix_day_open=vix_open, vix_day_high=vix_high,
             vix_recent=list(vix_recent),
         )
@@ -235,6 +244,68 @@ class _VWAP:
         if self._v > 0:
             return self._pv / self._v
         return self._sumtp / self._n if self._n else None
+
+
+def load_pcr_window(
+    option_bars_col: object,
+    expiry_by_day: dict[date, date],
+    trade_dates: list[date],
+    underlying: str = "NIFTY",
+) -> dict[date, list[tuple[datetime, float]]]:
+    """Aggregate CE/PE OI per minute and compute PCR for each trade date.
+
+    Returns ``{trade_date: [(ist_dt, pcr), ...]}`` ordered by timestamp.
+    Uses a single MongoDB aggregation per calendar quarter to avoid scanning 42M+ rows.
+    """
+    if not trade_dates:
+        return {}
+
+    chunks: dict[tuple[int, int], list[date]] = {}
+    for d in trade_dates:
+        chunks.setdefault((d.year, (d.month - 1) // 3), []).append(d)
+
+    pcr_by_day: dict[date, list[tuple[datetime, float]]] = {}
+
+    for _, chunk_days in sorted(chunks.items()):
+        expiries = list({expiry_by_day[d] for d in chunk_days if d in expiry_by_day})
+        lo = datetime(min(chunk_days).year, min(chunk_days).month, min(chunk_days).day,
+                      0, 0, tzinfo=UTC)
+        hi = datetime(max(chunk_days).year, max(chunk_days).month, max(chunk_days).day,
+                      23, 59, tzinfo=UTC)
+        expiry_dts = [datetime(e.year, e.month, e.day, tzinfo=UTC) for e in expiries]
+
+        pipeline = [
+            {"$match": {
+                "underlying": underlying,
+                "expiry_date": {"$in": expiry_dts},
+                "timeframe": "1m",
+                "ts": {"$gte": lo, "$lte": hi},
+                "oi": {"$exists": True, "$gt": 0},
+            }},
+            {"$group": {
+                "_id": {"ts": "$ts", "option_type": "$option_type"},
+                "total_oi": {"$sum": "$oi"},
+            }},
+            {"$sort": {"_id.ts": 1}},
+        ]
+
+        # Pivot (ts, option_type, total_oi) -> PCR per minute.
+        oi_raw: dict[datetime, dict[str, float]] = {}
+        for doc in option_bars_col.aggregate(pipeline, allowDiskUse=True):
+            ts_raw = doc["_id"]["ts"]
+            ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=UTC)
+            opt = doc["_id"]["option_type"].upper()
+            oi_raw.setdefault(ts, {})[opt] = float(doc["total_oi"])
+
+        for ts_utc, sides in sorted(oi_raw.items()):
+            ist = (ts_utc + _IST).replace(tzinfo=None)
+            trade_date = ist.date()
+            ce_oi = sides.get("CE", 0.0)
+            pe_oi = sides.get("PE", 0.0)
+            if ce_oi > 0:
+                pcr_by_day.setdefault(trade_date, []).append((ist, pe_oi / ce_oi))
+
+    return pcr_by_day
 
 
 def _vix_for_day(

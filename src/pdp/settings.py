@@ -9,11 +9,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BacktestCommissionSettings(BaseModel):
+    # Options (Equity) NSE — verified against Dhan charge schedule 2026-06-26
     brokerage_per_order: Decimal = Decimal("20.00")
-    stt_rate: Decimal = Decimal("0.001")
-    txn_charge_rate: Decimal = Decimal("0.0003553")
-    sebi_rate: Decimal = Decimal("0.00001")
-    stamp_duty_rate: Decimal = Decimal("0.00004")
+    stt_rate: Decimal = Decimal("0.0015")          # 0.15% on sell (premium); was wrong at 0.001
+    txn_charge_rate: Decimal = Decimal("0.000355299")  # 0.0355299% NSE options on premium
+    sebi_rate: Decimal = Decimal("0.000001")        # 0.0001% of turnover; was 10x too high
+    stamp_duty_rate: Decimal = Decimal("0.00003")   # 0.003% on buy turnover; was 0.004%
+    ipft_rate: Decimal = Decimal("0.000000001")     # 0.0000001% — negligible, included for completeness
     gst_rate: Decimal = Decimal("0.18")
 
 
@@ -88,7 +90,7 @@ class Settings(BaseSettings):
     WAREHOUSE_GAP_LOOKBACK_DAYS: int = 30
     # NSE holiday calendar (JSON {"dates": ["YYYY-MM-DD", ...]}) for trading-day enumeration.
     # Multi-year (2023-2026) so historical gap scans don't treat past holidays as missing days.
-    NSE_HOLIDAYS_JSON: str = "data/calendars/nse_holidays_2023_2026.json"
+    NSE_HOLIDAYS_JSON: str = "data/calendars/nse_holidays_2021_2026.json"
     # Abi DuckDB data cutoff: gap-fill starts from this date by default.
     ABI_CUTOFF_DATE: str = "2026-05-23"
 

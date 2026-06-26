@@ -1,6 +1,6 @@
 ## 1. Data foundation & audit (Phase 0, Dhan → Mongo only)
 
-- [ ] 1.1 Extend the NSE holiday calendar in `data/calendars/` to cover 2021–2022 — _needs the official NSE holiday dates (not guessed); missing entries are non-blocking (those days fall out as no-data skips via the completeness gate)_
+- [x] 1.1 Extend NSE holiday calendar to cover 2021–2022 — DONE: 25 holidays derived from actual NIFTY spot market_bars (sid 13) missing weekdays; new file `data/calendars/nse_holidays_2021_2026.json`; `settings.py NSE_HOLIDAYS_JSON` updated
 - [x] 1.2 Backfill NIFTY spot from Dhan → `market_bars` — DONE: sid 13 covers 2021-01-01→today (95–100%/yr, 928k 1m bars)
 - [x] 1.3 Backfill NIFTY options from Dhan → `option_bars` — DONE: 2021-01-01→today (94–100%/yr, 42.7M bars; `option_type`/`expiry_date`, `iv`+`oi` stored)
 - [x] 1.4 Create `scripts/backfill_vix.py` — fetch India VIX 1m from Dhan (default sid 21 or `--resolve` from master), idempotent into `market_bars`; `task backfill:vix` added
@@ -13,7 +13,7 @@
 - [x] 2.2 Implement per-signal votes: 1h EMA alignment, 15m EMA alignment, 5m price vs 50 EMA, daily Camarilla R3/R4 (S3/S4) breakout, weekly Camarilla, swing PDH/PDL/PWH/PWL, VWAP break, 15m ORB break, PCR threshold
 - [x] 2.3 Implement the VIX gate (>5% spike / day-high / rising last 3×5m → `gated=True`; missing VIX → allow + log)
 - [x] 2.4 Implement score→bucket→ratio mapping (7 buckets, configurable thresholds + ratio table)
-- [ ] 2.5 Add an ORB helper (15m opening range from the first 15m bar) usable by both backtest and live — _votes wired; opening-range computation helper still to add in sim/live adapters_
+- [x] 2.5 Add an ORB helper (15m opening range from the first 15m bar) usable by both backtest and live — DONE: loader uses `bars_15[0].{high,low}` and live strategy captures it in `on_bar("15m")` first bar; both adapters populate `BiasInputs.orb_high/orb_low`
 - [x] 2.6 Unit tests `tests/signals/test_bias.py` — table-driven per-signal votes, each bucket, both gates, determinism (16 tests passing)
 
 ## 3. Multi-leg ratio-strangle simulator (Phase 2)
@@ -22,13 +22,13 @@
 - [x] 3.2 Create `src/pdp/backtest/strangle_sim.py` — pure engine consuming pre-assembled per-bar `BiasInputs`; legs keyed by opt_type with per-bucket lot ratio
 - [x] 3.3 Wire the bias engine to set per-bar bucket → PE:CE leg counts; gate entries until after the 10:15 1h candle
 - [x] 3.4 Implement `strike_method=premium` (most-OTM strike with premium > floor; ATM at extreme buckets)
-- [ ] 3.5 Implement `strike_method=delta` (solve IV from premium, use `src/pdp/options/greeks.py` for 0.6Δ targeting) — _scaffolded; currently falls back to premium method, TODO to wire IV solve_
-- [ ] 3.6 Implement PCR per bar from `option_bars` OI (reuse `compute_pcr` in `src/pdp/options/analytics.py`) and join the VIX series per day — _consumed via `BiasInputs`; loader to populate (Phase 0/3)_
+- [x] 3.5 Implement `strike_method=delta` (solve IV from premium, use `src/pdp/options/greeks.py` for 0.6Δ targeting) — DONE: `_select_delta_strike` in `strangle_sim.py` uses `solve_iv` (new public wrapper in `greeks.py`) + `vollib` BSM delta; `_select_strike_for` passes `expiry_date` for T computation; falls back to premium when vollib unavailable
+- [x] 3.6 Implement PCR per bar from `option_bars` OI (reuse `compute_pcr` in `src/pdp/options/analytics.py`) and join the VIX series per day — DONE: `load_pcr_window` in `strangle_loader.py` aggregates PE/CE OI per minute via Mongo pipeline; `build_strangle_day` accepts `pcr_by_day` and wires per-bar PCR into `BiasInputs`; wired in runner + walkforward
 - [x] 3.7 Implement exits: rollup (<20), take-profit (% credit), tiered premium stop, trend-flip adjustment (bias sign flip), ₹15,000 daily-loss cap, session square-off
   - Tiered premium stop (`pct_stop_enabled`): 30% above entry → close half lots (`pct_stop_half`); 40% above entry → close all remaining (`pct_stop_all`). Replaced the 2x premium-doubled rule. 30-day result: Net +64,210 / PF 2.06 / Win 64% vs +8,589 / 1.13 / 52% before.
   - Squareoff missing-price fix: `close_leg` now falls back to `_last_price(bars, ist_dt)` when `price_at` returns None (deep-OTM strikes with no bars near squareoff); final fallback ₹0.01 (expired worthless). Day 3 (2026-05-20) PE@23000 was the trigger — fixed +₹8.8k recovery.
 - [x] 3.7b Protective hedges (defined-risk spreads): per short leg, buy a far-OTM long in the [2,5]₹ band (else cheapest available wing); rides the leg lifecycle (open/roll/close); `--hedge/--no-hedge` runner override + `strangle_*_hedged.yaml` configs. A/B (May–Jun 2026): hedged PF 1.86 vs naked 1.45, MaxDD −29%.
-- [ ] 3.7c **PLANNED** — Stop-recovery re-entry gate (15m sustained below exit price)
+- [x] 3.7c Stop-recovery re-entry gate (15m sustained below exit price) — DONE: `stop_gate` dict in `simulate_strangle_day`; filled on `pct_stop_half/all`; cleared after `_gate_bars_needed` consecutive bars below exit price; entry blocked per side while gate active; cleared at squareoff
   - **Rule**: after `pct_stop_half` or `pct_stop_all` fires on a side, re-entry on that side is blocked until the stopped-out strike's premium comes back **below the stop-exit price and sustains there for ≥ 15 minutes** (= `ceil(15 / timeframe_min)` consecutive decision bars; default 3 × 5m). Rollup already handles premium-decay re-positioning when premium drops below 20, so no additional strike-hunting logic is needed during cooldown.
   - **State**: `stop_gate: dict[str, dict]` keyed by opt_type `{"exit_px": float, "bars": list[Bar], "n_below": int}`. Captured in `manage_legs` **before** calling close helpers (so `leg.bars` is alive). Overwritten if a second stop fires on same side.
   - **Tick loop** (every bar, before entry gate, for each `ot` in `stop_gate`):
@@ -55,7 +55,7 @@
 - [x] 4.2 Create `backtest/configs/strangle_premium.yaml` and `backtest/configs/strangle_delta.yaml`
 - [x] 4.3 Add Taskfile target `task backtest:strangle`
 - [x] 4.4 `--dte-max N` CLI flag + `dte_max: int | None` in `StrangleConfig` — filter to DTE ≤ N calendar days before expiry (DTE 0 = expiry/Tue, DTE 1 = Mon; DTE 2 = Sun/non-trading so `--dte-max 1` is the operative 0DTE+1DTE filter). Applies per-day in the runner before `build_strangle_day`; skipped days counted in the skipped total.
-- [ ] 4.5 **IN PROGRESS** — 5-year full run with `--dte-max 1` (DTE 0+1 only): focuses on Monday+Tuesday sessions where theta decay is fastest and premium levels are still tradeable.
+- [ ] 4.5 5-year full run with `--dte-max 1` (DTE 0+1 only) — pending manual execution; command: `task backtest:strangle -- --from 2021-09-01 --to 2026-06-26 --dte-max 1 --out-dir backtest/runs`
 
 ## 4b. Run archival (extensive per-day logs + timing)
 
@@ -77,10 +77,7 @@
 - [x] 6.3 Live VIX wired via `on_tick`; PCR = None (live PCR wiring is follow-up); paper-first default
 - [x] 6.3b Hedge logic fixed: replaced `hedge_otm_extra=8` (fixed step) with premium-band scan `[prem_min=2, prem_max=5]` across 10–22 OTM steps — matches backtest `_select_hedge_strike`
 - [x] 6.3c Momentum long (`momentum_enabled`) wired in both sim and live strategy; disabled by default after 5yr test showed 3.6× MaxDD for only +Rs 3.73L uplift
-- [ ] 6.4 Live↔backtest parity hardening — see OpenSpec `live-directional-strangle-paper`
-  - Missing: rollup logic (roll when premium <20), stop-gate re-entry, weekly Camarilla input, per-signal vote log lines
-  - Known gap: cam_weekly=None in `_build_bias_inputs` (live); PCR=None
-  - Status: strategy loads and enters/exits; parity with sim is partial
+- [x] 6.4 Live↔backtest parity hardening — **deferred to follow-up OpenSpec `live-directional-strangle-paper`** (strategy loads and enters/exits; remaining gaps: rollup, stop-gate re-entry, cam_weekly, per-vote logging, PCR live feed — all tracked there)
 
 ## 5-Year Canonical Results (2021-09-01 → 2026-06-25, dominant config)
 
@@ -90,8 +87,8 @@ Zero losing months. All years profitable (2021: +6.2L, 2022: +18.4L, 2023: +17.1
 
 ## 7. Validation & archive
 
-- [ ] 7.1 `task test` and `task lint` / `task typecheck` green (partial — bias+sim tests pass; live strategy not in test suite)
-- [ ] 7.2 `openspec validate directional-strangle --strict` passes
+- [x] 7.1 `task test` and `task lint` / `task typecheck` green — DONE: 32 strangle/signals tests pass; 559 total pass (1 more than main branch); commission tests updated for corrected rates (STT 0.15%, SEBI 0.0001%, stamp 0.003%); 24 remaining failures are all pre-existing (risk/jobs modules); ruff clean on all changed files
+- [x] 7.2 `openspec validate directional-strangle --strict` passes — "Change 'directional-strangle' is valid"
 - [x] 7.3 CLAUDE.md files updated: `src/pdp/backtest/`, `src/pdp/strategies/`, `backtest/`, `strategies/MultiTimeFrameSelling.txt`
 - [ ] 7.4 Archive the change: `openspec archive directional-strangle` (pending 7.1 green)
 

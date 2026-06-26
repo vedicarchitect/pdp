@@ -21,18 +21,21 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pdp.backtest.strangle_sim import format_status_line
+
 if TYPE_CHECKING:
     from pdp.backtest.sim import DayResult
     from pdp.backtest.strangle_config import StrangleConfig
     from pdp.backtest.strangle_sim import BarStatus
 
-from pdp.backtest.strangle_sim import format_status_line
+_BUCKET_RE = re.compile(r"\[(\w+)\]")
 
 
 class RunWriter:
@@ -58,6 +61,14 @@ class RunWriter:
         self._equity_fh = (self.root / "equity.csv").open("w", newline="")
         self._equity = csv.writer(self._equity_fh)
         self._equity.writerow(["date", "net", "cum_equity", "peak", "drawdown"])
+
+        self._journal_fh = (self.root / "trade_journal.csv").open("w", newline="")
+        self._journal = csv.writer(self._journal_fh)
+        self._journal.writerow([
+            "date", "first_entry", "last_exit", "conditions_matched",
+            "gross_pnl", "net_pnl", "cum_equity",
+        ])
+
         self._log_fh = (self.root / "run.log").open("w", encoding="utf-8")
         self._n_days = 0
         self._n_trades = 0
@@ -102,6 +113,17 @@ class RunWriter:
                     f"{lr.leg_pnl:.2f}", lr.reason,
                 ])
 
+        # trade_journal.csv: first open entry, last close, bias buckets matched, P&L
+        open_trades = [t for t in result.trades if t.side == "SELL" and "open " in t.note]
+        first_entry = _hhmm(min((t.bar_time for t in open_trades), default=None))
+        last_exit = _hhmm(max((t.bar_time for t in result.trades), default=None)) if result.trades else ""
+        conditions = list(dict.fromkeys(
+            m.group(1)
+            for t in open_trades
+            for m in [_BUCKET_RE.search(t.note)]
+            if m
+        ))
+
         self._eq += result.realized
         self._peak = max(self._peak, self._eq)
         dd = self._peak - self._eq
@@ -126,6 +148,11 @@ class RunWriter:
         self._equity.writerow([result.date, f"{result.realized:.2f}", f"{self._eq:.2f}",
                                f"{self._peak:.2f}", f"{dd:.2f}"])
         self._equity_fh.flush()
+        self._journal.writerow([
+            result.date, first_entry, last_exit, " | ".join(conditions),
+            f"{result.gross_pnl:.2f}", f"{result.realized:.2f}", f"{self._eq:.2f}",
+        ])
+        self._journal_fh.flush()
         self._n_days += 1
         self._n_trades += len(result.trades)
 
@@ -148,6 +175,7 @@ class RunWriter:
         self.log(f"done: {self._n_days} days, {self._n_trades} trades, {wall_s:.1f}s wall")
         self._summary_fh.close()
         self._equity_fh.close()
+        self._journal_fh.close()
         self._log_fh.close()
         return self.root
 

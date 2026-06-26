@@ -39,7 +39,7 @@ Both behind a `strike_method` flag so Phase 4 can compare them head-to-head.
 ### 5. Exits (from the playbook, made precise)
 - **Rollup**: when a leg's premium `< 20`, buy it back and re-sell a new strike with premium ≥ `roll_target_min_prem` (default 50) on the same side.
 - **Take-profit**: close a leg at `take_profit_pct` of collected credit (default 50%).
-- **Premium-doubled**: close a leg when its premium ≥ 2× entry (stop).
+- **Tiered pct stop** (replaced the initial "premium-doubled" rule after A/B testing): close half lots when premium rises 30% above entry (`pct_stop_half`); close all remaining when premium rises 40% above entry (`pct_stop_all`). A 15-minute stop-recovery gate blocks re-entry on that side until the stopped strike's premium comes back below the exit price and sustains there for ≥ 3 consecutive bars. 30-day result: Net +64,210 / PF 2.06 / Win 64% vs +8,589 / 1.13 / 52% with the 2× rule.
 - **Adjustment / trend flip**: on 15m or 1h 50-EMA being broken/crossed against the position (9 & 20 crossing opposite), roll the tested side to flatten directional exposure.
 - **Daily loss cap**: flatten everything and stop for the day when realized+unrealized ≤ −₹15,000.
 - **Square-off**: all legs closed at session end.

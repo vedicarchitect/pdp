@@ -36,6 +36,7 @@ from pdp.backtest.sim import (
     select_strike,
 )
 from pdp.backtest.strangle_config import STRIKE_DELTA, StrangleConfig
+from pdp.options.greeks import solve_iv
 from pdp.signals.bias import BiasBucket, BiasInputs, BiasResult, CamLevels, score_bias
 
 _EXTREME = (BiasBucket.COMPLETE_BULL, BiasBucket.COMPLETE_BEAR)
@@ -212,6 +213,65 @@ def _select_hedge_strike(
     return None, []
 
 
+def _select_delta_strike(
+    day_chain: dict[str, dict[float, list]],
+    opt_type: str,
+    ist_dt: datetime,
+    spot: float,
+    expiry_date: date,
+    cfg: StrangleConfig,
+) -> tuple[float | None, list]:
+    """Strike nearest ``cfg.target_delta`` via Black-Scholes IV solved from bar premium.
+
+    Walks OTM strikes (ATM out to 20 steps) and selects the one whose solved-IV delta
+    is closest to the configured target.  Falls back to premium method when vollib is
+    unavailable or no valid IV can be solved across the chain.
+    """
+    flag = "c" if opt_type.upper() == "CE" else "p"
+    days_left = max(1, (expiry_date - ist_dt.date()).days)
+    t = days_left / 365.0
+    r = 0.065  # NSE typical risk-free rate
+
+    try:
+        from vollib.black_scholes_merton.greeks.analytical import delta as _bsm_delta
+    except ImportError:
+        return _select_premium_strike(day_chain, opt_type, ist_dt, spot, cfg)
+
+    step = cfg.strike_step
+    atm = round(spot / step) * step
+    best_strike: float | None = None
+    best_bars: list = []
+    best_diff = float("inf")
+
+    for s in range(0, 21):
+        target = float(select_strike(atm, opt_type, s, step))
+        strike, bars = resolve_from_chain(day_chain, opt_type, target, step, band=2)
+        if strike is None or not bars:
+            continue
+        prem = price_at(bars, ist_dt, prefer="close")
+        if prem is None or prem <= 0:
+            continue
+        iv = solve_iv(prem, spot, strike, t, r, opt_type)
+        if iv is None:
+            continue
+        try:
+            import numpy as np
+            d = abs(float(_bsm_delta(flag, spot, strike, t, r, iv, 0.0)))
+            if np.isnan(d) or np.isinf(d):
+                continue
+        except Exception:  # noqa: S112
+            continue
+        diff = abs(d - cfg.target_delta)
+        if diff < best_diff:
+            best_diff = diff
+            best_strike = strike
+            best_bars = bars
+
+    if best_strike is not None:
+        return best_strike, best_bars
+    return _select_premium_strike(day_chain, opt_type, ist_dt, spot, cfg)
+
+
 def _select_strike_for(
     cfg: StrangleConfig,
     bucket: BiasBucket,
@@ -219,16 +279,14 @@ def _select_strike_for(
     day_chain: dict[str, dict[float, list]],
     ist_dt: datetime,
     spot: float,
+    expiry_date: date | None = None,
 ) -> tuple[float | None, list]:
     """Resolve the strike+bars for one leg per the configured method and bucket."""
     if cfg.extreme_atm and bucket in _EXTREME:
         target = float(select_strike(spot, opt_type, 0, cfg.strike_step))  # ATM
         return resolve_from_chain(day_chain, opt_type, target, cfg.strike_step, band=2)
-    if cfg.strike_method == STRIKE_DELTA:
-        # Delta-based selection requires solving IV per candidate strike from the
-        # bar premium; until that is wired in it falls back to the premium method
-        # so configs remain runnable. Tracked as a follow-up.
-        return _select_premium_strike(day_chain, opt_type, ist_dt, spot, cfg)
+    if cfg.strike_method == STRIKE_DELTA and expiry_date is not None:
+        return _select_delta_strike(day_chain, opt_type, ist_dt, spot, expiry_date, cfg)
     return _select_premium_strike(day_chain, opt_type, ist_dt, spot, cfg)
 
 
@@ -277,7 +335,8 @@ def simulate_strangle_day(
                  bucket: BiasBucket, note: str) -> bool:
         if lots <= 0:
             return False
-        strike, sbars = _select_strike_for(cfg, bucket, opt_type, data.day_chain, ist_dt, spot)
+        strike, sbars = _select_strike_for(cfg, bucket, opt_type, data.day_chain, ist_dt, spot,
+                                           expiry_date=data.expiry_date)
         if strike is None or not sbars:
             return False
         px = price_at(sbars, ist_dt, prefer="close")

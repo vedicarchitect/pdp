@@ -11,6 +11,7 @@ class CommissionBreakdown:
     txn_charge: Decimal
     sebi: Decimal
     stamp_duty: Decimal
+    ipft: Decimal
     gst: Decimal
     total_inr: Decimal
 
@@ -23,6 +24,7 @@ class CommissionCalculator:
         self.txn_charge_rate = settings.txn_charge_rate
         self.sebi_rate = settings.sebi_rate
         self.stamp_duty_rate = settings.stamp_duty_rate
+        self.ipft_rate = getattr(settings, "ipft_rate", Decimal("0.000000001"))
         self.gst_rate = settings.gst_rate
 
     def calculate(self, side: str, turnover_inr: Decimal) -> CommissionBreakdown:
@@ -33,6 +35,7 @@ class CommissionCalculator:
                 txn_charge=Decimal("0.0"),
                 sebi=Decimal("0.0"),
                 stamp_duty=Decimal("0.0"),
+                ipft=Decimal("0.0"),
                 gst=Decimal("0.0"),
                 total_inr=self.brokerage,
             )
@@ -49,10 +52,12 @@ class CommissionCalculator:
 
         txn_charge = turnover_inr * self.txn_charge_rate
         sebi = turnover_inr * self.sebi_rate
+        ipft = turnover_inr * self.ipft_rate
 
-        gst = (self.brokerage + txn_charge + sebi) * self.gst_rate
+        # GST base: brokerage + txn + SEBI turnover fee + IPFT (per Dhan schedule)
+        gst = (self.brokerage + txn_charge + sebi + ipft) * self.gst_rate
 
-        total_inr = self.brokerage + stt + txn_charge + sebi + stamp_duty + gst
+        total_inr = self.brokerage + stt + txn_charge + sebi + stamp_duty + ipft + gst
 
         return CommissionBreakdown(
             brokerage=self.brokerage,
@@ -60,6 +65,7 @@ class CommissionCalculator:
             txn_charge=txn_charge,
             sebi=sebi,
             stamp_duty=stamp_duty,
+            ipft=ipft,
             gst=gst,
             total_inr=total_inr,
         )
@@ -76,6 +82,7 @@ class NullCommissionCalculator:
             txn_charge=Decimal("0.0"),
             sebi=Decimal("0.0"),
             stamp_duty=Decimal("0.0"),
+            ipft=Decimal("0.0"),
             gst=Decimal("0.0"),
             total_inr=Decimal("0.0"),
         )

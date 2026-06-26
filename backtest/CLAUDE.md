@@ -11,6 +11,7 @@ and version-controlled config files. The Python package lives in `src/pdp/backte
 | `compare.py` | Replay one day, compare vs paper journal (side-by-side, no DB writes) |
 | `strangle_run.py` | **Directional-strangle** multi-year runner — quarter-chunked load, replays per day; `--hedge/--no-hedge`, `--trace`, `--out-dir` archives per-day logs |
 | `strangle_walkforward.py` | Walk-forward IS/OOS optimizer (go/no-go gate) — grouped-knob grid, stitched OOS equity + verdict |
+| `daily_flow.py` | Print human-readable daily/monthly P&L flow from a run's `summary.csv`; `python backtest/daily_flow.py <run_dir> [--monthly] [--losing] [--year N]` |
 | `configs/st10_15m_otm1.yaml` | **Default / promoted config** — ST(10,2)/15m/OTM1 |
 | `configs/st3_1_5m_otm1.yaml` | Legacy anchor baseline — ST(3,1)/5m/OTM1 (regression anchor) |
 | `configs/strangle_premium*.yaml` | Directional-strangle, premium-strike (naked + `_hedged` 2–5₹ wing) |

@@ -10,6 +10,19 @@ _IV_LO = 0.01
 _IV_HI = 5.0
 
 
+def solve_iv(
+    price: float, spot: float, strike: float, t: float, r: float, opt_type: str
+) -> float | None:
+    """Solve implied volatility from option price (Black-Scholes-Merton).
+
+    Returns ``None`` when IV cannot be solved (deep OTM/expired/bad input).
+    Falls back gracefully when vollib is unavailable.
+    """
+    flag = "c" if opt_type.upper() == "CE" else "p"
+    iv = _safe_iv(price, spot, strike, t, r, flag)
+    return iv if iv > _IV_LO else None
+
+
 def _safe_iv(price: float, spot: float, strike: float, t: float, r: float, flag: str) -> float:
     try:
         from vollib.black_scholes_merton.implied_volatility import implied_volatility
