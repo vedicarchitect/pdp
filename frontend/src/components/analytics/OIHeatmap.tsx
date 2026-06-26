@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   LineChart,
@@ -78,21 +78,34 @@ export function OIHeatmap({ underlying, expiry }: Props) {
   const { snapshots } = data
   if (snapshots.length === 0) return <PaperModePlaceholder />
 
-  // Collect all strikes sorted descending for rows
-  const allStrikes = Array.from(
-    new Set(snapshots.flatMap((s) => s.strikes.map((x) => x.strike)))
-  ).sort((a, b) => b - a)
+  const { allStrikes, colMaxOI, pcrData, strikeLookups } = useMemo(() => {
+    // Collect all strikes sorted descending for rows
+    const allStrikes = Array.from(
+      new Set(snapshots.flatMap((s) => s.strikes.map((x) => x.strike)))
+    ).sort((a, b) => b - a)
 
-  // Per-column max OI for normalisation
-  const colMaxOI = snapshots.map((snap) =>
-    snap.strikes.reduce((m, s) => Math.max(m, s.total_oi), 1)
-  )
+    // Per-column max OI for normalisation
+    const colMaxOI = snapshots.map((snap) =>
+      snap.strikes.reduce((m, s) => Math.max(m, s.total_oi), 1)
+    )
 
-  // PCR line data
-  const pcrData = snapshots.map((snap) => ({
-    ts: formatTs(snap.ts),
-    pcr: snap.pcr,
-  }))
+    // PCR line data
+    const pcrData = snapshots.map((snap) => ({
+      ts: formatTs(snap.ts),
+      pcr: snap.pcr,
+    }))
+
+    // O(1) lookup map for strikes per snapshot to prevent O(N*M*K) find() during render
+    const strikeLookups = snapshots.map((snap) => {
+      const map = new Map<number, OIStrike>()
+      for (const strike of snap.strikes) {
+        map.set(strike.strike, strike)
+      }
+      return map
+    })
+
+    return { allStrikes, colMaxOI, pcrData, strikeLookups }
+  }, [snapshots])
 
   return (
     <div className="flex flex-col gap-4">
@@ -122,7 +135,7 @@ export function OIHeatmap({ underlying, expiry }: Props) {
                 {strike}
               </div>
               {snapshots.map((snap, ci) => {
-                const s = snap.strikes.find((x) => x.strike === strike)
+                const s = strikeLookups[ci].get(strike)
                 const oi = s?.total_oi ?? 0
                 const opacity = oi / colMaxOI[ci]
                 return (
