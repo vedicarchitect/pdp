@@ -6,7 +6,8 @@ Python implementations of trading strategies. Each file implements a class that 
 
 | File | Purpose |
 |------|---------|
-| `supertrend_short.py` | `SuperTrendShort` — ST(3,1) NIFTY OTM option-selling |
+| `supertrend_short.py` | `SuperTrendShort` — ST(10,2)/15m NIFTY OTM-1 option-selling |
+| `directional_strangle.py` | `DirectionalStrangle` — bias-driven multi-leg ratio strangle; reuses `pdp.signals.bias.score_bias()`; hedge via Rs 2–5 premium-band scan; momentum disabled by default |
 
 ## Wiring
 

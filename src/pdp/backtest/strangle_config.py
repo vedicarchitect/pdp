@@ -12,13 +12,33 @@ optimized without editing source — mirroring ``StrategyConfig``.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from pdp.signals.bias import DEFAULT_RATIO_TABLE, BiasBucket, BiasWeights
+
+# NSE NIFTY 50 lot-size history — effective dates and lot sizes.
+# Source: NSE F&O circulars / SEBI mandate changes.
+# Each entry: (effective_from, lot_size). Last entry covers "now".
+_NIFTY_LOT_HISTORY: list[tuple[date, int]] = [
+    (date(2000, 1, 1),  75),   # pre-Jul 2021 baseline
+    (date(2021, 7, 1),  50),   # reduced: NIFTY crossed 15k–16k
+    (date(2024, 4, 1),  25),   # halved: NIFTY near 22k+
+    (date(2025, 1, 1),  75),   # SEBI min contract value → ₹15L
+    (date(2026, 1, 1),  65),   # periodic review realignment
+]
+
+
+def nifty_lot_size(trade_date: date) -> int:
+    """Return the NSE-mandated NIFTY 50 lot size that was in effect on *trade_date*."""
+    lot = _NIFTY_LOT_HISTORY[0][1]
+    for eff_date, size in _NIFTY_LOT_HISTORY:
+        if trade_date >= eff_date:
+            lot = size
+    return lot
 
 STRIKE_PREMIUM = "premium"  # nearest strike with premium > premium_floor
 STRIKE_DELTA = "delta"      # strike nearest target_delta (IV solved from premium)
@@ -57,6 +77,7 @@ class StrangleConfig:
     roll_trigger_prem: float = 20.0     # rollup when premium < this
     roll_target_min_prem: float = 50.0  # new strike must have premium >= this
     take_profit_pct: float = 0.5        # close leg at this fraction of credit captured
+    take_profit_extreme_only: bool = False  # TP only on complete_bull/bear; let balanced legs run
     # Tiered premium stop (replaces premium_doubled 2x rule).
     # At pct_stop_half: close half the lots, keep the rest open (re-entry allowed).
     # At pct_stop_all:  close all remaining lots (re-entry allowed on bias signal).
@@ -79,6 +100,14 @@ class StrangleConfig:
     # DTE 2 = Sunday (non-trading), so dte_max=1 vs dte_max=2 is equivalent in practice.
     # None = no filter (all trading days).
     dte_max: int | None = None
+
+    # Position sizing
+    scale_lots: int = 1  # multiply every ratio_table value by this (1=unchanged, 2=double, ...)
+
+    # Momentum long — buy ITM+1 option on COMPLETE_BULL/BEAR, close when |score| < threshold
+    momentum_enabled: bool = False
+    momentum_premium_target: float = 50_000.0  # target Rs spend on the ITM long
+    momentum_score_threshold: float = 0.5      # close when |score| drops below this
 
     # Behaviour
     neutral_no_trade: bool = True       # skip the neutral bucket
@@ -105,14 +134,16 @@ class StrangleConfig:
             raise ValueError(f"lot_size must be >= 1, got {self.lot_size}")
         if self.strike_method not in _STRIKE_METHODS:
             raise ValueError(f"strike_method must be one of {_STRIKE_METHODS}, got {self.strike_method}")
-        if not 0.0 < self.take_profit_pct <= 1.0:
-            raise ValueError(f"take_profit_pct must be in (0, 1], got {self.take_profit_pct}")
+        if not 0.0 < self.take_profit_pct:
+            raise ValueError(f"take_profit_pct must be > 0, got {self.take_profit_pct}")
         if self.pct_stop_enabled:
             if not 0.0 < self.pct_stop_half < self.pct_stop_all:
                 raise ValueError(
                     f"pct_stop_half must be < pct_stop_all and both > 0; "
                     f"got half={self.pct_stop_half} all={self.pct_stop_all}"
                 )
+        if self.scale_lots < 1:
+            raise ValueError(f"scale_lots must be >= 1, got {self.scale_lots}")
         if self.day_loss_limit <= 0:
             raise ValueError(f"day_loss_limit must be > 0, got {self.day_loss_limit}")
         if self.hedge_enabled and not 0.0 < self.hedge_prem_min <= self.hedge_prem_max:
@@ -128,7 +159,7 @@ class StrangleConfig:
 
     def ratio_for(self, bucket: BiasBucket) -> tuple[int, int]:
         pe, ce = self.ratio_table[bucket.value]
-        return int(pe), int(ce)
+        return int(pe) * self.scale_lots, int(ce) * self.scale_lots
 
     # -- (de)serialization ------------------------------------------------- #
     @classmethod

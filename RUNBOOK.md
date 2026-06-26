@@ -24,6 +24,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 14. [Health Checks](#14-health-checks)
 15. [Common Troubleshooting](#15-common-troubleshooting)
 16. [Alert System — Setup & Usage Guide](#16-alert-system--setup--usage-guide)
+17. [Directional Strangle — Paper Mode Operations](#17-directional-strangle--paper-mode-operations)
 
 ---
 
@@ -212,6 +213,7 @@ npx shadcn-ui@latest add <component-name>
 | File | ID | Description |
 |------|----|-------------|
 | `strategies/supertrend_short.yaml` | `supertrend_short` | ST(10,2)/15m NIFTY OTM-1 option selling. Paper-only. Promoted 2026-06-14. |
+| `strategies/directional_strangle.yaml` | `directional_strangle` | Bias-driven multi-TF NIFTY ratio strangle. Paper-only. 5yr backtest: Rs 85.6L / PF 5.72. See §17. |
 
 ### Add a new strategy
 
@@ -1174,3 +1176,150 @@ The following new condition types need OpenSpec changes to implement fully:
 | `NET_DELTA_GT/LT` | Portfolio aggregate delta | ✅ Greeks in positions |
 | `TRADE_COUNT_GT` | More than N trades today | ✅ Journal stats |
 | `PREMIUM_RECEIVED_GT` | Total premium > ₹X | ✅ Journal stats |
+
+---
+
+## 17. Directional Strangle — Paper Mode Operations
+
+Bias-driven NIFTY ratio strangle. Sells PE:CE lots proportional to multi-TF signal strength.
+5-year backtest (Sep 2021–Jun 2026): **+Rs 85.6L | PF 5.72 | MaxDD Rs 71k | Win 75%**.
+All years profitable. Zero losing months. See `strategies/MultiTimeFrameSelling.txt` for full reference.
+
+### 17.1 Pre-market setup (before 09:00 IST)
+
+```powershell
+task db:up        # ensure postgres:5432 + redis:6379 + mongo:27017 are running
+task db:migrate   # apply any pending migrations (safe to re-run)
+task dev          # start API on http://localhost:8000 (paper mode by default)
+```
+
+Verify the strategy loaded:
+```powershell
+curl http://localhost:8000/api/v1/strategies
+# Look for: {"id": "directional_strangle", "status": "active"}
+```
+
+### 17.2 What happens at 10:15
+
+The strategy waits silently until 10:15 IST (after the first 1h candle closes and the 15m ORB is set). At 10:15 the following happens on every 5m bar:
+
+1. `bias_evaluated` — structlog line with score, bucket, gated flag, short count
+2. If not gated: open PE and CE shorts per bucket ratio (×scale_lots=2)
+3. `short_opened` — leg confirmation with strike, lots, security_id
+4. `hedge_opened` — far-OTM protective wing (Rs 2–5 premium) bought per short leg
+5. On every subsequent 5m bar: check exits (TP 50%, stop 30/40%, rollup, flip, day_loss)
+6. `all_legs_closed square_off` — automatic close at 15:10 IST
+
+### 17.3 Key log events to monitor
+
+```
+directional_strangle_init  — startup, confirms params
+bias_evaluated             — every 5m: score, bucket, gated=true/false
+short_opened               — leg entry: opt_type, strike, lots, sid
+hedge_opened               — hedge wing: strike, sid
+take_profit                — TP at 50% premium decay
+stop_half                  — 30% stop: closed 50% lots
+stop_all                   — 40% stop: closed all lots
+trend_flip                 — bias sign reversed, legs closed+reopened
+day_loss_cap_halt          — day P&L <= -15000, trading halted
+all_legs_closed            — squareoff or full close
+```
+
+### 17.4 Backtest commands
+
+```powershell
+# Quick 30-day run (canonical config)
+task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --days 30
+
+# 2026 YTD
+task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2026-01-01 --out-dir backtest/runs
+
+# Full 5-year (takes ~12 min)
+task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs
+
+# Trace mode (every-minute status.log per day)
+task backtest:strangle -- --from 2026-06-20 --days 3 --trace
+```
+
+### 17.5 Reading the outputs
+
+Each run in `backtest/runs/<run_id>/` contains:
+
+| File | Contents |
+|------|---------|
+| `manifest.json` | Config + window + aggregate metrics + git SHA |
+| `summary.csv` | One row/day: P&L, trades, drawdown, timing |
+| `equity.csv` | Cumulative realized equity + peak + drawdown by day |
+| `days/<date>/status.log` | Every-minute BarStatus: score, votes, legs, actions |
+| `days/<date>/trades.csv` | Every fill: time, side, strike, qty, price, leg/day P&L |
+| `days/<date>/legs.csv` | Closed-leg records: entry/exit/lots/pnl/reason |
+
+### 17.6 Data prerequisites for backtest
+
+VIX intraday data starts ~Aug 2021 → backtest window begins 2021-09-01.
+Spot + options cover full Jan 2021 onwards.
+
+```powershell
+# If spot bars are missing
+uv run python scripts/backfill_spot.py --from 2021-09-01 --only-missing
+
+# If options bars are missing
+uv run python scripts/backfill_options_gap.py --from 2021-09-01 --only-missing
+
+# Audit coverage before a long run
+uv run python scripts/audit_strangle_data.py
+```
+
+### 17.7 Config reference
+
+Canonical config: `backtest/configs/strangle_tren_cons_tp05_hedged.yaml`
+Live config: `strategies/directional_strangle.yaml`
+
+Key knobs:
+
+| Param | Value | Effect |
+|-------|-------|--------|
+| `otm_steps` | 2 | Sell 2 strikes OTM from ATM |
+| `scale_lots` | 2 | All ratio-table values ×2 |
+| `take_profit_pct` | 0.5 | Close leg when premium decays 50% |
+| `pct_stop_half` | 0.30 | Close 50% lots when premium rises 30% |
+| `pct_stop_all` | 0.40 | Close all when premium rises 40% |
+| `hedge_enabled` | true | Buy far-OTM wing Rs 2–5 per short leg |
+| `day_loss_limit` | 15000 | Halt if day P&L ≤ −Rs 15,000 |
+| `entry_after_ist` | 10:15 | No entries before this |
+| `squareoff_ist` | 15:10 | Hard flatten at/after this |
+| `momentum_enabled` | false | Disabled (blew MaxDD 3.6× for tiny uplift) |
+| `neutral_no_trade` | false | Trade neutral bucket as 3PE:3CE |
+
+### 17.8 Known gaps vs backtest (follow-up OpenSpec: `live-directional-strangle-paper`)
+
+| Gap | Impact |
+|-----|--------|
+| No rollup in live | Stale cheap legs held to squareoff instead of re-striking |
+| No stop-gate re-entry | Can re-enter stopped side immediately; backtest waits 15 min |
+| `cam_weekly=None` | Weekly Camarilla vote always 0; slight score difference |
+| `pcr=None` | PCR vote always 0; slight score difference |
+| No per-signal vote logging | Cannot trace individual signal contributions live |
+
+### 17.9 End-of-day checks
+
+```powershell
+# All orders placed today
+curl "http://localhost:8000/api/v1/orders?today=1"
+
+# All fills
+curl http://localhost:8000/api/v1/trades
+
+# P&L summary
+curl http://localhost:8000/api/v1/portfolio/summary
+
+# Paper journal (MongoDB)
+docker exec -it pdp-mongo mongosh pdp --eval "db.paper_journal.find().sort({date:-1}).limit(1).pretty()"
+```
+
+### 17.10 Walk-forward reference
+
+```powershell
+# Walk-forward IS/OOS optimizer (reference only — 5yr full-window already validated)
+task backtest:strangle:wf -- --from 2021-09-01 --to 2026-06-25 --out logs/wf.csv
+```

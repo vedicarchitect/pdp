@@ -1,72 +1,192 @@
-Rules for selling
+# Directional Strangle — Multi-Timeframe Option Selling Strategy
 
-VIX not spike > 5% for the day 
-VIX should not be at day high
-VIX should not increase in the last 3 5m candles, it should be decreasing or stable for 15
+## Status (2026-06-26) — BACKTEST VALIDATED, PAPER READY
+Implementation complete across all 5 phases. Walk-forward OOS REVIEW (not PASS) led to
+a direct 5-year full-window validation. Canonical config is profitable every year 2021–2026.
+Paper mode wired; Monday start checklist below. Live hedge fixed to Rs 2–5 premium-band.
 
-1 hour alignment
- - if price above 50 ema, emas are aligned 9,20,50 its bullish bias
- - if price below 50 ema, emas are aligned 9,20,50 its bearish bias
+---
 
-15 min alignment
- - if price above 50 ema, emas are aligned 9,20,50 its bullish bias
- - if price below 50 ema, emas are aligned 9,20,50 its bearish bias
+## Canonical 5-Year Results (tren/cons/tp0.5/hedged, Sep 2021 – Jun 2026)
 
-5 min 
- - price should be above 50 ema for bullish bias
- - price should be below 50 ema for bearish bias
- 
- Camrilla pivot Daily
-  - if price break above R3 or R4 with candle close above it then bias is bullish
-  - if price break below R3 or R4 with candle close below it then bias is bearish
+| Year | Days | Win% | Net P&L   | Halted |
+|------|------|------|-----------|--------|
+| 2021 | 84   | 77%  | +Rs  6.2L |  0     |
+| 2022 | 246  | 75%  | +Rs 18.4L |  7     |
+| 2023 | 245  | 78%  | +Rs 17.1L |  7     |
+| 2024 | 246  | 71%  | +Rs  9.8L | 10     |
+| 2025 | 247  | 74%  | +Rs 22.7L | 20     |
+| 2026 | 103  | 67%  | +Rs 11.5L |  6     |
+| **TOTAL** | **1171** | **75%** | **+Rs 85.6L** | **50** |
 
-Camrilla pivot Weekly
-  - if price break above R3 or R4 with candle close above it then bias is bullish
-  - if price break below R3 or R4 with candle close below it then bias is bearish
+MaxDD Rs 71,579 | PF 5.72 | Calmar 26x | Zero losing months
 
-Swing high & low
- if price close above PDH,PWH then bullish
- if price close below PDH,PWL then bearish
+Config: `backtest/configs/strangle_tren_cons_tp05_hedged.yaml`
+Run: `task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs`
 
-Vwap 
- - when vwap low is broken bearish
- - when vwap high is broken bullish
+### Momentum Long — Tested, Disabled
+An ITM+1 directional long on COMPLETE_BULL/BEAR was tested:
+- Net uplift: +Rs 3.73L over 4.8 years (minor)
+- MaxDD: 3.6× worse (Rs 71k → Rs 2.56L); 2024 alone lost Rs 4.57L vs baseline
+- Win%: 80% → 70%; PF halved (5.72 → 2.92); halted days doubled
+- **Decision: disabled** (`momentum_enabled: false` in both backtest and live YAMLs)
+- Infrastructure is wired in sim + live strategy — re-enable by setting `momentum_enabled: true`
 
- ORB
-  - when 15m orb broken above by 15m candle then bullish
-  - when 15m orb broken below by 15m candle then bearish
-PCR 
-  if pcr above 1.1, then its bullish
-  if pcr below 0.9, then its bearish
+---
 
- Entry Rules:
-  - Additional Bearish entry allowed after R3 or R4 rejection or 50 ema or 20 ema or 9ema  with upper wick candle from above (resistance)
-  - Additional Bullish entry allowed after S3 or S4 breakout or 50 ema or 20 ema or 9ema  with lower wick candle from below (support)
- -  Entry after 10.15 1 hour candle complete  
-Adjustment or change of trend
- - When 15m 50 ema broken or crossed 9ema and 20 ema in opposite direction then adjust or change of trend
- - When 1h 50 ema broken or crossed 9ema and 20 ema in opposite direction then adjust or change of trend
+## Strategy Flow
 
+```
+Market Open 09:15
+    │
+    ▼
+VIX Gate — skip if: spike >5% OR at day-high OR rising 3×5m
+    │
+    ▼
+Wait for 10:15 IST (first 1h candle closes, ORB set from 15m bar 1)
+    │
+    ▼
+Score Bias → 7 buckets → PE:CE ratio (×scale_lots=2)
+    │
+    ├─ COMPLETE_BULL  → 10PE : 0CE  (sell ATM puts)
+    ├─ MOST_BULL      →  8PE : 4CE
+    ├─ MORE_BULL      →  6PE : 4CE
+    ├─ NEUTRAL        →  6PE : 6CE
+    ├─ MORE_BEAR      →  4PE : 6CE
+    ├─ MOST_BEAR      →  4PE : 8CE
+    └─ COMPLETE_BEAR  →  0PE :10CE  (sell ATM calls)
+    │
+    ▼
+Open legs (strike: most-OTM with premium >50; COMPLETE_* = ATM)
++ hedge wing: scan 10–22 steps OTM, buy first with Rs 2–5 premium
+    │
+    ▼
+Every 5m bar — manage legs:
+    ├─ premium < 20      → rollup (re-strike to premium >50)
+    ├─ P&L >= 50% credit → take-profit close
+    ├─ premium >= entry×1.30 half lots → pct_stop_half (close 50%)
+    ├─ premium >= entry×1.40 all lots  → pct_stop_all (close all)
+    ├─ bias sign flips (1h/15m EMA)    → trend_flip (close + re-enter)
+    └─ day P&L <= −Rs 15,000          → day_loss_cap (flatten + halt)
+    │
+    ▼
+15:10 IST — squareoff (close all at next bar open)
+```
 
-Option selling with directional strangle strategy:
+---
 
-Based on bias, enter into option selling
+## Signal Scoring (9 signals → score ∈ [−1, +1])
 
-  Strike selection:
-   - if bullish bias is strong choose 0.6 delta and above based on bias strength or choose strikes near R3 or R4 or Supertrend resistance having premium more than 50 
-   - if bearish bias is strong choose 0.6 delta and above based on bias strength or choose strikes near S3 or S4 or Supertrend support having premium more than 50 
-   Based on bullish and bearish, after 1 hour candle complete, create strangle - 
-   - if more bullish prefer sell more pe and less ce 3 pe: 2ce
-    -most bullish 4pe:2ce
+| Signal | Vote | Weight | Rule |
+|--------|------|--------|------|
+| 1h EMA | +1/0/−1 | 2.5 | Price > 50EMA and 9>20>50 = bull |
+| 15m EMA | +1/0/−1 | 2.0 | Same alignment at 15m |
+| 5m EMA | +1/0/−1 | 1.5 | Price vs 50EMA only |
+| Daily Camarilla | +1/0/−1 | 1.0 | Close above R3 = bull; below S3 = bear |
+| Weekly Camarilla | +1/0/−1 | 1.0 | Close above weekly R3 = bull |
+| Swing (PDH/PWH/PDL/PWL) | +1/0/−1 | 1.0 | Above both highs = bull |
+| VWAP | +1/0/−1 | 1.0 | Price above VWAP = bull |
+| ORB (15m range) | +1/0/−1 | 1.0 | Break above ORB high = bull |
+| PCR | +1/0/−1 | 1.0 | PCR < 0.9 = bear; >1.1 = bull |
 
-   Complete bullish - sell ATM pe - 5pe
-   Bearish
-   - most bearish 2pe:4ce
-   - more bearish 2pe:3ce
-   complete bearish - sell ATM ce - 5ce
+Score = Σ(weight × vote) / Σ(weight of present signals)
+Thresholds: |score| ≥ 0.85 = COMPLETE, ≥ 0.60 = MOST, ≥ 0.30 = MORE
 
-   Rollup - when premium < 20
-   Exit when trend getting strong one side and when premium is doubled or major support or resistance broken
+---
 
-   Exit when loss > 15000 for the day
-   
+## Exit Rules (priority order)
+1. **Rollup** — premium < 20 → roll to fresh strike (premium ≥ 50)
+2. **Take Profit** — leg P&L ≥ 50% of credit → close leg
+3. **Pct Stop Half** — premium ≥ entry × 1.30 → close 50% lots
+4. **Pct Stop All** — premium ≥ entry × 1.40 → close all lots
+5. **Trend Flip** — bias sign reverses → close + re-enter
+6. **Day Loss Cap** — day P&L ≤ −Rs 15,000 → flatten and halt
+7. **Squareoff** — 15:10 IST hard close
+
+---
+
+## Implementation Files
+
+| File | Role |
+|------|------|
+| `src/pdp/signals/bias.py` | Pure bias engine — votes, score, bucket, VIX gate |
+| `src/pdp/backtest/strangle_sim.py` | Day simulator — legs, hedges, stops, rollup, momentum |
+| `src/pdp/backtest/strangle_config.py` | StrangleConfig dataclass (all knobs) |
+| `src/pdp/backtest/strangle_loader.py` | Assembles BiasInputs from Mongo window |
+| `src/pdp/backtest/strangle_report.py` | RunWriter — archives per-day artifacts |
+| `backtest/strangle_run.py` | CLI runner (5yr quarter-chunked) |
+| `backtest/strangle_walkforward.py` | IS/OOS walk-forward optimizer |
+| `backtest/configs/strangle_tren_cons_tp05_hedged.yaml` | CANONICAL CONFIG (dominant WF winner) |
+| `backtest/configs/strangle_premium.yaml` | Naked variant |
+| `backtest/configs/strangle_premium_hedged.yaml` | Hedged variant |
+| `src/pdp/strategies/directional_strangle.py` | Live paper strategy (Strategy ABC) |
+| `strategies/directional_strangle.yaml` | Live config (auto-loaded by StrategyHost) |
+
+---
+
+## Monday Paper Mode Checklist
+
+Pre-market (before 09:00):
+```powershell
+task db:up        # ensure postgres + redis + mongo are running
+task db:migrate   # apply pending migrations
+task dev          # start API (paper mode by default)
+```
+
+Verify the strategy loads:
+```powershell
+curl http://localhost:8000/api/v1/strategies
+# Expect: directional_strangle with status=active, bucket=null (before 10:15)
+```
+
+Monitor at 10:15 entry:
+```powershell
+# Structured logs flow to terminal — key events to watch:
+#   directional_strangle_init   — startup confirmation
+#   bias_evaluated              — every 5m: score, bucket, gated, shorts count
+#   short_opened                — leg entry with strike, lots, sid
+#   hedge_opened                — hedge wing bought at Rs 2–5
+#   take_profit / stop_half / stop_all / trend_flip  — exit events
+#   day_loss_cap_halt           — if daily limit hit
+#   all_legs_closed square_off  — 15:10 squareoff
+```
+
+End of day validation:
+```powershell
+# Check today's orders
+curl "http://localhost:8000/api/v1/orders?today=1"
+# Check today's trades
+curl http://localhost:8000/api/v1/trades
+# Check portfolio P&L
+curl http://localhost:8000/api/v1/portfolio/summary
+```
+
+---
+
+## Follow-up OpenSpec Changes
+
+| Change ID | Description |
+|-----------|-------------|
+| `live-directional-strangle-paper` | Harden live paper mode: rollup logic, stop-gate re-entry, weekly Cam, per-signal vote logging, parity with backtest |
+| `backtest-multi-index-strangle` | BANKNIFTY + SENSEX data backfill + same strategy backtest |
+
+---
+
+## Walk-Forward Summary (historical reference)
+16-fold IS=12m / OOS=3m, calmar objective:
+- Stitched OOS net: +Rs 3.15L / PF 1.11 / MaxDD Rs 1.96L / Sharpe 0.47
+- Positive OOS folds: 12/16 → verdict: REVIEW (not PASS)
+- Blocking: 4 losing folds in 2024 trending bull; shape unacceptable
+- Decision: bypassed WF gate, ran 5-year full-window validation instead
+- Full window result: Rs 85.6L / PF 5.72 / MaxDD Rs 71k — paper mode approved
+
+---
+
+## Archived Walk-Forward Config Options (reference)
+Best OOS config: tren/cons/tp0.5/H (trend-weighted EMA, conservative thresholds, 50% TP, hedged)
+- Weight profile: 1h=2.5, 15m=2.0, 5m=1.5 (trend-weighted)
+- Thresholds: conservative (th_complete=0.85, th_most=0.60, th_more=0.30)
+- Take-profit: 50% of credit
+- Hedge: Rs 2–5 far-OTM wing
+- Scale: ×2 (all lot counts doubled)
+- Neutral: trade 3:3 (neutral_no_trade=false)

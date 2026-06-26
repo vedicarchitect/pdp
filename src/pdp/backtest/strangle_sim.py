@@ -89,7 +89,8 @@ class LegStatus:
     avg_entry: float
     ltp: float | None
     mtm: float | None
-    is_hedge: bool = False  # True for a protective long hedge leg
+    is_hedge: bool = False      # True for a protective long hedge leg
+    is_momentum: bool = False   # True for an ITM directional long (COMPLETE_* only)
 
 
 @dataclass
@@ -122,7 +123,7 @@ class BarStatus:
 def format_status_line(s: BarStatus) -> str:
     """Compact one-line IST status for monitor-style every-minute logging."""
     legs = " ".join(
-        f"{'+' if lg.is_hedge else '-'}{lg.lots}x{lg.opt_type}@{lg.strike:.0f}"
+        f"{'M' if lg.is_momentum else '+' if lg.is_hedge else '-'}{lg.lots}x{lg.opt_type}@{lg.strike:.0f}"
         f"(e{lg.avg_entry:.1f}/l{f'{lg.ltp:.1f}' if lg.ltp is not None else '-'}"
         f"/m{f'{lg.mtm:+.0f}' if lg.mtm is not None else '-'})"
         for lg in s.legs
@@ -256,7 +257,8 @@ def simulate_strangle_day(
     entry_after_dt = datetime.combine(td, cfg.entry_after_ist)
 
     legs: dict[str, Leg] = {}
-    hedges: dict[str, Leg] = {}  # protective long per short side (opt_type -> Leg)
+    hedges: dict[str, Leg] = {}    # protective long per short side (opt_type -> Leg)
+    momentum: dict[str, Leg] = {}  # ITM directional long (opt_type -> Leg, COMPLETE_* only)
     trades: list[Trade] = []
     leg_records: list[LegRecord] = []
     day_pnl = 0.0
@@ -268,6 +270,7 @@ def simulate_strangle_day(
     # strike's premium has been BELOW the stop-exit price for 15 consecutive minutes.
     # {opt_type: {"exit_px": float, "bars": list[Bar], "n_below": int}}
     stop_gate: dict[str, dict] = {}
+    leg_buckets: dict[str, BiasBucket] = {}   # bucket at time leg was opened
     _gate_bars_needed = max(1, -(-15 // cfg.timeframe_min))  # ceil(15 / tf_min)
 
     def open_leg(opt_type: str, ist_dt: datetime, spot: float, lots: int,
@@ -285,6 +288,7 @@ def simulate_strangle_day(
         leg.total_qty = lots * lot
         leg.total_cost = px * lots * lot
         legs[opt_type] = leg
+        leg_buckets[opt_type] = bucket
         comm = commission_fn("SELL", lots * lot * px)
         trades.append(Trade(
             side="SELL", opt_type=opt_type, strike=strike, bar_time=ist_dt, qty=lots * lot,
@@ -342,6 +346,59 @@ def simulate_strangle_day(
             ))
         del hedges[opt_type]
 
+    def open_momentum(opt_type: str, ist_dt: datetime, spot: float) -> bool:
+        """Buy ITM+1 option sized to cfg.momentum_premium_target."""
+        if not cfg.momentum_enabled or opt_type in momentum:
+            return False
+        step = cfg.strike_step
+        atm = round(spot / step) * step
+        # ITM+1: one step into the money from ATM
+        target_strike = float(atm - step if opt_type == "CE" else atm + step)
+        mstrike, mbars = resolve_from_chain(data.day_chain, opt_type, target_strike, step, band=2)
+        if mstrike is None or not mbars:
+            return False
+        px = price_at(mbars, ist_dt, prefer="close")
+        if not px or px <= 0:
+            return False
+        m_lots = max(1, round(cfg.momentum_premium_target / (px * lot)))
+        m = Leg(opt_type=opt_type, strike=mstrike, bars=mbars,
+                base_lots=m_lots, entry_ist=ist_dt, lots=m_lots)
+        m.total_qty = m_lots * lot
+        m.total_cost = px * m_lots * lot
+        momentum[opt_type] = m
+        comm = commission_fn("BUY", m_lots * lot * px)
+        trades.append(Trade(
+            side="BUY", opt_type=opt_type, strike=mstrike, bar_time=ist_dt,
+            qty=m_lots * lot, price=px, nifty=spot,
+            note=f"momentum_long {m_lots}x{opt_type}@{mstrike:.0f}",
+            cum_lots=m_lots, avg_entry=m.avg_entry, day_pnl=day_pnl, commission_inr=comm,
+        ))
+        return True
+
+    def close_momentum(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
+        """Sell the ITM long back; P&L (long: exit-entry) accrues to the day."""
+        nonlocal day_pnl
+        m = momentum.get(opt_type)
+        if m is None:
+            return
+        exit_px = price_at(m.bars, ist_dt, prefer="close") or _last_price(m.bars, ist_dt) or 0.01
+        qty = m.total_qty
+        mom_pnl = (exit_px - m.avg_entry) * qty  # long: profit when premium rises
+        day_pnl += mom_pnl
+        comm = commission_fn("SELL", qty * exit_px)
+        trades.append(Trade(
+            side="SELL", opt_type=opt_type, strike=m.strike, bar_time=ist_dt, qty=qty,
+            price=exit_px, nifty=spot, note=f"momentum_close ({reason})", cum_lots=0,
+            avg_entry=m.avg_entry, leg_pnl=mom_pnl, day_pnl=day_pnl, commission_inr=comm,
+        ))
+        if m.entry_ist is not None:
+            leg_records.append(LegRecord(
+                opt_type=m.opt_type, strike=m.strike, entry_ist=m.entry_ist,
+                exit_ist=ist_dt, lots=m.lots, avg_entry=m.avg_entry, exit_px=exit_px,
+                leg_pnl=mom_pnl, reason=f"momentum_close ({reason})",
+            ))
+        del momentum[opt_type]
+
     def close_leg(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
         nonlocal day_pnl, done, done_reason
         leg = legs.get(opt_type)
@@ -370,6 +427,7 @@ def simulate_strangle_day(
                 leg_pnl=leg_pnl, reason=reason,
             ))
         del legs[opt_type]
+        leg_buckets.pop(opt_type, None)
         if day_pnl <= -cfg.day_loss_limit and not done:
             done = True
             done_reason = f"day_loss ({day_pnl:+.0f})"
@@ -377,6 +435,8 @@ def simulate_strangle_day(
     def close_all(ist_dt: datetime, spot: float, reason: str) -> None:
         for ot in list(legs.keys()):
             close_leg(ot, ist_dt, spot, reason)
+        for ot in list(momentum.keys()):
+            close_momentum(ot, ist_dt, spot, reason)
 
     def close_partial_leg(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
         """Close half the lots on one side; keep the rest open (re-entry allowed)."""
@@ -425,7 +485,11 @@ def simulate_strangle_day(
             captured = leg.mtm(px)  # profit when premium decays
             credit = leg.total_cost
             # Take-profit on captured fraction of credit.
-            if credit > 0 and captured >= cfg.take_profit_pct * credit:
+            # When take_profit_extreme_only, TP fires only on complete_bull/bear legs;
+            # balanced legs (most_bull/bear, more_bull/bear) run to full decay / squareoff.
+            _tp_eligible = (not cfg.take_profit_extreme_only
+                            or leg_buckets.get(ot) in _EXTREME)
+            if _tp_eligible and credit > 0 and captured >= cfg.take_profit_pct * credit:
                 close_leg(ot, ist_dt, spot, "take_profit")
                 continue
             # Tiered premium stop: 30% → close half; 40% → close all.
@@ -495,6 +559,15 @@ def simulate_strangle_day(
                     mtm=((hltp - hg.avg_entry) * hg.total_qty if hltp is not None else None),
                     is_hedge=True,
                 ))
+            ml = momentum.get(ot)
+            if ml is not None:
+                mltp = price_at(ml.bars, ist_dt, prefer="close")
+                leg_snaps.append(LegStatus(
+                    opt_type=ot, strike=ml.strike, lots=ml.lots, avg_entry=ml.avg_entry,
+                    ltp=mltp,
+                    mtm=((mltp - ml.avg_entry) * ml.total_qty if mltp is not None else None),
+                    is_momentum=True,
+                ))
         trace.append(BarStatus(
             ist_dt=ist_dt, spot=spot,
             score=bias.score if bias else 0.0,
@@ -517,6 +590,8 @@ def simulate_strangle_day(
             emit(ist_dt, spot, None, "squareoff")
             break
         if done:
+            for m_ot in list(momentum.keys()):
+                close_momentum(m_ot, ist_dt, spot, "halt")
             emit(ist_dt, spot, None, "halted")
             continue
 
@@ -581,9 +656,21 @@ def simulate_strangle_day(
                 elif gated_sides and not bias.gated:
                     action = f"stop_gate_wait:{','.join(gated_sides)}"
 
+        # Momentum long management: open on COMPLETE_* entry, close when score weakens.
+        if cfg.momentum_enabled and not done and ist_dt >= entry_after_dt and not bias.gated:
+            if bias.bucket in _EXTREME and legs:
+                m_ot = "CE" if bias.bucket == BiasBucket.COMPLETE_BULL else "PE"
+                if m_ot not in momentum:
+                    if open_momentum(m_ot, ist_dt, spot):
+                        action = (action + ";momentum_long") if action != "hold" else "momentum_long"
+            for m_ot in list(momentum.keys()):
+                if abs(bias.score) < cfg.momentum_score_threshold:
+                    close_momentum(m_ot, ist_dt, spot, "score_exit")
+                    action = (action + ";momentum_exit") if action != "hold" else "momentum_exit"
+
         emit(ist_dt, spot, bias, action)
 
-    if legs:
+    if legs or momentum:
         close_all(sqoff_dt, nifty_close, "squareoff_end")
 
     commission_total = sum(t.commission_inr for t in trades)

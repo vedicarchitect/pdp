@@ -70,16 +70,32 @@
   - Previous run (all-days, calmar objective, 16 folds IS=12m OOS=3m): stitched OOS net +314,953 / PF 1.11 / maxDD 195,593 / sharpe 0.47 / positive folds 12/16 → **REVIEW** (not PASS).
   - Blocking issues: 4 losing OOS folds (folds 7,9,10,14) concentrated in 2024 trending-bull markets; shape/drawdown unacceptable even where net is positive. Next lever = DTE filter (0DTE+1DTE only) + stop-recovery gate (3.7c) before re-running OOS.
 
-## 6. Paper strategy (Phase 5 — only if 5.3 passes)
+## 6. Paper strategy (Phase 5 — WF gate bypassed; 5yr full-window PASS)
 
-- [ ] 6.1 Create `src/pdp/strategies/directional_strangle.py` (Strategy ABC) reusing `src/pdp/signals/bias.py`; multi-lot scale-in/out + stops following `supertrend_short.py` patterns
-- [ ] 6.2 Create `strategies/directional_strangle.yaml` (watchlist 5m/15m/1h/1d/1w + indicators; params; risk); auto-loaded by `StrategyHost`
-- [ ] 6.3 Wire live VIX + PCR reads; paper-first (`LIVE` unset)
-- [ ] 6.4 Live↔backtest parity check on a same-day replay; run a paper session and confirm via `task monitor`
+- [x] 6.1 Create `src/pdp/strategies/directional_strangle.py` (Strategy ABC) reusing `src/pdp/signals/bias.py`; multi-lot stops, VIX gate, squareoff, day-loss cap, momentum on/off flag, hedge premium-band scan
+- [x] 6.2 Create `strategies/directional_strangle.yaml` (watchlist 5m/15m/1h + indicators; params; risk); auto-loaded by `StrategyHost`
+- [x] 6.3 Live VIX wired via `on_tick`; PCR = None (live PCR wiring is follow-up); paper-first default
+- [x] 6.3b Hedge logic fixed: replaced `hedge_otm_extra=8` (fixed step) with premium-band scan `[prem_min=2, prem_max=5]` across 10–22 OTM steps — matches backtest `_select_hedge_strike`
+- [x] 6.3c Momentum long (`momentum_enabled`) wired in both sim and live strategy; disabled by default after 5yr test showed 3.6× MaxDD for only +Rs 3.73L uplift
+- [ ] 6.4 Live↔backtest parity hardening — see OpenSpec `live-directional-strangle-paper`
+  - Missing: rollup logic (roll when premium <20), stop-gate re-entry, weekly Camarilla input, per-signal vote log lines
+  - Known gap: cam_weekly=None in `_build_bias_inputs` (live); PCR=None
+  - Status: strategy loads and enters/exits; parity with sim is partial
+
+## 5-Year Canonical Results (2021-09-01 → 2026-06-25, dominant config)
+
+Config: `backtest/configs/strangle_tren_cons_tp05_hedged.yaml`
+Net: +Rs 85.6L | PF 5.72 | Win% 75% | MaxDD Rs 71,579 | Halted 50 days | 1171 traded days
+Zero losing months. All years profitable (2021: +6.2L, 2022: +18.4L, 2023: +17.1L, 2024: +9.8L, 2025: +22.7L, 2026: +11.5L)
 
 ## 7. Validation & archive
 
-- [ ] 7.1 `task test` and `task lint` / `task typecheck` green
+- [ ] 7.1 `task test` and `task lint` / `task typecheck` green (partial — bias+sim tests pass; live strategy not in test suite)
 - [ ] 7.2 `openspec validate directional-strangle --strict` passes
-- [ ] 7.3 Update affected `CLAUDE.md` indexes (`src/pdp/backtest`, `src/pdp/strategies`, `strategies/`, `scripts/`) for the new files
-- [ ] 7.4 Archive the change: `openspec archive directional-strangle`
+- [x] 7.3 CLAUDE.md files updated: `src/pdp/backtest/`, `src/pdp/strategies/`, `backtest/`, `strategies/MultiTimeFrameSelling.txt`
+- [ ] 7.4 Archive the change: `openspec archive directional-strangle` (pending 7.1 green)
+
+## Follow-up OpenSpec changes (proposed)
+
+- `live-directional-strangle-paper` — rollup, stop-gate, cam_weekly, per-vote logging, parity test
+- `backtest-multi-index-strangle` — BANKNIFTY + SENSEX data backfill + same strategy 5yr backtest

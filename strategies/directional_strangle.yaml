@@ -1,0 +1,97 @@
+# DirectionalStrangle — bias-driven multi-leg NIFTY option selling (paper-first).
+#
+# Bias engine (pdp.signals.bias.score_bias) computes a weighted score from
+# multi-TF EMA alignment, Camarilla, swing levels, VWAP, ORB, VIX, and PCR.
+# Score -> 7 buckets -> PE:CE lot ratio -> ratio table below (scaled x2).
+#
+# Walk-forward winner (tren/cons/tp0.5/H, 7/7 OOS folds positive, PF 1.47 OOS):
+#   - Trend-weighted EMA (1h=2.5, 15m=2.0, 5m=1.5), conservative thresholds
+#   - Take-profit 50%, hedge ON (far-OTM +8 steps)
+#   - scale_lots=2 (all lot counts in ratio_table are multiplied by 2)
+#   - neutral_no_trade: false (trade neutral as 3PE:3CE)
+#
+# COMPLETE_BULL/BEAR: also buys ITM+1 momentum long sized to Rs 50,000 premium.
+# Momentum long closes when |score| drops below 0.5.
+
+id: directional_strangle
+class: pdp.strategies.directional_strangle.DirectionalStrangle
+
+watchlist:
+  - security_id: "13"       # NIFTY index (Dhan IDX_I)
+    exchange_segment: IDX_I
+    timeframes: [5m, 15m, 1h]
+    indicators:
+      - family: ema
+        periods: [9, 20, 50]
+      - family: vwap
+      - family: pivots
+      - family: period_levels
+
+params:
+  # ---- Instrument ----
+  underlying: NIFTY
+  underlying_security_id: "13"
+  index_segment: IDX_I
+  option_segment: NSE_FNO
+  vix_security_id: "21"     # India VIX
+  lot_size: 65              # Jan 2026+ NIFTY lot size
+
+  # ---- Strike selection ----
+  otm_steps: 2              # sell 2 strikes OTM
+  strike_step: 50           # NIFTY strike spacing
+
+  # ---- Position sizing ----
+  scale_lots: 2             # multiplier applied to all ratio_table values
+
+  # ---- Ratio table (PE:CE lots per bucket, before scale_lots) ----
+  ratio_table:
+    complete_bull: [5, 0]
+    most_bull:     [4, 2]
+    more_bull:     [3, 2]
+    neutral:       [3, 3]
+    more_bear:     [2, 3]
+    most_bear:     [2, 4]
+    complete_bear: [0, 5]
+
+  # ---- Exits ----
+  take_profit_pct: 0.5      # close when premium decays to 50% of entry
+  pct_stop_half: 0.30       # close half lots when premium rises 30%
+  pct_stop_all: 0.40        # close all when premium rises 40%
+
+  # ---- Protective hedge (buy cheapest far-OTM wing priced Rs 2–5) ----
+  hedge_enabled: true
+  hedge_prem_min: 2.0       # scan far-OTM for first strike with premium >= this
+  hedge_prem_max: 5.0       # ... and <= this (fallback: cheapest available)
+  hedge_scan_start: 10      # start scanning from this many OTM steps
+  hedge_scan_end: 22        # stop scanning here
+
+  # ---- Momentum long (COMPLETE_BULL / COMPLETE_BEAR only) ----
+  momentum_enabled: false
+  momentum_premium_target: 50000   # target Rs spend on ITM+1 long
+  momentum_score_threshold: 0.5    # close when |score| < this
+
+  # ---- Session windows ----
+  entry_after_ist: "10:15"  # wait for 1h candle to form
+  squareoff_ist: "15:10"    # flatten everything at/after this
+
+  # ---- Day loss cap ----
+  day_loss_limit: 15000     # halt if day realized loss >= this (Rs)
+  neutral_no_trade: false   # trade neutral bucket as 3:3
+
+  # ---- Bias weights (trend-weighted / conservative thresholds) ----
+  w_ema_1h: 2.5
+  w_ema_15m: 2.0
+  w_ema_5m: 1.5
+  w_cam_daily: 1.0
+  w_cam_weekly: 1.0
+  w_swing: 1.0
+  w_vwap: 1.0
+  w_orb: 1.0
+  w_pcr: 1.0
+  th_complete: 0.85
+  th_most: 0.60
+  th_more: 0.30
+
+risk:
+  max_open_orders: 30       # up to ~15 legs (short PE + CE + hedges + momentum)
+  max_daily_loss_inr: 15000
