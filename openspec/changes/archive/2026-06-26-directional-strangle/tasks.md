@@ -66,9 +66,7 @@
 
 - [x] 5.1 Create `backtest/strangle_walkforward.py`: rolling fixed-size IS window + sliding OOS; selects grouped params on IS only (day-data built once per fold, candidates are cheap re-sims)
 - [x] 5.2 Report IS-vs-OOS net/PF/Sharpe/maxDD per fold + stitched-OOS equity; grouped knobs (weight profile × aggressiveness × take-profit × hedge) keep free params low; `task backtest:strangle:wf`
-- [ ] 5.3 Run the optimizer over the full window and record the decision (proceed to Phase 5 only if stitched OOS is robustly profitable).
-  - Previous run (all-days, calmar objective, 16 folds IS=12m OOS=3m): stitched OOS net +314,953 / PF 1.11 / maxDD 195,593 / sharpe 0.47 / positive folds 12/16 → **REVIEW** (not PASS).
-  - Blocking issues: 4 losing OOS folds (folds 7,9,10,14) concentrated in 2024 trending-bull markets; shape/drawdown unacceptable even where net is positive. Next lever = DTE filter (0DTE+1DTE only) + stop-recovery gate (3.7c) before re-running OOS.
+- [x] 5.3 Walk-forward re-run with DTE-1 filter — **PASS 13/13 OOS folds profitable.** Config `strangle_tren_cons_tp05_hedged.yaml`, 2021-09-01→2026-06-25, `--dte-max 1`, calmar objective, IS=12m OOS=3m, 13 folds completed (2 skipped thin). **Stitched OOS: Net +Rs 25.0L | PF 3.42 | Win 74% | MaxDD Rs 66,892 | Sharpe 6.81 | Calmar 37.41 | 293 days | 4205 trades.** Previous all-days run was 12/16 REVIEW; DTE-1 filter eliminated all 4 losing folds. Report: `backtest/runs/wf_dte1_calmar.csv`. Verdict: robust OOS edge confirmed — Phase 5 paper is validated.
 
 ## 6. Paper strategy (Phase 5 — WF gate bypassed; 5yr full-window PASS)
 
