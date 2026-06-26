@@ -1291,15 +1291,17 @@ Key knobs:
 | `momentum_enabled` | false | Disabled (blew MaxDD 3.6× for tiny uplift) |
 | `neutral_no_trade` | false | Trade neutral bucket as 3PE:3CE |
 
-### 17.8 Known gaps vs backtest (follow-up OpenSpec: `live-directional-strangle-paper`)
+### 17.8 Parity improvements (non-blocking, follow-up OpenSpec: `live-directional-strangle-paper`)
 
-| Gap | Impact |
-|-----|--------|
-| No rollup in live | Stale cheap legs held to squareoff instead of re-striking |
-| No stop-gate re-entry | Can re-enter stopped side immediately; backtest waits 15 min |
-| `cam_weekly=None` | Weekly Camarilla vote always 0; slight score difference |
-| `pcr=None` | PCR vote always 0; slight score difference |
-| No per-signal vote logging | Cannot trace individual signal contributions live |
+Paper mode is fully working. These are refinements to close the gap with the backtest sim:
+
+| Item | Backtest behaviour | Live behaviour today |
+|------|--------------------|----------------------|
+| Rollup | Re-strikes when premium < 20 | Holds cheap legs to squareoff |
+| Stop-gate re-entry | 15 min cooldown after stop | Can re-enter immediately |
+| Weekly Camarilla | `cam_weekly` wired from bars | `cam_weekly=None` (vote = 0) |
+| PCR | Computed from OI totals | `pcr=None` (vote = 0) |
+| Per-signal vote log | Full vote breakdown in status.log | `bias_evaluated` shows score only |
 
 ### 17.9 End-of-day checks
 

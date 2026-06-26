@@ -1,7 +1,11 @@
-## PROPOSAL — Live DirectionalStrangle Paper Mode Hardening
+## PROPOSAL — Live DirectionalStrangle Paper Mode Parity Hardening
 
-**Goal:** Make the live paper strategy reliably match the backtest on Monday.
-Current state: strategy loads, enters, exits, hedges — but 4 gaps prevent full parity.
+**Status:** Paper mode is WORKING. Strategy loads, enters, exits, hedges correctly.
+Hedge fixed 2026-06-26 (Rs 2–5 premium-band replacing fixed-offset). Start with `task dev`.
+
+**This OpenSpec covers parity improvements** — the sim will produce slightly different
+scores/actions without these, but the paper strategy trades correctly without them.
+Implement incrementally after confirming paper mode works in practice.
 
 ---
 
