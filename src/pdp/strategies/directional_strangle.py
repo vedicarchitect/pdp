@@ -126,6 +126,9 @@ class DirectionalStrangle(Strategy):
         self._entry_after_ist: time = _parse_hhmm(p.get("entry_after_ist", "10:15"))
         self._squareoff_ist: time = _parse_hhmm(p.get("squareoff_ist", "15:10"))
 
+        # VIX gate — disabled by default (5yr data shows it costs Rs 33L and increases MaxDD)
+        self._vix_gate_enabled: bool = bool(p.get("vix_gate_enabled", False))
+
         # Momentum long: buy ITM+1 on COMPLETE_BULL/BEAR, close when |score| < threshold
         self._momentum_enabled: bool = bool(p.get("momentum_enabled", True))
         self._momentum_premium_target: int = int(p.get("momentum_premium_target", 50000))
@@ -389,10 +392,10 @@ class DirectionalStrangle(Strategy):
             orb_high=self._orb_high,
             orb_low=self._orb_low,
             pcr=None,
-            vix_now=self._vix_now,
-            vix_day_open=self._vix_day_open,
-            vix_day_high=self._vix_day_high,
-            vix_recent=list(self._vix_recent),
+            vix_now=self._vix_now if self._vix_gate_enabled else None,
+            vix_day_open=self._vix_day_open if self._vix_gate_enabled else None,
+            vix_day_high=self._vix_day_high if self._vix_gate_enabled else None,
+            vix_recent=list(self._vix_recent) if self._vix_gate_enabled else [],
         )
 
     # ------------------------------------------------------------------ #

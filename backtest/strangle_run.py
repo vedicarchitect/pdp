@@ -170,6 +170,8 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
+    if not getattr(cfg, "vix_gate_enabled", True):
+        args.no_vix_gate = True
     if args.hedge is not None:
         cfg = StrangleConfig.from_dict({**cfg.to_dict(), "hedge_enabled": args.hedge})
     if args.dte_max is not None:

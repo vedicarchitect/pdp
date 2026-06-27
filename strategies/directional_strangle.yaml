@@ -65,6 +65,9 @@ params:
   hedge_scan_start: 10      # start scanning from this many OTM steps
   hedge_scan_end: 22        # stop scanning here
 
+  # ---- VIX gate (5yr backtest shows gate costs Rs 33L and increases MaxDD — disabled) ----
+  vix_gate_enabled: false
+
   # ---- Momentum long (COMPLETE_BULL / COMPLETE_BEAR only) ----
   momentum_enabled: false
   momentum_premium_target: 50000   # target Rs spend on ITM+1 long
