@@ -85,19 +85,24 @@ PDP/
 │   ├── project.md          # this file
 │   ├── changes/            # in-flight proposals
 │   └── specs/              # archived capabilities (source of truth)
-├── src/pdp/
-│   ├── main.py             # FastAPI app factory
-│   ├── settings.py
-│   ├── logging.py
-│   ├── db/                 # session + models
-│   ├── market/             # feed, bars, indicators
-│   ├── orders/             # paper + broker adapters
-│   ├── portfolio/          # holdings, positions, P&L
-│   ├── strategy/           # pluggable strategy host
-│   └── api/                # routes
-├── tests/
-├── alembic/
-├── docker-compose.yml
-├── Taskfile.yml
-└── pyproject.toml
+├── backend/                # all Python (run uv / tooling here)
+│   ├── pdp/                # package (import as pdp.*): main.py, settings.py, db/,
+│   │                       #   market/, orders/, portfolio/, strategy/, signals/, …
+│   ├── backtest/           # runnable backtests + configs/*.yaml
+│   ├── strategies/         # strategy YAML configs
+│   ├── scripts/            # ops scripts (scripts/oneoff/ = run-once)
+│   ├── tests/  alembic/  alembic.ini  data/
+│   ├── pyproject.toml  uv.lock  .env
+│   └── CLAUDE.md           # backend dev index (dev-activity → minimal context)
+├── app/                    # Flutter (Dart) client
+├── infra/
+│   ├── compose/            # docker-compose.yml (project name pinned: pdp)
+│   ├── launchers/  loadtest/  logs/
+│   └── terraform/  deploy/  # reserved for cloud-deploy-aws (chunk 16)
+├── docs/                   # ARCHITECTURE.md, RUNBOOK.md, feature docs
+├── Taskfile.yml            # single entrypoint (dir: backend | infra/compose)
+└── CLAUDE.md               # top-level index + program roadmap
 ```
+
+Run all Python tooling via the root `Taskfile.yml` (which sets `dir: backend`) or `uv run`
+from `backend/`. Container tasks run in `infra/compose/`.

@@ -36,8 +36,10 @@ Thumbs.db
 # Data / logs
 data/
 logs/
+!infra/logs/.gitkeep
 *.log
-backtest/runs/          # archived per-day backtest artifacts (reproducible, not source)
+# archived per-day backtest artifacts (reproducible, not source)
+backend/backtest/runs/
 *.duckdb
 *.db-shm
 *.db-wal
@@ -53,7 +55,7 @@ app/windows/flutter/ephemeral/
 # Local claude
 .claude/settings.local.json
 pdp.code-workspace
-backtest/mutliplerunschecklog.txt
+backend/backtest/mutliplerunschecklog.txt
 test-results/
 scratch.py
 scratch2.py

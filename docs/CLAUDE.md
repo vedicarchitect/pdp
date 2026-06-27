@@ -13,6 +13,6 @@ Markdown docs for features/subsystems that need more detail than code comments.
 
 ## Note
 
-For **operational** docs (how to run things), see [RUNBOOK.md](../RUNBOOK.md) at the root.
+For **operational** docs (how to run things), see [RUNBOOK.md](RUNBOOK.md) (now in this folder).
 For **architectural** context, see [openspec/project.md](../openspec/project.md).
 This folder is for deeper implementation notes that don't fit as code comments.

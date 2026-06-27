@@ -1,3 +1,9 @@
+> **Program alignment** (since `repo-restructure-and-claude-arch`): this is the live/paper
+> half of the **strangle-execution track** — it feeds into chunk 4 `strangle-execution-console`
+> (seamless execution + exhaustive per-action logging) and chunk 5 `trade-analysis-feedback-loop`.
+> Code now lives under `backend/` (`backend/pdp/strategies/`, `backend/pdp/signals/`,
+> `backend/backtest/strangle_run.py`); run everything via `task` from the repo root.
+
 ## PROPOSAL — Live DirectionalStrangle Paper Mode Parity Hardening
 
 **Status:** Paper mode is WORKING. Strategy loads, enters, exits, hedges correctly.

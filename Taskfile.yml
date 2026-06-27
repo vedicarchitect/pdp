@@ -1,5 +1,9 @@
 version: "3"
 
+# Root is the single entrypoint. Python tasks run in backend/ (dir: backend);
+# container tasks run in infra/compose/ (dir: infra/compose); app:* run from root
+# and cd into app/; openspec:* run npx from root against openspec/.
+
 tasks:
   default:
     cmds:
@@ -7,36 +11,43 @@ tasks:
 
   dev:
     desc: Run the API with reload
+    dir: backend
     cmds:
       - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
 
   monitor:
     desc: Run the live strategy monitor (Perl, read-only Redis+API client)
+    dir: backend
     cmds:
       - perl scripts/monitor.pl
 
   reset-paper:
     desc: "⚠️  Clear paper orders/trades/positions and reset ID sequences"
+    dir: backend
     cmds:
       - uv run python scripts/reset_paper.py
 
   backtest:
     desc: "7-day per-trade detail for the default config (BACKTEST_DEFAULT_CONFIG). Args: -- [--config-file PATH] [--days N] [--start YYYY-MM-DD]"
+    dir: backend
     cmds:
       - uv run python backtest/run.py {{.CLI_ARGS}}
 
   expiry:
     desc: "Read-only expiry analysis for NIFTY+BANKNIFTY+SENSEX nearest expiries. Args: -- [--symbol ALL] [--expiry YYYY-MM-DD]"
+    dir: backend
     cmds:
       - uv run python scripts/expiry_analysis.py {{.CLI_ARGS}}
 
   oi:track:
     desc: "OI snapshot tracker (ATM+/-5 vs morning baseline -> JSONL + Mongo TS + Redis hot/pubsub). One pass; add -- --interval 300 to loop every 5m"
+    dir: backend
     cmds:
       - uv run python scripts/expiry_analysis.py --track {{.CLI_ARGS}}
 
   test:
     desc: Run pytest
+    dir: backend
     cmds:
       - uv run pytest
 
@@ -62,18 +73,21 @@ tasks:
 
   lint:
     desc: Lint with ruff
+    dir: backend
     cmds:
-      - uv run ruff check src tests
-      - uv run ruff format --check src tests
+      - uv run ruff check pdp tests
+      - uv run ruff format --check pdp tests
 
   fmt:
     desc: Format with ruff
+    dir: backend
     cmds:
-      - uv run ruff format src tests
-      - uv run ruff check --fix src tests
+      - uv run ruff format pdp tests
+      - uv run ruff check --fix pdp tests
 
   typecheck:
     desc: Type-check with pyright
+    dir: backend
     cmds:
       - uv run pyright
 
@@ -81,21 +95,25 @@ tasks:
 
   db:up:
     desc: Start Postgres + Redis + Mongo
+    dir: infra/compose
     cmds:
       - docker compose up -d postgres redis mongo
 
   db:down:
     desc: Stop services
+    dir: infra/compose
     cmds:
       - docker compose down
 
   db:migrate:
     desc: Apply Alembic migrations
+    dir: backend
     cmds:
       - uv run alembic upgrade head
 
   db:tools:
     desc: Start pgAdmin on http://localhost:5050 (dev@pdp.local / pdp)
+    dir: infra/compose
     cmds:
       - docker compose --profile tools up -d pgadmin
 
@@ -107,41 +125,49 @@ tasks:
 
   backfill:nifty:
     desc: "Backfill NIFTY 1m spot → market_bars. Args: -- --from YYYY-MM-DD [--to YYYY-MM-DD] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_spot.py --symbol NIFTY {{.CLI_ARGS}}
 
   backfill:banknifty:
     desc: "Backfill BANKNIFTY 1m spot → market_bars. Args: -- --from YYYY-MM-DD [--to YYYY-MM-DD] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_spot.py --symbol BANKNIFTY {{.CLI_ARGS}}
 
   backfill:sensex:
     desc: "Backfill SENSEX 1m spot → market_bars. Args: -- --from YYYY-MM-DD [--to YYYY-MM-DD] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_spot.py --symbol SENSEX {{.CLI_ARGS}}
 
   backfill:options:
     desc: "Gap-fill NIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_options_gap.py --symbol NIFTY {{.CLI_ARGS}}
 
   backfill:options:banknifty:
     desc: "Gap-fill BANKNIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_options_gap.py --symbol BANKNIFTY {{.CLI_ARGS}}
 
   backfill:options:sensex:
     desc: "Gap-fill SENSEX option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_options_gap.py --symbol SENSEX {{.CLI_ARGS}}
 
   backfill:expired:
     desc: "Backfill expired-contract option bars. Args: -- --help for options"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_expired_options.py {{.CLI_ARGS}}
 
   backfill:vix:
     desc: "Backfill India VIX 1m → market_bars. Args: -- --from YYYY-MM-DD [--to] [--vix-sid 21] [--resolve] [--only-missing] [--dry-run]"
+    dir: backend
     cmds:
       - uv run python scripts/backfill_vix.py {{.CLI_ARGS}}
 
@@ -150,16 +176,19 @@ tasks:
 
   audit:coverage:
     desc: Audit option_bars coverage by date + strike (identifies gaps)
+    dir: backend
     cmds:
       - uv run python scripts/audit_options_coverage.py {{.CLI_ARGS}}
 
   audit:strangle:
     desc: "Per-year spot/options/VIX coverage for the strangle backtest. Args: -- --from YYYY-MM-DD [--to] [--vix-sid 21]"
+    dir: backend
     cmds:
       - uv run python scripts/audit_strangle_data.py {{.CLI_ARGS}}
 
   validate:warehouse:
     desc: Validate warehouse integrity — missing days, bad prices, OI anomalies
+    dir: backend
     cmds:
       - uv run python scripts/validate_options_warehouse.py {{.CLI_ARGS}}
 
@@ -167,31 +196,37 @@ tasks:
 
   backtest:compare:
     desc: "Backtest vs paper journal for a date. Args: -- [--date YYYY-MM-DD]"
+    dir: backend
     cmds:
       - uv run python backtest/compare.py {{.CLI_ARGS}}
 
   backtest:strangle:
     desc: "Directional-strangle backtest. Args: -- [--config-file PATH] [--days N | --from --to] [--hedge/--no-hedge] [--trace] [--out-dir backtest/runs] [--vix-sid 21]"
+    dir: backend
     cmds:
       - uv run python backtest/strangle_run.py {{.CLI_ARGS}}
 
   backtest:strangle:wf:
     desc: "Directional-strangle walk-forward (IS/OOS) optimizer — go/no-go gate. Args: -- --from --to [--is-months 12] [--oos-months 3] [--step-months 3] [--objective sharpe] [--out logs/wf.csv]"
+    dir: backend
     cmds:
       - uv run python backtest/strangle_walkforward.py {{.CLI_ARGS}}
 
   backtest:ingest:
     desc: "Ingest a backtest run folder (or WF CSV) into the MongoDB warehouse. Args: -- --run-dir backtest/runs/<id> [--wf-csv path.csv] [--kind single|walkforward]"
+    dir: backend
     cmds:
       - uv run python scripts/ingest_backtest_run.py {{.CLI_ARGS}}
 
   backtest:sweep:
     desc: "Multi-config parameter sweep — pass grid flags after --. Args: -- [--days N] [--st 10,2;3,1] [--tf 5,15,30] [--moneyness -1,0,1] [--no-commission] [--no-heal]"
+    dir: backend
     cmds:
       - uv run python backtest/run.py {{.CLI_ARGS}}
 
   sweep:all:
     desc: "Comprehensive experiment sweep (all sections A-H). Writes per-trade detail + ranked summary to logs/sweep_*.log. Args: -- [--days N] [--section A,B] [--no-detail] [--no-heal]"
+    dir: backend
     cmds:
       - uv run python backtest/sweep_all.py {{.CLI_ARGS}}
 
@@ -199,6 +234,7 @@ tasks:
 
   ml:train:
     desc: "Train the candlestick-ml-signals model. Args: -- [--security-id ID] [--timeframe TF] [--days N] [--version VER] [--head HEAD]"
+    dir: backend
     cmds:
       - uv run python scripts/ml_train.py {{.CLI_ARGS}}
 

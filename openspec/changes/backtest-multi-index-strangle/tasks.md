@@ -3,7 +3,13 @@
 **Goal:** Run the same bias-driven strangle strategy on BANKNIFTY and SENSEX; fill 5-year
 data gaps; compare performance profiles across indices.
 
-Same bias engine (`src/pdp/signals/bias.py`) reused unchanged — only instrument params differ.
+Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instrument params differ.
+
+> **Program alignment** (since `repo-restructure-and-claude-arch`): this is the **multi-index
+> data + backtest track** feeding chunk 4 `strangle-execution-console` and chunk 8
+> `flutter-backtest-console`. BANKNIFTY + SENSEX spot/options backfill is **in progress**.
+> All paths are now under `backend/` (`backend/scripts/...`, `backend/backtest/configs/...`);
+> run via `task backfill:* ` / `task backtest:strangle` from the repo root.
 
 ---
 
