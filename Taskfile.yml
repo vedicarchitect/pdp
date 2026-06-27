@@ -46,9 +46,19 @@ tasks:
       - cd app && flutter analyze && flutter test
 
   app:run:
-    desc: Run the Flutter app (Windows desktop, offline mock data)
+    desc: Run the Flutter app (Windows desktop, offline mock — no backend needed)
     cmds:
       - cd app && flutter run -d windows --dart-define=USE_MOCK=true
+
+  app:live:
+    desc: Run the Flutter app against the local API (start `task dev` first)
+    cmds:
+      - cd app && flutter run -d windows --dart-define=API_BASE=http://localhost:8000 --dart-define=WS_BASE=ws://localhost:8000
+
+  app:build:
+    desc: Build the Flutter Windows release exe → app/build/windows/x64/runner/Release/
+    cmds:
+      - cd app && flutter build windows
 
   lint:
     desc: Lint with ruff
