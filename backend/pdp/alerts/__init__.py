@@ -8,9 +8,9 @@ from pdp.alerts.ws import AlertsHub
 __all__ = [
     "AlertChannel",
     "AlertCondition",
-    "AlertStatus",
     "AlertEvaluator",
     "AlertNotification",
     "AlertRecord",
+    "AlertStatus",
     "AlertsHub",
 ]

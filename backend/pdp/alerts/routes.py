@@ -20,10 +20,12 @@ def _get_user_id(request) -> str:
     # In production, this would validate the token and extract user_id claim
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        # For development: allow header-less requests with placeholder ID
         log.warning("auth_missing", path=request.url.path)
-        return "user_123"
-    # TODO: Parse JWT and extract user_id claim
+        raise HTTPException(status_code=401, detail="Unauthorized: missing or invalid token")
+    token = auth_header.split(" ")[1]
+    if not token.strip():
+        raise HTTPException(status_code=401, detail="Unauthorized: missing token")
+    # Return placeholder for v1 to maintain identity consistency until JWT parsing is implemented
     return "user_123"
 
 

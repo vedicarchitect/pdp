@@ -8,7 +8,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from pdp.db.base import Base
-from pdp.alerts.enums import AlertChannel, AlertCondition, AlertStatus
 
 
 class AlertRecord(Base):
