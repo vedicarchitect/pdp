@@ -65,7 +65,7 @@ task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 | `src/pdp/signals/` | Pure bias-scoring engine (directional strangle): multi-TF votes → 7 buckets → PE:CE ratio + VIX gate |
 | `src/pdp/strategies/` | Strategy implementations (Python) → [`CLAUDE.md`](src/pdp/strategies/CLAUDE.md) |
 | `src/pdp/strategy/` | StrategyHost, BaseStrategy ABC → [`CLAUDE.md`](src/pdp/strategy/CLAUDE.md) |
-| `src/pdp/warehouse/` | Options warehouse — Dhan gap-backfill loop → [`CLAUDE.md`](src/pdp/warehouse/CLAUDE.md) |
+| `src/pdp/warehouse/` | Options warehouse — multi-underlying live feed + self-healing gap-backfill → [`CLAUDE.md`](src/pdp/warehouse/CLAUDE.md) |
 | `alembic/` | DB migrations (alembic.ini stays at root) → [`CLAUDE.md`](alembic/CLAUDE.md) |
 | `docs/` | Supplementary feature docs → [`CLAUDE.md`](docs/CLAUDE.md) |
 | `frontend/` | Vite + React 19 + TanStack + hand-rolled CVA UI kit → [`CLAUDE.md`](frontend/CLAUDE.md) |

@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     EXPIRY_CACHE_PATH: str = "data/expiry/nifty_expiries.json"
     BANKNIFTY_EXPIRY_CACHE_PATH: str = "data/expiry/banknifty_expiries.json"
     SENSEX_EXPIRY_CACHE_PATH: str = "data/expiry/sensex_expiries.json"
+    # Underlyings to warehouse live: any subset of {"NIFTY","BANKNIFTY","SENSEX"}.
+    # Set WAREHOUSE_UNDERLYINGS='["NIFTY","BANKNIFTY"]' to enable multi-index mode.
+    WAREHOUSE_UNDERLYINGS: list[str] = ["NIFTY"]
     # Standalone warehouser band: current+next weekly (+optional monthly), ATM±N strikes.
     WAREHOUSE_STRIKE_BAND: int = 10
     WAREHOUSE_STRIKE_STEP: int = 50

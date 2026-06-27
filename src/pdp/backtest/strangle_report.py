@@ -32,6 +32,7 @@ from pdp.backtest.strangle_sim import format_status_line
 
 if TYPE_CHECKING:
     from pdp.backtest.sim import DayResult
+    from pdp.backtest.store import BacktestStore
     from pdp.backtest.strangle_config import StrangleConfig
     from pdp.backtest.strangle_sim import BarStatus
 
@@ -41,12 +42,14 @@ _BUCKET_RE = re.compile(r"\[(\w+)\]")
 class RunWriter:
     """Writes per-day + run-level artifacts for one backtest invocation."""
 
-    def __init__(self, out_root: str | Path, cfg: StrangleConfig, *, run_id: str | None = None):
+    def __init__(self, out_root: str | Path, cfg: StrangleConfig, *, run_id: str | None = None,
+                 store: BacktestStore | None = None):
         self.run_id = run_id or f"strangle_{datetime.now():%Y%m%d-%H%M%S}"
         self.root = Path(out_root) / self.run_id
         self.days_dir = self.root / "days"
         self.days_dir.mkdir(parents=True, exist_ok=True)
         self._cfg = cfg
+        self._store = store
         self._t0 = time.perf_counter()
         self._eq = 0.0
         self._peak = 0.0
@@ -177,6 +180,13 @@ class RunWriter:
         self._equity_fh.close()
         self._journal_fh.close()
         self._log_fh.close()
+        if self._store is not None:
+            try:
+                self._store.ingest_run_folder(self.root, kind="single")
+            except Exception as exc:
+                # Dual-sink failure must not abort the run
+                import structlog as _sl
+                _sl.get_logger().warning("backtest_mongo_sink_failed", error=str(exc))
         return self.root
 
     def _safe_cfg(self) -> dict[str, Any]:

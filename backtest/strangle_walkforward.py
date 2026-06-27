@@ -29,7 +29,8 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -380,6 +381,8 @@ def main() -> int:
                     help="Multiply all ratio_table lots by this factor")
     ap.add_argument("--dte-max", dest="dte_max", type=int, default=None,
                     help="Only include days with calendar DTE <= this (0=expiry/Tue, 1=Mon)")
+    ap.add_argument("--mongo", action="store_true", default=False,
+                    help="Also write walk-forward results to the MongoDB backtest warehouse")
     args = ap.parse_args()
 
     base = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
@@ -429,6 +432,32 @@ def main() -> int:
     print_report(rows, args.objective)
     if args.out:
         write_csv(rows, args.out)
+    if args.mongo:
+        from pymongo import MongoClient  # noqa: PLC0415
+        from pdp.backtest.store import BacktestStore, build_fold_docs  # noqa: PLC0415
+        _run_id = (Path(args.out).stem if args.out else
+                   f"wf_{datetime.now():%Y%m%d-%H%M%S}")
+        _mc = MongoClient(s.MONGO_URI)
+        _db = _mc[s.MONGO_DB_NAME]
+        _store = BacktestStore(
+            _db["backtest_runs"], _db["backtest_days"],
+            _db["backtest_folds"], _db["backtest_trades"],
+        )
+        if args.out and os.path.exists(args.out):
+            _res = _store.ingest_wf_csv(
+                args.out, run_id=_run_id,
+                window={"from": args.date_from, "to": args.date_to},
+            )
+        else:
+            import tempfile  # noqa: PLC0415
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as _tf:
+                write_csv(rows, _tf.name)
+                _res = _store.ingest_wf_csv(
+                    _tf.name, run_id=_run_id,
+                    window={"from": args.date_from, "to": args.date_to},
+                )
+        log.info("walk_forward_ingested_to_mongo %s", _res)
+        _mc.close()
     return 0
 
 

@@ -21,7 +21,10 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | `models.py` | `BacktestResult`, `Trade`, `DayResult` dataclasses |
 | `engine.py` | Generic strategy-replay framework (`BacktestEngine`) — not used by the index sim directly |
 | `output.py` | Result formatting, console table, CSV/JSON export |
-| `routes.py` | `/backtest` FastAPI endpoints |
+| `routes.py` | `/backtest` FastAPI endpoints (legacy options replay) |
+| `store.py` | `BacktestStore` — sync pymongo wrapper; document builders (`build_run_doc`, `build_day_docs`, `build_fold_docs`, `build_trade_docs`) + idempotent upsert for all 4 Mongo warehouse collections |
+| `warehouse_routes.py` | `/api/v1/strangle-backtests` FastAPI router — list/detail/equity/days/folds/trades + compare + launch (POST /runs, /sweeps, /walkforwards) + promote (POST /runs/{id}/promote) |
+| `job_handlers.py` | Async job handlers for `backtest:single`, `backtest:sweep`, `backtest:walkforward` — registered in app factory |
 
 ## Commission Settings (settings.py → `backtest_commission`)
 

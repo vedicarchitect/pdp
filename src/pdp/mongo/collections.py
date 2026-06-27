@@ -19,6 +19,10 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_portfolio_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
     await _ensure_events(db, settings.EVENTS_TTL_DAYS)
+    await _ensure_backtest_runs(db)
+    await _ensure_backtest_days(db)
+    await _ensure_backtest_folds(db)
+    await _ensure_backtest_trades(db)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -204,6 +208,63 @@ async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # ty
     )
 
 
+async def _ensure_backtest_runs(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Queryable index of every strangle backtest / sweep / walk-forward run."""
+    try:
+        await db.create_collection("backtest_runs")
+        log.info("mongo_collection_created", collection="backtest_runs")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_runs")
+
+    col = db["backtest_runs"]
+    await col.create_index([("run_id", ASCENDING)], unique=True, name="uq_run_id")
+    await col.create_index([("kind", ASCENDING), ("created_at", DESCENDING)], name="idx_kind_created")
+    await col.create_index([("metrics.profit_factor", DESCENDING)], name="idx_pf")
+    await col.create_index([("metrics.net", DESCENDING)], name="idx_net")
+    await col.create_index([("metrics.max_dd", ASCENDING)], name="idx_maxdd")
+    await col.create_index([("metrics.sharpe", DESCENDING)], sparse=True, name="idx_sharpe")
+
+
+async def _ensure_backtest_days(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Per-day P&L + equity series for each run — enough to reconstruct equity/drawdown curves."""
+    try:
+        await db.create_collection("backtest_days")
+        log.info("mongo_collection_created", collection="backtest_days")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_days")
+
+    col = db["backtest_days"]
+    await col.create_index([("run_id", ASCENDING), ("date", ASCENDING)], unique=True, name="uq_run_date")
+    await col.create_index([("run_id", ASCENDING)], name="idx_run_id")
+
+
+async def _ensure_backtest_folds(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Walk-forward fold records: IS window, OOS window, selected config, IS + OOS metrics."""
+    try:
+        await db.create_collection("backtest_folds")
+        log.info("mongo_collection_created", collection="backtest_folds")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_folds")
+
+    col = db["backtest_folds"]
+    await col.create_index(
+        [("run_id", ASCENDING), ("fold_index", ASCENDING)], unique=True, name="uq_run_fold")
+    await col.create_index([("run_id", ASCENDING)], name="idx_run_id")
+
+
+async def _ensure_backtest_trades(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Per-day fill buckets (one document per run+date holding all fills for that day)."""
+    try:
+        await db.create_collection("backtest_trades")
+        log.info("mongo_collection_created", collection="backtest_trades")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_trades")
+
+    col = db["backtest_trades"]
+    await col.create_index([("run_id", ASCENDING), ("date", ASCENDING)], unique=True, name="uq_run_date")
+    await col.create_index([("run_id", ASCENDING)], name="idx_run_id")
+
+
 def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["events"]
 
@@ -230,3 +291,19 @@ def get_positional_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMoto
 
 def get_oi_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["oi_snapshots"]
+
+
+def get_backtest_runs_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_runs"]
+
+
+def get_backtest_days_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_days"]
+
+
+def get_backtest_folds_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_folds"]
+
+
+def get_backtest_trades_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_trades"]

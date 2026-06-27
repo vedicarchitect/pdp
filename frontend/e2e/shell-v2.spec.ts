@@ -150,17 +150,18 @@ test.describe('Instruments route', () => {
 // ── Backtest route ────────────────────────────────────────────────────────────
 
 test.describe('Backtest route', () => {
-  test('renders backtest page with strategy form', async ({ page }) => {
+  test('renders backtest console with strangle warehouse tab', async ({ page }) => {
     await page.goto('/backtest')
     await page.waitForLoadState('domcontentloaded')
-    await expect(page.locator('h1').filter({ hasText: 'Options Strategy Backtester' })).toBeVisible()
-    await expect(page.getByText('Strategy Config')).toBeVisible()
-    await expect(page.getByRole('button', { name: /Run Backtest/i })).toBeVisible()
+    await expect(page.locator('h1').filter({ hasText: 'Backtest Console' })).toBeVisible()
+    await expect(page.getByTestId('tab-strangle')).toBeVisible()
+    await expect(page.getByTestId('tab-options')).toBeVisible()
   })
 
-  test('shows empty state placeholder before running', async ({ page }) => {
+  test('options replay tab shows strategy form', async ({ page }) => {
     await page.goto('/backtest')
     await page.waitForLoadState('domcontentloaded')
+    await page.getByTestId('tab-options').click()
     await expect(page.getByText('Configure a strategy and click Run Backtest')).toBeVisible()
   })
 })

@@ -58,6 +58,14 @@ async def lifespan(app: FastAPI):
     job_runner.register_handler("housekeeping:validate-warehouse", validate_warehouse)
     job_runner.register_handler("housekeeping:snapshot-instruments", snapshot_instruments)
     job_runner.register_handler("ml_train", train_handler)
+    from pdp.backtest.job_handlers import (
+        backtest_single_handler,
+        backtest_sweep_handler,
+        backtest_walkforward_handler,
+    )
+    job_runner.register_handler("backtest:single", backtest_single_handler)
+    job_runner.register_handler("backtest:sweep", backtest_sweep_handler)
+    job_runner.register_handler("backtest:walkforward", backtest_walkforward_handler)
     app.state.job_runner = job_runner
 
     # WebSocket hubs — always available
@@ -395,6 +403,7 @@ def create_app() -> FastAPI:
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
     from pdp.backtest.routes import router as backtest_router
+    from pdp.backtest.warehouse_routes import router as strangle_bt_router
     from pdp.jobs.routes import router as jobs_router
     from pdp.jobs.ws import router as jobs_ws_router
     from pdp.ml.routes import router as ml_router
@@ -419,6 +428,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(strategy_router)
     app.include_router(backtest_router)
+    app.include_router(strangle_bt_router)
     app.include_router(jobs_router, prefix="/api/v1/jobs", tags=["Jobs"])
     app.include_router(jobs_ws_router, prefix="/ws/jobs", tags=["Jobs WS"])
     app.include_router(ml_router, prefix="/api/v1/ml", tags=["ML"])

@@ -2,25 +2,46 @@
 
 ## Purpose
 
-Maintains PDP's **MongoDB `option_bars`** collection via a self-healing gap-backfill loop from the Dhan API. Historical data was seeded in a one-time migration (archived); this module now owns ongoing freshness only.
+Maintains PDP's **MongoDB `option_bars`** collection for one or more configured underlyings via a
+live tick feed (real-time) and a self-healing gap-backfill loop (Dhan REST API).
 
 ## Files
 
 | File | Size | Role |
 |------|------|------|
-| `service.py` | 18.3 KB | `WarehouseService` — orchestrates the gap-backfill sync loop; reads Dhan API, writes MongoDB |
-| `writer.py` | 9.3 KB | `OptionBarWriter` — batch-upsert `option_bars` documents to MongoDB (first-write-wins) |
-| `__main__.py` | 2.9 KB | CLI entry: `python -m pdp.warehouse --from <date> --to <date>` |
+| `service.py` | ~9 KB | `WarehouseService` — multi-underlying tick subscription + band roll + gap-heal |
+| `writer.py` | ~9 KB | `OptionBarWriter` — per-underlying async writer; routes to `option_bars` or `market_bars` |
+| `__main__.py` | ~2 KB | Entry: `python -m pdp.warehouse` |
 | `__init__.py` | 0.1 KB | Exports `WarehouseService` |
 
 ## Data Flow
 
 ```
-Dhan API (intraday option OHLCV)
-  → WarehouseService.gap_backfill(from, to)
-      → OptionBarWriter.write_batch()
-          → MongoDB option_bars (upsert, first-write-wins)
+Dhan WS feed (one connection, multiple sids)
+  → WarehouseService._consume_ticks()
+      → BarAggregator (1m bars)
+          → self._writers[security_id]        # O(1) routing table
+              → OptionBarWriter.enqueue(bar)
+                  ├─ index sid  → market_bars (spot bar)
+                  └─ option sid → option_bars (upsert, first-write-wins)
+
+Gap-heal loop (periodic, per-underlying):
+  → run_gap_backfill(underlying=..., underlying_sid=..., strike_step=...)
+      → MongoDB option_bars (upsert)
 ```
+
+## Multi-underlying support
+
+`UNDERLYING_REGISTRY` in `service.py` defines the supported set:
+
+| Underlying | IDX_I SID | Strike step |
+|------------|-----------|-------------|
+| NIFTY      | 13        | 50          |
+| BANKNIFTY  | 25        | 100         |
+| SENSEX     | 51        | 100         |
+
+Add an underlying by setting `WAREHOUSE_UNDERLYINGS='["NIFTY","BANKNIFTY"]'` — no code changes.
+Unsupported entries raise `ValueError` at startup before any Dhan connection is opened.
 
 ## MongoDB `option_bars` Schema
 
@@ -42,9 +63,12 @@ Dhan API (intraday option OHLCV)
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `EXPIRY_CACHE_PATH` | `data/expiry/nifty_expiries.json` | Pre-built JSON expiry calendar |
-| `WAREHOUSE_STRIKE_BAND` | 10 | ATM ± N strikes stored |
-| `WAREHOUSE_STRIKE_STEP` | 50 | Strike increment (50 for NIFTY; 100 for BANKNIFTY/SENSEX) |
+| `WAREHOUSE_UNDERLYINGS` | `["NIFTY"]` | Underlyings to warehouse; any subset of registry |
+| `EXPIRY_CACHE_PATH` | `data/expiry/nifty_expiries.json` | NIFTY expiry calendar |
+| `BANKNIFTY_EXPIRY_CACHE_PATH` | `data/expiry/banknifty_expiries.json` | BANKNIFTY expiry calendar |
+| `SENSEX_EXPIRY_CACHE_PATH` | `data/expiry/sensex_expiries.json` | SENSEX expiry calendar |
+| `WAREHOUSE_STRIKE_BAND` | 10 | ATM ± N strikes stored per underlying |
+| `WAREHOUSE_STRIKE_STEP` | 50 | Strike increment for NIFTY (per-underlying in registry for others) |
 | `WAREHOUSE_INCLUDE_MONTHLY` | False | Include monthly expiry |
 | `WAREHOUSE_GAP_BACKFILL_ENABLED` | True | Auto gap-heal loop |
 | `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS` | 4.0 | How often to scan for gaps |

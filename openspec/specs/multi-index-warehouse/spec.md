@@ -1,5 +1,8 @@
-## MODIFIED Requirements
+# multi-index-warehouse Specification
 
+## Purpose
+TBD - created by archiving change multi-index-warehouse. Update Purpose after archive.
+## Requirements
 ### Requirement: Configurable warehouse underlyings
 
 `WarehouseService` SHALL support a configurable list of underlyings via `settings.WAREHOUSE_UNDERLYINGS` (a `list[str]`, default `["NIFTY"]`). For each underlying in the list it SHALL subscribe to the corresponding index spot feed and the ATM ± N option band, using the correct security ID and strike step for that underlying. Adding `"BANKNIFTY"` or `"SENSEX"` to `WAREHOUSE_UNDERLYINGS` SHALL not require any code changes — only the environment variable.
@@ -57,3 +60,4 @@ The module-level `INDEX_SID` constant in `src/pdp/warehouse/writer.py` SHALL be 
 
 - **WHEN** `grep -r "INDEX_SID" src/ tests/` is run after implementation
 - **THEN** no matches are found
+

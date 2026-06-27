@@ -18,6 +18,11 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 | `option_chains` | Regular | Latest chain snapshot per underlying+expiry |
 | `oi_snapshots` | Time-series | Intraday ATM±N OI snapshots + derived events (scripts/expiry_analysis.py --track) |
 | `paper_journal` | Regular | Daily P&L journal (one doc per date) |
+| `backtest_runs` | Regular | Backtest warehouse index — one doc per run; keys: `run_id`, `kind`, `metrics`, `verdict`, `promotion_state` |
+| `backtest_days` | Regular | Per-day P&L rows keyed by `(run_id, date)` |
+| `backtest_folds` | Regular | Walk-forward fold rows keyed by `(run_id, fold_index)` |
+| `backtest_trades` | Regular | Fill-level trade rows keyed by `(run_id, date)` |
+| `backtest_promotions` | Regular | Audit log of PASS-gated promotions to paper strategies |
 
 ## Usage
 

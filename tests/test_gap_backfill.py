@@ -62,7 +62,7 @@ def test_backfill_gaps_only_targets_missing_days(monkeypatch):
 
     filled: list[str] = []
 
-    def _fake_fill_day(dhan, c, cal, ds, codes, label_offsets):  # noqa: ARG001
+    def _fake_fill_day(dhan, c, cal, ds, codes, label_offsets, **_):  # noqa: ARG001
         filled.append(ds)
         return 5  # pretend 5 bars inserted per day
 

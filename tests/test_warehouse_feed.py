@@ -3,25 +3,25 @@
 Proves that:
 1. ContractMeta round-trips through OptionBarWriter correctly: a BarClosed for a known
    security_id produces the right build_option_bar_doc fields in the upsert op.
-2. A BarClosed for sid "13" (NIFTY index) goes to the spot (market_bars) buffer instead of
-   the option_bars buffer.
+2. A BarClosed for the configured index sid goes to the spot (market_bars) buffer.
 3. An unknown security_id (not in the band) is silently dropped.
 4. ``upsert_option_bars_async`` is called with the correct doc shape (via a stub collection).
+5. When two underlyings are configured, ticks for each sid route to the correct writer.
+6. An unsupported underlying name raises ValueError at WarehouseService construction time.
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from pdp.market.bars import BarClosed
 from pdp.options.warehouse import KEY_FIELDS
-from pdp.warehouse.writer import ContractMeta, INDEX_SID, OptionBarWriter
-
+from pdp.warehouse.writer import ContractMeta, OptionBarWriter
 
 # ── Stub collection ──────────────────────────────────────────────────────────
 
@@ -50,17 +50,22 @@ class _StubCollection:
 _EXPIRY = date(2026, 6, 17)
 _STRIKE = 24800.0
 _SID = "99001"
+_NIFTY_SPOT_SID = "13"
+_BANKNIFTY_SPOT_SID = "25"
 _BAR_TIME = datetime(2026, 6, 13, 4, 15, tzinfo=UTC)  # 09:45 IST in UTC
 
+_NIFTY_CFG = {"sid": _NIFTY_SPOT_SID, "step": 50, "underlying": "NIFTY"}
+_BANKNIFTY_CFG = {"sid": _BANKNIFTY_SPOT_SID, "step": 100, "underlying": "BANKNIFTY"}
 
-def _make_meta() -> ContractMeta:
+
+def _make_meta(underlying: str = "NIFTY") -> ContractMeta:
     return ContractMeta(
-        underlying="NIFTY",
+        underlying=underlying,
         expiry_date=_EXPIRY,
         strike=_STRIKE,
         option_type="CE",
         expiry_flag="WEEK",
-        trading_symbol="NIFTY-Jun2026-24800-CE",
+        trading_symbol=f"{underlying}-Jun2026-24800-CE",
         security_id=_SID,
         strike_label="ATM",
     )
@@ -91,7 +96,7 @@ def test_option_bar_enqueued_and_flushed_with_correct_fields() -> None:
     opt_col = _StubCollection()
     mkt_col = _StubCollection()
 
-    writer = OptionBarWriter(opt_col, mkt_col)  # type: ignore[arg-type]
+    writer = OptionBarWriter(opt_col, mkt_col, underlying_cfg=_NIFTY_CFG)  # type: ignore[arg-type]
     writer.set_band({_SID: _make_meta()})
 
     bar = _make_bar(_SID)
@@ -132,14 +137,14 @@ def test_option_bar_enqueued_and_flushed_with_correct_fields() -> None:
 
 
 def test_spot_bar_goes_to_market_bars() -> None:
-    """A BarClosed for sid '13' (NIFTY index) is routed to the market_bars buffer."""
+    """A BarClosed for the index sid is routed to the market_bars buffer."""
     opt_col = _StubCollection()
     mkt_col = _StubCollection()
 
-    writer = OptionBarWriter(opt_col, mkt_col)  # type: ignore[arg-type]
+    writer = OptionBarWriter(opt_col, mkt_col, underlying_cfg=_NIFTY_CFG)  # type: ignore[arg-type]
     writer.set_band({})  # no option band needed for spot test
 
-    bar = _make_bar(INDEX_SID)  # sid "13"
+    bar = _make_bar(_NIFTY_SPOT_SID)  # sid "13"
     writer.enqueue(bar)
 
     _run(writer._flush_spot())
@@ -148,7 +153,7 @@ def test_spot_bar_goes_to_market_bars() -> None:
     docs = mkt_col.insert_many_calls[0]
     assert len(docs) == 1
     doc = docs[0]
-    assert doc["metadata"]["security_id"] == INDEX_SID
+    assert doc["metadata"]["security_id"] == _NIFTY_SPOT_SID
     assert doc["metadata"]["timeframe"] == "1m"
     assert doc["close"] == 153.0
 
@@ -161,10 +166,10 @@ def test_unknown_security_id_silently_dropped() -> None:
     opt_col = _StubCollection()
     mkt_col = _StubCollection()
 
-    writer = OptionBarWriter(opt_col, mkt_col)  # type: ignore[arg-type]
+    writer = OptionBarWriter(opt_col, mkt_col, underlying_cfg=_NIFTY_CFG)  # type: ignore[arg-type]
     writer.set_band({})  # empty band
 
-    bar = _make_bar("99999")  # not in band, not sid 13
+    bar = _make_bar("99999")  # not in band, not the index sid
     writer.enqueue(bar)
 
     _run(writer._flush_all())
@@ -178,7 +183,7 @@ def test_band_update_takes_effect_immediately() -> None:
     opt_col = _StubCollection()
     mkt_col = _StubCollection()
 
-    writer = OptionBarWriter(opt_col, mkt_col)  # type: ignore[arg-type]
+    writer = OptionBarWriter(opt_col, mkt_col, underlying_cfg=_NIFTY_CFG)  # type: ignore[arg-type]
     writer.set_band({})  # empty initially
 
     bar = _make_bar(_SID)
@@ -242,3 +247,65 @@ def test_nifty_expiry_calendar_resolve_for_band() -> None:
     today = date(2026, 6, 13)
     assert cal.resolve_expiry(today, "WEEK", 1) == date(2026, 6, 17)
     assert cal.resolve_expiry(today, "WEEK", 2) == date(2026, 6, 24)
+
+
+# ── Multi-underlying tests (tasks 5.2 and 5.3) ───────────────────────────────
+
+def test_banknifty_option_bar_routes_to_banknifty_writer() -> None:
+    """When BANKNIFTY writer is configured, option bars are tagged with underlying='BANKNIFTY'."""
+    bnf_option_sid = "88001"
+    opt_col = _StubCollection()
+    mkt_col = _StubCollection()
+
+    writer = OptionBarWriter(opt_col, mkt_col, underlying_cfg=_BANKNIFTY_CFG)  # type: ignore[arg-type]
+    meta = ContractMeta(
+        underlying="BANKNIFTY",
+        expiry_date=_EXPIRY,
+        strike=52000.0,
+        option_type="CE",
+        expiry_flag="WEEK",
+        trading_symbol="BANKNIFTY-Jun2026-52000-CE",
+        security_id=bnf_option_sid,
+        strike_label="ATM",
+    )
+    writer.set_band({bnf_option_sid: meta})
+
+    bar = _make_bar(bnf_option_sid)
+    writer.enqueue(bar)
+    _run(writer._flush_options())
+
+    assert len(opt_col.bulk_write_calls) == 1
+    op = opt_col.bulk_write_calls[0][0]
+    assert op._filter["underlying"] == "BANKNIFTY"
+
+    # A NIFTY writer with a different underlying_cfg must NOT receive this bar.
+    nifty_opt_col = _StubCollection()
+    nifty_mkt_col = _StubCollection()
+    nifty_writer = OptionBarWriter(nifty_opt_col, nifty_mkt_col, underlying_cfg=_NIFTY_CFG)  # type: ignore[arg-type]
+    nifty_writer.set_band({})  # NIFTY writer has no BANKNIFTY options in band
+
+    nifty_writer.enqueue(bar)
+    _run(nifty_writer._flush_options())
+    assert len(nifty_opt_col.bulk_write_calls) == 0  # not cross-contaminated
+
+
+def test_unsupported_underlying_raises_value_error_at_startup() -> None:
+    """WarehouseService raises ValueError for unrecognised underlyings before any I/O."""
+    from pdp.warehouse.service import WarehouseService
+
+    fake_settings = MagicMock()
+    fake_settings.WAREHOUSE_UNDERLYINGS = ["NIFTY", "MIDCAP"]
+    fake_settings.DHAN_CLIENT_ID = "x"
+    fake_settings.DHAN_ACCESS_TOKEN = "x"
+
+    fake_mongo_db = MagicMock()
+    # Stub the collection getters so __init__ doesn't blow up before the validation.
+    fake_mongo_db.__getitem__ = MagicMock(return_value=MagicMock())
+    fake_session_maker = MagicMock()
+
+    with pytest.raises(ValueError, match="MIDCAP"):
+        WarehouseService(
+            settings=fake_settings,
+            mongo_db=fake_mongo_db,
+            session_maker=fake_session_maker,
+        )

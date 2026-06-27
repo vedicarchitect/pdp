@@ -14,7 +14,13 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
+
+
+class UnderlyingCfg(TypedDict):
+    sid: str
+    step: int
+    underlying: str
 
 import structlog
 
@@ -31,9 +37,6 @@ log = structlog.get_logger()
 _FLUSH_INTERVAL = 1.0   # seconds between periodic flushes
 _FLUSH_BATCH = 500      # max docs per flush
 _MAX_BUFFER = 10_000    # drop-oldest threshold per buffer
-
-# Security ID for the primary index (IDX_I segment); warehouse subscribes to this for spot bars.
-INDEX_SID = "13"
 
 
 @dataclass(slots=True)
@@ -67,9 +70,11 @@ class OptionBarWriter:
         self,
         option_bars_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
         market_bars_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
+        underlying_cfg: UnderlyingCfg,
     ) -> None:
         self._opt_col = option_bars_col
         self._mkt_col = market_bars_col
+        self._cfg = underlying_cfg
         # Per-collection buffers
         self._opt_buf: deque[dict[str, Any]] = deque()
         self._mkt_buf: deque[dict[str, Any]] = deque()
@@ -97,7 +102,7 @@ class OptionBarWriter:
         try:
             existing = await self._mkt_col.distinct(
                 "ts",
-                {"metadata.security_id": INDEX_SID, "ts": {"$gte": cutoff}},
+                {"metadata.security_id": self._cfg["sid"], "ts": {"$gte": cutoff}},
             )
             self._flushed_spot_ts = set(existing)
             log.info("spot_writer_dedup_loaded", count=len(self._flushed_spot_ts))
@@ -117,7 +122,7 @@ class OptionBarWriter:
 
     def enqueue(self, bar: BarClosed) -> None:
         """Route a closed bar to the appropriate buffer."""
-        if bar.security_id == INDEX_SID:
+        if bar.security_id == self._cfg["sid"]:
             self._enqueue_spot(bar)
         else:
             self._enqueue_option(bar)
