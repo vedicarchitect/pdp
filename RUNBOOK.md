@@ -12,7 +12,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 2. [First-Time Setup](#2-first-time-setup)
 3. [Starting the Stack](#3-starting-the-stack)
 4. [Backend (API Server)](#4-backend-api-server)
-5. [Frontend (UI)](#5-frontend-ui)
+5. [App (Flutter UI)](#5-app-flutter-ui)
 6. [Strategy Operations](#6-strategy-operations)
 7. [Live Monitor](#7-live-monitor)
 8. [Backtest](#8-backtest)
@@ -62,8 +62,8 @@ task db:up
 # 5. Run DB migrations
 task db:migrate
 
-# 6. Install frontend deps
-cd frontend && npm install && cd ..
+# 6. Install app (Flutter) deps — requires the Flutter SDK on PATH
+cd app && flutter pub get && cd ..
 ```
 
 ---
@@ -86,15 +86,15 @@ task dev
 # Logs will show: market_feed_started client_id=...
 ```
 
-### Full stack (API + Frontend)
+### Full stack (API + App)
 
 ```powershell
 # Terminal 1
 task db:up && task dev
 
-# Terminal 2
-cd frontend && npm run dev
-# UI: http://localhost:5173
+# Terminal 2 — Windows desktop, live against the local API
+cd app
+flutter run -d windows --dart-define=API_BASE=http://localhost:8000 --dart-define=WS_BASE=ws://localhost:8000
 ```
 
 ---
@@ -153,56 +153,69 @@ Interactive docs: `http://localhost:8000/docs`
 
 ---
 
-## 5. Frontend (UI)
+## 5. App (Flutter UI)
 
-### Start dev server
-
-```powershell
-cd frontend
-npm run dev
-# → http://localhost:5173
-```
-
-### Build production bundle
+The UI is a native **Flutter** app in `app/` (Dart, Riverpod, fl_chart, web_socket_channel),
+targeting **Android** and **Windows desktop**. Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
+on PATH (`flutter --version`). First run on a fresh clone:
 
 ```powershell
-cd frontend
-npm run build
-# output: frontend/dist/
+cd app
+flutter create . --platforms=android,windows   # generates android/ + windows/ host folders (one-time)
+flutter pub get
 ```
 
-### Run frontend tests
+### Run
 
 ```powershell
-cd frontend
-npm test                     # vitest unit tests
-npx playwright test          # e2e suite (required after every frontend change)
-npx playwright test --grep "Positional route"  # run a single describe block
+cd app
+
+# Offline demo — simulated live data, no backend needed
+flutter run -d windows --dart-define=USE_MOCK=true
+
+# Live against the local API (start it with `task dev` first)
+flutter run -d windows --dart-define=API_BASE=http://localhost:8000 --dart-define=WS_BASE=ws://localhost:8000
+
+# Android device on the same LAN — point at the host machine's IP
+flutter run -d <device-id> --dart-define=API_BASE=http://<host-ip>:8000 --dart-define=WS_BASE=ws://<host-ip>:8000
 ```
 
-### Frontend routes
+`flutter devices` lists attached targets. Defaults (no dart-defines) are
+`http://localhost:8000` / `ws://localhost:8000`, mock off.
 
-| Route | Description |
-|-------|-------------|
-| `/` | Intraday dashboard — positions, risk banner, alert pills, WS feeds |
-| `/positional` | Swing/F&O positional view — strategy groups, per-leg Greeks, DTE alerts, P&L history |
-| `/analytics` | Options analytics — GEX, Max Pain, OI Heatmap/PCR (nearest expiry by default) |
-| `/portfolio` | MTM P&L overview + kill-switch |
-| `/instruments` | Instrument browser + option chain viewer |
-| `/backtest` | Backtest runner UI |
-| `/builder` | Strategy payoff builder with 10 readymades |
-| `/strategies` | Strategy manager |
-| `/events` | Live event feed |
-| `/operations` | Housekeeping / ML job runner |
-| `/alerts` | Alert rule CRUD |
-
-### Add a shadcn/ui component
+### Build
 
 ```powershell
-cd frontend
-npx shadcn-ui@latest add <component-name>
-# e.g. npx shadcn-ui@latest add table
+cd app
+flutter build windows        # → build/windows/x64/runner/Release/
+flutter build apk            # → build/app/outputs/flutter-apk/app-release.apk
 ```
+
+### Test & lint
+
+```powershell
+cd app
+flutter analyze              # static analysis — must be clean
+flutter test                 # widget/unit tests
+```
+
+### Backend connection (`--dart-define`)
+
+| Define | Default | Purpose |
+|--------|---------|---------|
+| `API_BASE` | `http://localhost:8000` | REST base (`/api/v1/...`) |
+| `WS_BASE` | `ws://localhost:8000` | WebSocket base (`/ws/...`) |
+| `USE_MOCK` | `false` | Simulated live data, zero backend |
+
+### Screens
+
+| Screen | Description |
+|--------|-------------|
+| Portfolio | Live MTM P&L summary + positions list + P&L chart (REST snapshot + `/ws/portfolio`) |
+
+> The first build ships the app shell + the Portfolio vertical slice. Further screens
+> (orders, analytics, backtest console, events, alerts) land as separate OpenSpec changes,
+> each reusing the shell + data/provider pattern.
 
 ---
 

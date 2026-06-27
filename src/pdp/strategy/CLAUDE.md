@@ -13,6 +13,7 @@
 | `strikes.py` | 3.6 KB | Strike selection helpers (ATM, OTM ±N) |
 | `schemas.py` | 0.8 KB | Pydantic schemas for strategy API |
 | `routes.py` | 1.8 KB | `/strategy` endpoints (list, start, stop, status) |
+| `promotion.py` | ~2 KB | `promote_run(run_id, strategy_id)` — PASS-gate promote: writes `strategies/<id>.yaml` + `backtest_promotions` audit doc in Mongo |
 
 ## Strategy YAML Config (strategies/*.yaml)
 

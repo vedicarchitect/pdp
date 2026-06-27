@@ -14,8 +14,8 @@ Full stack/layout: [`openspec/project.md`](openspec/project.md)
 6. **structlog only** — no `print()` / `rich` in core modules.
 7. **Settings via `get_settings()`** — never `os.environ` directly.
 8. **DB split** — PostgreSQL = orders/trades/positions (ACID). MongoDB = bars/chains (time-series). Redis = hot cache/pub-sub.
-9. **Speed, quality, clean UI are core — no compromise.** Every data path must be fast (no N+1, no blocking on hot path). Every UI surface must be pixel-consistent and production-grade. Architecture decisions must optimise for these three properties first.
-10. **Frontend changes require Playwright verification.** After any frontend change, run `cd frontend && npx playwright test` before marking tasks done. Add e2e tests for new routes and components to `frontend/e2e/`.
+9. **Speed, quality, clean UI are core — no compromise.** Every data path must be fast (no N+1, no blocking on hot path). The UI must be production-grade, consistent, and run at 60fps on live data. Architecture decisions must optimise for these three properties first.
+10. **UI is Flutter.** The app lives in `app/` (Dart, Riverpod, fl_chart). After UI changes run `cd app && flutter analyze && flutter test`. The old React `frontend/` is removed — do not reference it.
 
 ## Key Commands
 
@@ -68,7 +68,7 @@ task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 | `src/pdp/warehouse/` | Options warehouse — multi-underlying live feed + self-healing gap-backfill → [`CLAUDE.md`](src/pdp/warehouse/CLAUDE.md) |
 | `alembic/` | DB migrations (alembic.ini stays at root) → [`CLAUDE.md`](alembic/CLAUDE.md) |
 | `docs/` | Supplementary feature docs → [`CLAUDE.md`](docs/CLAUDE.md) |
-| `frontend/` | Vite + React 19 + TanStack + hand-rolled CVA UI kit → [`CLAUDE.md`](frontend/CLAUDE.md) |
+| `app/` | Flutter (Dart) trading app — Riverpod + fl_chart + web_socket_channel → [`CLAUDE.md`](app/CLAUDE.md) |
 | `backtest/` | Runnable backtest scripts + YAML configs → [`CLAUDE.md`](backtest/CLAUDE.md) |
 | `backtest/run.py` | Canonical multi-day runner: single-config detail or grid sweep |
 | `backtest/strangle_run.py` | Directional-strangle runner (bias-driven option selling; `--hedge`, `--trace`) |

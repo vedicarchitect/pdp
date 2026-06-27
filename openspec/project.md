@@ -30,7 +30,7 @@ Everything is spec-first: no implementation lands without a proposal under `open
 | Type check       | pyright (strict on `src/pdp/`)                    |
 | Task runner      | Taskfile.yml                                      |
 | Broker (v1)      | Dhan (paper + live-gated)                         |
-| Frontend (later) | Vite + React 19 + TanStack Query + shadcn/ui      |
+| Frontend (app)   | Flutter (Dart) + Riverpod + fl_chart + web_socket_channel (Android + Windows desktop) |
 
 ## Architecture
 
