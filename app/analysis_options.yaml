@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+# Add project-specific rule overrides here as the app grows.
+# linter:
+#   rules:
+#     prefer_final_locals: true

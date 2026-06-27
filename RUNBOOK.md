@@ -36,6 +36,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 | `uv` | latest | `pip install uv` |
 | Node.js | ≥ 20 | `winget install OpenJS.NodeJS` |
 | Docker Desktop | latest | [docker.com](https://www.docker.com/products/docker-desktop) |
+| Flutter | ≥ 3.22 | Extract to `C:\src\flutter`; add `C:\src\flutter\bin` to User PATH. **Windows desktop builds require Developer Mode** (`start ms-settings:developers`). If conda is in PATH, add the registry-refresh line to `$PROFILE` so Flutter survives new shells: `$env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')` |
 | Perl | any | Pre-installed on WSL; or `winget install StrawberryPerl.StrawberryPerl` |
 | Task | latest | `winget install Task.Task` |
 

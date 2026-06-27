@@ -40,20 +40,15 @@ tasks:
     cmds:
       - uv run pytest
 
-  e2e:
-    desc: Run Playwright e2e suite (requires dev server on :5173)
+  app:test:
+    desc: Run Flutter app analyze + widget tests (requires Flutter SDK)
     cmds:
-      - cd frontend && npx playwright test
+      - cd app && flutter analyze && flutter test
 
-  e2e:cypress:
-    desc: Run Cypress e2e suite (requires dev server on :5173). Set APPLITOOLS_API_KEY for visual regression.
+  app:run:
+    desc: Run the Flutter app (Windows desktop, offline mock data)
     cmds:
-      - cd frontend && npm run cypress:run
-
-  e2e:cypress:open:
-    desc: Open Cypress interactive runner
-    cmds:
-      - cd frontend && npm run cypress:open
+      - cd app && flutter run -d windows --dart-define=USE_MOCK=true
 
   lint:
     desc: Lint with ruff

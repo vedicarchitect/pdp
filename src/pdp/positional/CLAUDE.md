@@ -13,12 +13,7 @@ Multi-leg swing/positional trades (F&O and equity). Distinct from intraday strat
 
 - **PositionalGroup** — a named trade (e.g. "NIFTY Jun strangle") with multiple legs
 - **PositionalLeg** — a single option or equity position within a group, enriched with live Greeks
-- Greeks enrichment: legs with `underlying + strike + option_type` get Greeks from `useAllGreeks` hook (frontend) or the `/options/chain` API
-
-## Frontend
-
-`frontend/src/components/positional/PositionalPage.tsx` — renders position groups with live Greeks overlay.
-Uses `useAllGreeks(underlyings)` to enrich legs where WS Greeks aren't available.
+- Greeks enrichment: legs with `underlying + strike + option_type` get Greeks from the `/options/chain` API (or live WS Greeks)
 
 ## Note
 

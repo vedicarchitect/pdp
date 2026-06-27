@@ -1,0 +1,119 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../shared/widgets/connection_badge.dart';
+import '../../shared/widgets/mode_badge.dart';
+import '../portfolio/application/portfolio_providers.dart';
+
+/// Responsive app shell: a side [NavigationRail] on wide layouts (desktop /
+/// tablet) and a bottom [NavigationBar] on compact layouts (phones).
+class AppShell extends ConsumerWidget {
+  const AppShell({super.key, required this.child});
+
+  final Widget child;
+
+  static const double _wideBreakpoint = 720;
+
+  static const List<_Destination> _destinations = [
+    _Destination(
+      route: '/portfolio',
+      label: 'Portfolio',
+      icon: Icons.account_balance_wallet_outlined,
+      selectedIcon: Icons.account_balance_wallet,
+    ),
+    _Destination(
+      route: '/more',
+      label: 'More',
+      icon: Icons.grid_view_outlined,
+      selectedIcon: Icons.grid_view,
+    ),
+  ];
+
+  int _indexFor(String location) {
+    final i = _destinations.indexWhere((d) => location.startsWith(d.route));
+    return i < 0 ? 0 : i;
+  }
+
+  void _onSelect(BuildContext context, int index) {
+    context.go(_destinations[index].route);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final location = GoRouterState.of(context).uri.path;
+    final index = _indexFor(location);
+    final isWide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
+    final mode = ref.watch(modeProvider);
+
+    final appBar = AppBar(
+      title: const Text(
+        'PDP',
+        style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.5),
+      ),
+      actions: [
+        ModeBadge(mode: mode),
+        const SizedBox(width: 12),
+        const ConnectionBadge(),
+        const SizedBox(width: 16),
+      ],
+    );
+
+    if (isWide) {
+      return Scaffold(
+        appBar: appBar,
+        body: Row(
+          children: [
+            NavigationRail(
+              selectedIndex: index,
+              onDestinationSelected: (i) => _onSelect(context, i),
+              labelType: NavigationRailLabelType.all,
+              groupAlignment: -0.9,
+              destinations: [
+                for (final d in _destinations)
+                  NavigationRailDestination(
+                    icon: Icon(d.icon),
+                    selectedIcon: Icon(d.selectedIcon),
+                    label: Text(d.label),
+                  ),
+              ],
+            ),
+            const VerticalDivider(width: 1),
+            Expanded(child: child),
+          ],
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: appBar,
+      body: child,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: index,
+        onDestinationSelected: (i) => _onSelect(context, i),
+        destinations: [
+          for (final d in _destinations)
+            NavigationDestination(
+              icon: Icon(d.icon),
+              selectedIcon: Icon(d.selectedIcon),
+              label: d.label,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Destination {
+  const _Destination({
+    required this.route,
+    required this.label,
+    required this.icon,
+    required this.selectedIcon,
+  });
+
+  final String route;
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+}

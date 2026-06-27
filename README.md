@@ -31,8 +31,8 @@ task db:migrate
 # 5. Start API (http://localhost:8000)
 task dev
 
-# 6. (Optional) Start frontend (http://localhost:5173)
-cd frontend && npm install && npm run dev
+# 6. (Optional) Start the Flutter app — offline mock data, no backend needed
+cd app && flutter pub get && flutter run -d windows --dart-define=USE_MOCK=true
 ```
 
 ➡️ **Full operational details:** [RUNBOOK.md](RUNBOOK.md)
@@ -114,7 +114,7 @@ PDP/
 │   ├── instruments/            # Dhan scrip master
 │   ├── mongo/                  # MongoDB client + collection init
 │   └── db/                     # SQLAlchemy session + base
-├── frontend/                   # Vite + React 19 + TanStack + shadcn/ui
+├── app/                        # Flutter (Dart) trading app — Riverpod + fl_chart (Android + Windows)
 ├── strategies/                 # Strategy YAML configs (auto-loaded)
 │   └── supertrend_short.yaml   # Active: ST(3,1) NIFTY OTM selling
 ├── scripts/                    # Operational scripts (see scripts/README.md)
@@ -149,7 +149,7 @@ PDP/
 | Lint / types | ruff · pyright (strict on `src/pdp/`) |
 | Task runner | Taskfile |
 | Broker | Dhan (paper + live-gated) |
-| Frontend | Vite + React 19 + TanStack Query + shadcn/ui |
+| App (UI) | Flutter (Dart) + Riverpod + fl_chart + web_socket_channel (Android + Windows) |
 
 ---
 
@@ -227,7 +227,7 @@ Risk guards active in all modes:
 | Options chain poller | ✅ Live | Live-only, Greeks |
 | Alerts engine | ✅ Live | Price/Greeks alerts + WS |
 | Positional monitor | ✅ Live | Swing F&O + equity |
-| Frontend shell | ✅ Live | Vite + React 19 + shadcn |
+| App (Flutter) | 🔄 In progress | `replace-frontend-flutter` — shell + live portfolio |
 | Backtest sweep | 🔄 In progress | `configurable-strategy-backtest-sweep` |
 | Order approval center | 🔄 In progress | Manual gate before live |
 
