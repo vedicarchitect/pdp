@@ -163,6 +163,8 @@ def main() -> int:
                     help="Apply take-profit only on complete_bull/bear legs; let balanced legs run to expiry")
     ap.add_argument("--scale-lots", dest="scale_lots", type=int, default=None,
                     help="Multiply all ratio_table lots by this factor (1=base, 2=double, 3=triple)")
+    ap.add_argument("--mongo", action="store_true", default=False,
+                    help="Also write run artifacts to the MongoDB backtest warehouse (requires --out-dir)")
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
@@ -214,7 +216,16 @@ def main() -> int:
              "ON" if cfg.hedge_enabled else "OFF", args.out_dir or "-")
 
     # Archive every-minute logs/trades/timing when --out-dir is given (always traces then).
-    writer = RunWriter(args.out_dir, cfg) if args.out_dir else None
+    _mongo_store = None
+    if args.mongo and args.out_dir:
+        from pdp.backtest.store import BacktestStore  # noqa: PLC0415
+        _mc = MongoClient(s.MONGO_URI)
+        _db = _mc[s.MONGO_DB_NAME]
+        _mongo_store = BacktestStore(
+            _db["backtest_runs"], _db["backtest_days"],
+            _db["backtest_folds"], _db["backtest_trades"],
+        )
+    writer = RunWriter(args.out_dir, cfg, store=_mongo_store) if args.out_dir else None
     want_trace = bool(args.trace) or writer is not None
     if writer:
         writer.log(f"run start: {days[0]}..{days[-1]} ({len(days)} biz days, {len(chunks)} chunks)")
