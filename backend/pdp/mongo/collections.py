@@ -18,6 +18,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_oi_snapshots(db)
     await _ensure_portfolio_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
+    await _ensure_broker_snapshots(db)
     await _ensure_events(db, settings.EVENTS_TTL_DAYS)
     await _ensure_backtest_runs(db)
     await _ensure_backtest_days(db)
@@ -185,6 +186,31 @@ async def _ensure_positional_eod_snapshots(db: AsyncIOMotorDatabase) -> None:  #
     )
 
 
+async def _ensure_broker_snapshots(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Immutable daily archive of Dhan-reported account records.
+
+    One regular document per (account_id, snapshot_date, report_type) where
+    report_type ∈ {holdings, positions, funds, orders, trades, ledger}. Regular (not
+    time-series) so it supports idempotent upsert by the unique key.
+    """
+    try:
+        await db.create_collection("broker_snapshots")
+        log.info("mongo_collection_created", collection="broker_snapshots")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="broker_snapshots")
+
+    col = db["broker_snapshots"]
+    await col.create_index(
+        [("account_id", ASCENDING), ("snapshot_date", ASCENDING), ("report_type", ASCENDING)],
+        unique=True,
+        name="uq_account_date_report",
+    )
+    await col.create_index(
+        [("account_id", ASCENDING), ("report_type", ASCENDING), ("snapshot_date", DESCENDING)],
+        name="idx_account_report_date",
+    )
+
+
 async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # type: ignore[type-arg]
     """Realtime monitoring events emitted by the event-publisher (TTL-expired)."""
     try:
@@ -267,6 +293,10 @@ async def _ensure_backtest_trades(db: AsyncIOMotorDatabase) -> None:  # type: ig
 
 def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["events"]
+
+
+def get_broker_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["broker_snapshots"]
 
 
 def get_bars_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]

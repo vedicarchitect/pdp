@@ -41,6 +41,12 @@ class Settings(BaseSettings):
 
     DHAN_CLIENT_ID: str = ""
     DHAN_ACCESS_TOKEN: str = ""
+
+    # Broker account sync (chunk 2: broker-account-sync)
+    BROKER_SYNC_ENABLED: bool = False
+    BROKER_SYNC_EOD_TIME: str = "15:45"  # IST HH:MM — daily archival fires after close
+    BROKER_ACCOUNT_LABEL: str = "primary"
+
     DHAN_SCRIPMASTER_URL: str = (
         "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
     )

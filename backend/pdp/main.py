@@ -351,10 +351,34 @@ async def lifespan(app: FastAPI):
     else:
         app.state.event_service = None
 
+    # Broker account sync (chunk 2) — daily archival of Dhan-reported account state.
+    broker_sync_scheduler = None
+    if settings.BROKER_SYNC_ENABLED:
+        from pdp.broker_sync.client import BrokerAccountClient
+        from pdp.broker_sync.scheduler import BrokerSyncScheduler
+        from pdp.broker_sync.service import BrokerSyncService
+
+        broker_sync_service = BrokerSyncService(
+            session_maker=get_session_maker(),
+            snapshots_col=mongo_db["broker_snapshots"],
+            client=BrokerAccountClient(settings),
+        )
+        app.state.broker_sync_service = broker_sync_service
+        broker_sync_scheduler = BrokerSyncScheduler(
+            broker_sync_service, eod_time=settings.BROKER_SYNC_EOD_TIME
+        )
+        await broker_sync_scheduler.start()
+        log.info("broker_sync_enabled", eod_time=settings.BROKER_SYNC_EOD_TIME)
+    else:
+        app.state.broker_sync_service = None
+        log.info("broker_sync_disabled")
+
     try:
         yield
     finally:
         log.info("app_shutting_down")
+        if broker_sync_scheduler is not None:
+            await broker_sync_scheduler.stop()
         if event_service is not None:
             await event_service.stop()
         await journal_service.stop()
@@ -408,6 +432,7 @@ def create_app() -> FastAPI:
     from pdp.jobs.ws import router as jobs_ws_router
     from pdp.ml.routes import router as ml_router
     from pdp.housekeeping.routes import router as housekeeping_router
+    from pdp.broker_sync.routes import router as broker_sync_router
 
     app.include_router(alerts_router)
     app.include_router(alerts_ws_router)
@@ -433,6 +458,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_ws_router, prefix="/ws/jobs", tags=["Jobs WS"])
     app.include_router(ml_router, prefix="/api/v1/ml", tags=["ML"])
     app.include_router(housekeeping_router, prefix="/api/v1/housekeeping", tags=["Housekeeping"])
+    app.include_router(broker_sync_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

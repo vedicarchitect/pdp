@@ -14,6 +14,7 @@ from pdp.instruments import models as _instrument_models  # noqa: F401
 from pdp.market import subscription_model as _subscription_model  # noqa: F401
 from pdp.orders import models as _orders_models  # noqa: F401
 from pdp.jobs import models as _jobs_models  # noqa: F401
+from pdp.broker_sync import models as _broker_sync_models  # noqa: F401
 
 config = context.config
 if config.config_file_name:

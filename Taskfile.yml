@@ -238,6 +238,20 @@ tasks:
     cmds:
       - uv run python scripts/ml_train.py {{.CLI_ARGS}}
 
+  # ── Broker account sync (chunk 2) ────────────────────────────────────────────
+
+  broker:sync:
+    desc: "Snapshot the Dhan account (holdings/positions/funds/orders/trades/ledger) → Mongo + PG. Args: -- [--date YYYY-MM-DD]"
+    dir: backend
+    cmds:
+      - uv run python scripts/broker_sync.py {{.CLI_ARGS}}
+
+  broker:backfill:
+    desc: "One-time historical pull of trade history + ledger → Mongo. Args: -- --from YYYY-MM-DD [--to YYYY-MM-DD]"
+    dir: backend
+    cmds:
+      - uv run python scripts/broker_sync.py {{.CLI_ARGS}}
+
   # ── OpenSpec ─────────────────────────────────────────────────────────────────
 
   openspec:list:
