@@ -36,7 +36,7 @@ STEP = 50  # NIFTY strike grid
 IST = timedelta(hours=5, minutes=30)
 
 
-def _check(col, cutoff_date: date | None = None) -> list[str]:
+def _check(col) -> list[str]:
     failures: list[str] = []
     total = col.count_documents({})
     log.info("counts", total=total)
@@ -131,42 +131,11 @@ def _check(col, cutoff_date: date | None = None) -> list[str]:
     if n_thin:
         failures.append(f"abi series with fewer than 3 distinct trade-days: {n_thin}")
 
-    # 7. Live↔backfill overlap reconciliation: after the Abi cutoff only dhan_api bars expected.
-    if cutoff_date is not None:
-        cutoff_utc = (datetime(cutoff_date.year, cutoff_date.month, cutoff_date.day) - IST).replace(tzinfo=UTC)
-        abi_post = col.count_documents({"source": "abi", "ts": {"$gte": cutoff_utc}})
-        dhan_pre = col.count_documents({"source": "dhan_api", "ts": {"$lt": cutoff_utc}})
-        log.info("gate_overlap_reconciliation",
-                 abi_post_cutoff=abi_post, dhan_api_pre_cutoff=dhan_pre, cutoff=str(cutoff_date))
-        if abi_post:
-            failures.append(f"abi bars found after cutoff {cutoff_date}: {abi_post}")
-
     return failures
-
-
-def _reconcile(col, duck_path: str, date_from: date, date_to: date, band: int) -> list[str]:
-    import duckdb
-    labels = ["ATM"] + [f"ATM{sign}{i}" for i in range(1, band + 1) for sign in ("+", "-")]
-    con = duckdb.connect(duck_path, read_only=True)
-    duck_n = con.execute(
-        "SELECT COUNT(*) FROM expired_options_ohlcv WHERE underlying_scrip='NIFTY' "
-        "AND expiry_flag='WEEK' AND expiry_code IN (1,2) AND close IS NOT NULL "
-        f"AND strike_label IN ({','.join('?' * len(labels))}) "
-        "AND timestamp >= ? AND timestamp < ?",
-        [*labels, datetime(date_from.year, date_from.month, date_from.day),
-         datetime(date_to.year, date_to.month, date_to.day)],
-    ).fetchone()[0]
-    con.close()
-    lo = (datetime(date_from.year, date_from.month, date_from.day) - IST).replace(tzinfo=UTC)
-    hi = (datetime(date_to.year, date_to.month, date_to.day) - IST).replace(tzinfo=UTC)
-    mongo_n = col.count_documents({"source": "abi", "ts": {"$gte": lo, "$lt": hi}})
-    log.info("gate_reconcile", duck_rows=duck_n, mongo_rows=mongo_n)
-    return [] if duck_n == mongo_n else [f"Abi↔Mongo count mismatch: duck={duck_n} mongo={mongo_n}"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Validate the option_bars warehouse.")
-    ap.add_argument("--duck", action="store_true", help="Also reconcile counts against the abi DuckDB.")
     ap.add_argument("--from", dest="date_from", default=None)
     ap.add_argument("--to", dest="date_to", default=None)
     a = ap.parse_args()
@@ -175,12 +144,7 @@ def main() -> int:
     from pymongo import MongoClient
     col = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]["option_bars"]
 
-    cutoff = date.fromisoformat(s.ABI_CUTOFF_DATE)
-    failures = _check(col, cutoff_date=cutoff)
-    if a.duck and a.date_from and a.date_to:
-        failures += _reconcile(col, s.ABI_NIFTY_DUCKDB,
-                               date.fromisoformat(a.date_from), date.fromisoformat(a.date_to),
-                               s.WAREHOUSE_STRIKE_BAND)
+    failures = _check(col, cutoff_date=None)
 
     if failures:
         for f in failures:

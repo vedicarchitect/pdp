@@ -3,9 +3,9 @@
 ## Purpose
 
 Provides authoritative NIFTY expiry-date resolution for backtesting and live trading. Resolves
-`(trade_date, expiry_flag, expiry_code) → real expiry_date` using a pre-built JSON cache derived
-from OI-reset detection over historical DuckDB data. Encodes historical weekday regime changes and
-exchange-holiday shifts sourced from real expiry data rather than fixed weekday arithmetic.
+`(trade_date, expiry_flag, expiry_code) → real expiry_date` using a pre-built JSON cache. Encodes
+historical weekday regime changes and exchange-holiday shifts sourced from real expiry data rather
+than fixed weekday arithmetic.
 
 ---
 
@@ -43,14 +43,14 @@ shifts, sourced from real expiry data rather than fixed weekday arithmetic.
 
 ---
 
-### Requirement: Expiry calendar build and cache
+### Requirement: Expiry calendar cache
 
-The system SHALL build the expiry calendar by OI-reset detection over the read-only abi-project
-DuckDB and persist it to a JSON cache. Runtime resolution SHALL read the cache and MUST NOT require
-a DuckDB connection. The build MUST NOT mutate the source database.
+The system SHALL read the expiry calendar from a pre-built JSON cache (`{flag: ["YYYY-MM-DD", ...]}`
+format). Runtime resolution MUST NOT require any external database connection. The cache is built
+once and updated as new expiries are observed.
 
-#### Scenario: Build writes a cache consumers can load
+#### Scenario: Cache loads and resolves
 
-- **WHEN** the calendar build runs against the source DuckDB
-- **THEN** weekly and monthly expiry dates are detected via OI-reset and written to the JSON cache
-- **AND** `NiftyExpiryCalendar.load(cache)` resolves expiries without opening DuckDB
+- **WHEN** `NiftyExpiryCalendar.load(cache_path)` is called
+- **THEN** weekly and monthly expiry dates are available for resolution
+- **AND** `resolve_expiry` operates entirely from in-memory data with no I/O

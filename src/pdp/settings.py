@@ -73,11 +73,11 @@ class Settings(BaseSettings):
     SUPERTREND_PERIOD: int = 10
     SUPERTREND_MULTIPLIER: float = 2.0
 
-    # Options warehouse + historical migration (NIFTY options data pipeline).
-    # External, read-only "abi project" DuckDB source (PDP and Abi are siblings).
-    ABI_NIFTY_DUCKDB: str = "../Abi/data/historicaldata/nifty.db"
-    # Cached real expiry-date calendar (built via OI-reset detection from the source).
+    # Options warehouse (NIFTY options data pipeline).
+    # Cached real expiry-date calendar (built via OI-reset detection from historical data).
     EXPIRY_CACHE_PATH: str = "data/expiry/nifty_expiries.json"
+    BANKNIFTY_EXPIRY_CACHE_PATH: str = "data/expiry/banknifty_expiries.json"
+    SENSEX_EXPIRY_CACHE_PATH: str = "data/expiry/sensex_expiries.json"
     # Standalone warehouser band: current+next weekly (+optional monthly), ATM±N strikes.
     WAREHOUSE_STRIKE_BAND: int = 10
     WAREHOUSE_STRIKE_STEP: int = 50
@@ -91,9 +91,6 @@ class Settings(BaseSettings):
     # NSE holiday calendar (JSON {"dates": ["YYYY-MM-DD", ...]}) for trading-day enumeration.
     # Multi-year (2023-2026) so historical gap scans don't treat past holidays as missing days.
     NSE_HOLIDAYS_JSON: str = "data/calendars/nse_holidays_2021_2026.json"
-    # Abi DuckDB data cutoff: gap-fill starts from this date by default.
-    ABI_CUTOFF_DATE: str = "2026-05-23"
-
     # Default config YAML loaded by `task backtest` when no --config-file / --config flag is given.
     BACKTEST_DEFAULT_CONFIG: str = "backtest/configs/st10_15m_otm1.yaml"
 

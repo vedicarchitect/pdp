@@ -33,7 +33,7 @@
 | `signals/` | Pure bias-scoring engine (`bias.py`) — multi-TF weighted votes → 7 buckets → PE:CE ratio + VIX gate; shared by backtest + live |
 | `strategies/` | Concrete strategy implementations (Python) |
 | `strategy/` | StrategyHost, BaseStrategy ABC, StrategyContext |
-| `warehouse/` | Abi DuckDB → MongoDB migration pipeline |
+| `warehouse/` | Options warehouse — self-healing gap-backfill loop from Dhan API |
 
 ## Key conventions
 

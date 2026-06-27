@@ -165,6 +165,8 @@ def main() -> int:
                     help="Multiply all ratio_table lots by this factor (1=base, 2=double, 3=triple)")
     ap.add_argument("--mongo", action="store_true", default=False,
                     help="Also write run artifacts to the MongoDB backtest warehouse (requires --out-dir)")
+    ap.add_argument("--no-vix-gate", dest="no_vix_gate", action="store_true", default=False,
+                    help="Disable India VIX entry gate entirely (treat every bar as VIX-safe)")
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
@@ -191,8 +193,9 @@ def main() -> int:
     tp = "OFF" if cfg.take_profit_pct >= 999 else f"{cfg.take_profit_pct*100:.0f}%"
     tp = f"{tp}·extreme-only" if cfg.take_profit_extreme_only else tp
     neutral = "3:3" if not cfg.neutral_no_trade else "skip"
-    log.info("hedges: %s  dte_max: %s  day_loss_limit: %s  take_profit: %s  neutral: %s  scale_lots: %s",
+    log.info("hedges: %s  vix_gate: %s  dte_max: %s  day_loss_limit: %s  take_profit: %s  neutral: %s  scale_lots: %s",
              "ON" if cfg.hedge_enabled else "OFF",
+             "OFF" if args.no_vix_gate else "ON",
              cfg.dte_max if cfg.dte_max is not None else "ALL", dll, tp, neutral, cfg.scale_lots)
 
     s = get_settings()
@@ -235,7 +238,7 @@ def main() -> int:
     vix_days_seen = 0
     for ci, chunk in enumerate(chunks, 1):
         window = load_window(mdb, cal, chunk)
-        vix_by_day = load_vix_window(mdb, args.vix_sid, chunk)
+        vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
         pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk)
         skipped += len(window.skipped)

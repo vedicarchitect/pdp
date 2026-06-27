@@ -1,6 +1,6 @@
 """Unit tests for the NIFTY expiry calendar (resolve_expiry arithmetic).
 
-These use a synthetic expiry list so they run without the external abi-project DuckDB.
+Uses a synthetic in-memory expiry list — no external data needed.
 The list deliberately mixes weekdays (Thu/Wed/Tue) to prove the resolver is weekday-agnostic
 and honours holiday-shifted expiries.
 """

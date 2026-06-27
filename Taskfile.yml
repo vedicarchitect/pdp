@@ -116,9 +116,19 @@ tasks:
       - uv run python scripts/backfill_spot.py --symbol SENSEX {{.CLI_ARGS}}
 
   backfill:options:
-    desc: "Gap-fill option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    desc: "Gap-fill NIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
     cmds:
-      - uv run python scripts/backfill_options_gap.py {{.CLI_ARGS}}
+      - uv run python scripts/backfill_options_gap.py --symbol NIFTY {{.CLI_ARGS}}
+
+  backfill:options:banknifty:
+    desc: "Gap-fill BANKNIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    cmds:
+      - uv run python scripts/backfill_options_gap.py --symbol BANKNIFTY {{.CLI_ARGS}}
+
+  backfill:options:sensex:
+    desc: "Gap-fill SENSEX option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
+    cmds:
+      - uv run python scripts/backfill_options_gap.py --symbol SENSEX {{.CLI_ARGS}}
 
   backfill:expired:
     desc: "Backfill expired-contract option bars. Args: -- --help for options"
@@ -130,10 +140,6 @@ tasks:
     cmds:
       - uv run python scripts/backfill_vix.py {{.CLI_ARGS}}
 
-  migrate:abi:
-    desc: "Migrate NIFTY options Abi DuckDB → MongoDB option_bars. Args: -- --from YYYY-MM-DD --to YYYY-MM-DD"
-    cmds:
-      - uv run python -m pdp.warehouse {{.CLI_ARGS}}
 
   # ── Data validation & audit ──────────────────────────────────────────────────
 
@@ -152,11 +158,6 @@ tasks:
     cmds:
       - uv run python scripts/validate_options_warehouse.py {{.CLI_ARGS}}
 
-  validate:migration:
-    desc: Verify Abi → MongoDB migration completeness
-    cmds:
-      - uv run python scripts/verify_nifty_migration.py {{.CLI_ARGS}}
-
   # ── Backtest utilities ───────────────────────────────────────────────────────
 
   backtest:compare:
@@ -173,6 +174,11 @@ tasks:
     desc: "Directional-strangle walk-forward (IS/OOS) optimizer — go/no-go gate. Args: -- --from --to [--is-months 12] [--oos-months 3] [--step-months 3] [--objective sharpe] [--out logs/wf.csv]"
     cmds:
       - uv run python backtest/strangle_walkforward.py {{.CLI_ARGS}}
+
+  backtest:ingest:
+    desc: "Ingest a backtest run folder (or WF CSV) into the MongoDB warehouse. Args: -- --run-dir backtest/runs/<id> [--wf-csv path.csv] [--kind single|walkforward]"
+    cmds:
+      - uv run python scripts/ingest_backtest_run.py {{.CLI_ARGS}}
 
   backtest:sweep:
     desc: "Multi-config parameter sweep — pass grid flags after --. Args: -- [--days N] [--st 10,2;3,1] [--tf 5,15,30] [--moneyness -1,0,1] [--no-commission] [--no-heal]"

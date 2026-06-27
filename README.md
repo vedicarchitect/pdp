@@ -62,7 +62,6 @@ task backfill:banknifty  Backfill BANKNIFTY 1m spot → market_bars
 task backfill:sensex     Backfill SENSEX 1m spot → market_bars
 task backfill:options    Gap-fill option_bars from Dhan
 task backfill:expired    Backfill expired-contract option bars
-task migrate:abi         Abi DuckDB → MongoDB option_bars
 
 task audit:coverage      Audit option_bars coverage by date+strike
 task validate:warehouse  Validate warehouse integrity
@@ -106,7 +105,7 @@ PDP/
 │   ├── indicators/             # IndicatorEngine · SuperTrend · warmup
 │   ├── backtest/               # BacktestEngine · sim · commissions · output
 │   ├── options/                # OptionsChainPoller · Greeks · gap_backfill
-│   ├── warehouse/              # Abi DuckDB → MongoDB pipeline
+│   ├── warehouse/              # Options warehouse — Dhan gap-backfill loop
 │   ├── portfolio/              # PortfolioService · MTM P&L · kill-switch
 │   ├── journal/                # JournalService · fill recording · daily stats
 │   ├── risk/                   # KillSwitchService · hard-cap auto-kill
@@ -123,7 +122,6 @@ PDP/
 │   ├── backfill_options_gap.py
 │   ├── backtest_compare.py
 │   ├── backtest_sweep.py
-│   ├── migrate_abi_options.py
 │   ├── audit_options_coverage.py
 │   ├── validate_options_warehouse.py
 │   ├── monitor.pl
@@ -224,7 +222,7 @@ Risk guards active in all modes:
 | Portfolio MTM | ✅ Live | Real-time P&L + kill-switch |
 | Paper journal | ✅ Live | Fill recording + daily stats |
 | Backtest engine | ✅ Live | Multi-day, commissions |
-| Options warehouse | ✅ Live | Abi DuckDB → MongoDB |
+| Options warehouse | ✅ Live | MongoDB + Dhan gap-backfill |
 | Options gap backfill | ✅ Live | Self-healing loop + script |
 | Options chain poller | ✅ Live | Live-only, Greeks |
 | Alerts engine | ✅ Live | Price/Greeks alerts + WS |

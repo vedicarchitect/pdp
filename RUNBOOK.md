@@ -386,7 +386,7 @@ uv run python scripts/backfill_spot.py --from 2026-02-09 --to 2026-06-12 --only-
 # Dry-run
 uv run python scripts/backfill_options_gap.py --dry-run
 
-# Default window (ABI_CUTOFF_DATE → today)
+# Default window (from earliest available data → today)
 uv run python scripts/backfill_options_gap.py
 
 # Custom window
@@ -406,7 +406,7 @@ uv run python scripts/backfill_options_gap.py --codes 1,2
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--from YYYY-MM-DD` | `ABI_CUTOFF_DATE` from settings | Start date |
+| `--from YYYY-MM-DD` | earliest available data | Start date |
 | `--to YYYY-MM-DD` | today | End date |
 | `--codes 1,2` | `1,2` | Expiry codes (1=nearest weekly, 2=next) |
 | `--band N` | `WAREHOUSE_STRIKE_BAND` (10) | ATM ± N strikes |
@@ -428,30 +428,20 @@ uv run python scripts/audit_options_coverage.py
 # Validate warehouse integrity
 uv run python scripts/validate_options_warehouse.py
 
-# Verify NIFTY migration completeness
-uv run python scripts/verify_nifty_migration.py
 ```
 
 ---
 
-## 10. Data Migration (Abi → MongoDB)
+## 10. Options Warehouse Gap Backfill
 
-Migrates historical NIFTY options OHLCV from the sibling Abi DuckDB project into MongoDB `option_bars`.
+The warehouse runs **self-healing gap backfill** automatically while the API is running (`WAREHOUSE_GAP_BACKFILL_ENABLED=True`), scanning every `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS=4.0` hours.
 
-**Prerequisite:** Abi project checked out at `../Abi/` (sibling directory). Path configured via `ABI_NIFTY_DUCKDB` in `.env`.
+To manually trigger a gap fill for a specific range:
 
 ```powershell
-# Full historical migration
-uv run python -m pdp.warehouse --from 2024-01-01 --to 2026-05-23
-
-# Specific date range
-uv run python -m pdp.warehouse --from 2025-01-01 --to 2025-12-31
-
-# Dry-run (check Abi DB access)
-uv run python -m pdp.warehouse --dry-run
+# Gap-fill options from Dhan API
+task backfill:options -- --from 2026-06-01 --to 2026-06-25 --only-missing
 ```
-
-The warehouse also runs **self-healing gap backfill** automatically while the API is running (`WAREHOUSE_GAP_BACKFILL_ENABLED=True`), scanning every `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS=4.0` hours.
 
 ---
 

@@ -16,8 +16,6 @@ All scripts are run from the **repo root** with `uv run python scripts/<name>.py
 | `backfill_spot.py` | Backfill index 1m spot bars (`market_bars`) from Dhan for a date range. `--symbol NIFTY\|BANKNIFTY\|SENSEX`, `--from`, `--to`, `--only-missing` |
 | `backfill_options_gap.py` | Backfill missing `option_bars` dates from Dhan for a date range. |
 | `backfill_expired_options.py` | Backfill expired-contract option bars (historical). |
-| `migrate_abi_options.py` | One-time: migrate NIFTY options OHLCV from Abi DuckDB → MongoDB `option_bars`. |
-| `migrate_spot_bars.py` | One-time: migrate NIFTY spot bars into MongoDB `market_bars`. |
 
 ## Validation & Audit
 
@@ -25,7 +23,6 @@ All scripts are run from the **repo root** with `uv run python scripts/<name>.py
 |--------|---------|
 | `audit_options_coverage.py` | Audit coverage of `option_bars` by date+strike — identifies gaps. |
 | `validate_options_warehouse.py` | Validate warehouse integrity: checks for missing days, bad prices, OI anomalies. |
-| `verify_nifty_migration.py` | Verify that the Abi→MongoDB migration is complete and consistent. |
 
 ## Operations
 
