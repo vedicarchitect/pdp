@@ -393,7 +393,7 @@ class DirectionalStrangle(Strategy):
 
             # Rollup: close and reopen when premium decays below roll_trigger_prem
             if ltp < self._roll_trigger_prem and leg.security_id not in self._rolling:
-                await self._roll_leg(leg)
+                await self._roll_leg(leg, old_ltp=ltp)
                 return
 
             if ltp <= entry * self._take_profit_pct:
@@ -494,7 +494,7 @@ class DirectionalStrangle(Strategy):
                     2,
                 )
             legs.append({
-                "sid": lg.security_id,
+                "security_id": lg.security_id,
                 "opt_type": lg.opt_type,
                 "strike": lg.strike,
                 "lots": lg.lots,
@@ -781,7 +781,7 @@ class DirectionalStrangle(Strategy):
     # Rollup                                                               #
     # ------------------------------------------------------------------ #
 
-    async def _roll_leg(self, leg: OpenLeg) -> None:
+    async def _roll_leg(self, leg: OpenLeg, old_ltp: float) -> None:
         """Close a decayed short (LTP < roll_trigger_prem) and reopen at same OTM level."""
         sid = leg.security_id
         self._rolling.add(sid)
@@ -796,7 +796,7 @@ class DirectionalStrangle(Strategy):
             if spot is None or self.ctx.session_maker is None:
                 self._emit_event(StrangleEventType.ROLLED,
                     opt_type=old_opt_type, old_strike=old_strike,
-                    lots=old_lots, result="skipped_no_spot")
+                    old_ltp=round(old_ltp, 2), lots=old_lots, result="skipped_no_spot")
                 return
 
             # Check if the new OTM strike has sufficient premium before opening
@@ -809,27 +809,29 @@ class DirectionalStrangle(Strategy):
             if new_inst is None:
                 self._emit_event(StrangleEventType.ROLLED,
                     opt_type=old_opt_type, old_strike=old_strike,
-                    lots=old_lots, result="no_instrument")
+                    old_ltp=round(old_ltp, 2), lots=old_lots, result="no_instrument")
                 return
 
             ltp, _ = (
                 await self.ctx.market.ltp_with_age(new_inst.security_id)
                 if self.ctx.market else (None, None)
             )
-            premium = float(ltp) if ltp and ltp > 0 else 0.0
+            new_ltp = float(ltp) if ltp and ltp > 0 else 0.0
             new_strike = float(new_inst.strike or 0)
 
-            if premium < self._roll_target_min_prem:
+            if new_ltp < self._roll_target_min_prem:
                 self._emit_event(StrangleEventType.ROLLED,
-                    opt_type=old_opt_type, old_strike=old_strike, new_strike=new_strike,
-                    lots=old_lots, new_prem=round(premium, 2), result="skipped_low_prem")
+                    opt_type=old_opt_type, old_strike=old_strike, old_ltp=round(old_ltp, 2),
+                    new_strike=new_strike, new_ltp=round(new_ltp, 2),
+                    lots=old_lots, result="skipped_low_prem")
                 return
 
             # Open the new short (stop-gate check is inside _open_short)
             await self._open_short(spot, old_opt_type, old_lots)
             self._emit_event(StrangleEventType.ROLLED,
-                opt_type=old_opt_type, old_strike=old_strike, new_strike=new_strike,
-                lots=old_lots, new_prem=round(premium, 2), result="ok")
+                opt_type=old_opt_type, old_strike=old_strike, old_ltp=round(old_ltp, 2),
+                new_strike=new_strike, new_ltp=round(new_ltp, 2),
+                lots=old_lots, result="ok")
         finally:
             self._rolling.discard(sid)
 

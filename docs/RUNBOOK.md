@@ -1474,7 +1474,7 @@ daily log file (`backend/logs/directional_strangle/<YYYY-MM-DD>.log`).
 | `stop_half` | 30% premium rise — partial close | `sid`, `ltp`, `remaining`, `opt_type`, `strike` |
 | `stop_all` | 40% premium rise — full close | `sid`, `ltp`, `entry`, `opt_type`, `strike` |
 | `day_loss_cap` | Day P&L ≤ −Rs 15,000 | `day_pnl` |
-| `rolled` | Premium decayed < Rs 20; reopen | `opt_type`, `old_strike`, `new_strike`, `lots`, `new_prem`, `result` |
+| `rolled` | Premium decayed < Rs 20; reopen | `opt_type`, `old_strike`, `old_ltp`, `new_strike`, `new_ltp`, `lots`, `result` |
 | `stop_gate_wait` | Re-entry blocked after stop | `opt_type`, `exit_px`, `ltp`, `n_below` |
 | `bucket_change` | Bias bucket shifted | `old_bucket`, `new_bucket` |
 | `square_off` | 15:10 IST hard flatten | `reason` |
@@ -1504,7 +1504,7 @@ timeline, per-signal vote analysis, trades table, and improvement suggestions.
 
 ---
 
-## 18. Unified Log Pipeline (OpenSearch)
+## 21. Unified Log Pipeline (OpenSearch)
 
 Every log in the system — API request logs, strategy events, journal flushes, backtest
 results, and Flutter UI logs — auto-ships to OpenSearch in realtime through one pipeline.
