@@ -264,12 +264,18 @@ async def test_stop_gate_blocks_and_clears():
     # No orders should have been placed (gate blocked)
     assert not s.ctx.orders.calls
 
-    # Simulate 3 bars with ltp < exit_px → gate should clear
+    # Simulate 3 bars with ltp < exit_px → gate becomes "ready" (not yet cleared)
     for i in range(3):
         s._ltp_cache["777"] = 30.0
         s._update_stop_gates()
 
-    assert "PE" not in s._stop_gate, "Gate must be cleared after 3 bars below exit_px"
+    assert "PE" in s._stop_gate and s._stop_gate["PE"].get("ready"), \
+        "Gate must be marked ready after 3 bars below exit_px (cleared on next bar)"
+
+    # 4th bar start: gate clears; re-entry is permitted from this bar onward
+    s._ltp_cache["777"] = 30.0
+    s._update_stop_gates()
+    assert "PE" not in s._stop_gate, "Gate must be cleared at start of bar 4 (next bar after cooldown)"
 
     # Confirm stop_gate_wait events were emitted during the wait
     wait_events = [e for e in s._activity if e.get("event_type") == StrangleEventType.STOP_GATE_WAIT]

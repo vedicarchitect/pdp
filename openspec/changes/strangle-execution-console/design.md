@@ -66,6 +66,12 @@ Alternative considered: msgspec struct per event type. Rejected — structlog di
 to evolve and the daily log file is the durable record; strict typing belongs in chunk 5's
 analysis schema.
 
+**Implementation note:** `emit_strangle_event` became `_emit_event(self, …)` — a private
+method on `DirectionalStrangle` rather than a standalone function in `log.py`. This was
+necessary because the helper needs instance state (`self._activity`, `self._slog`). Only
+`StrangleEventType` and `StrangleActivityEvent` live in `log.py` / `schemas.py`.
+`StrangleActivityEvent(msgspec.Struct)` provides a typed shape for the activity API response.
+
 ### D3 — In-memory execution state + activity ring buffer
 `DirectionalStrangle` gains:
 - `_activity: collections.deque[dict]` (maxlen=200) — every `emit_strangle_event` call appends.

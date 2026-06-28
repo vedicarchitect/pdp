@@ -34,6 +34,18 @@ class StrangleState(msgspec.Struct):
     started_at: str | None
 
 
+class StrangleActivityEvent(msgspec.Struct, omit_defaults=True):
+    event_type: str
+    strategy_id: str
+    account_id: str
+    ist_time: str
+    snapshot_date: str | None = None
+    underlying: str | None = None
+    spot: float | None = None
+    score: float | None = None
+    bucket: str | None = None
+
+
 class WatchlistEntryOut(msgspec.Struct):
     security_id: str
     exchange_segment: str

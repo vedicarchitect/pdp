@@ -39,6 +39,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from pdp.settings import get_settings
 from pdp.signals.bias import (
     BiasBucket,
     BiasInputs,
@@ -222,6 +223,9 @@ class DirectionalStrangle(Strategy):
 
         # Session start timestamp
         self._started_at: datetime = datetime.now(tz=_IST)
+
+        # Account identifier for canonical log events (paper fallback when env not set)
+        self._account_id: str = get_settings().DHAN_CLIENT_ID or "paper"
 
         if ctx.market is not None:
             await ctx.market.subscribe(self.sid, self.index_segment)
@@ -462,9 +466,11 @@ class DirectionalStrangle(Strategy):
         record: dict[str, Any] = {
             "event_type": event_type,
             "strategy_id": self.strategy_id,
+            "account_id": self._account_id,
             "snapshot_date": self._day_key.isoformat() if self._day_key else None,
             "ist_time": ist_now,
             "underlying": self.underlying,
+            "spot": self._last_spot,
             "score": round(self._last_score, 3),
             "bucket": self._current_bucket,
             **fields,
@@ -504,8 +510,18 @@ class DirectionalStrangle(Strategy):
     # ------------------------------------------------------------------ #
 
     def _update_stop_gates(self) -> None:
-        """Called on each 5m bar: update cooldown counters; clear gates when safe to re-enter."""
-        to_clear: list[str] = []
+        """Called on each 5m bar: update cooldown counters; clear gates when safe to re-enter.
+
+        Gates marked ready=True on bar N are removed at the START of bar N+1 so re-entry
+        only becomes possible on the bar after the 3-bar cooldown completes (spec §3 scenario).
+        """
+        # Phase 1: clear gates that completed their cooldown on the previous bar
+        to_clear = [ot for ot, g in self._stop_gate.items() if g.get("ready")]
+        for opt_type in to_clear:
+            del self._stop_gate[opt_type]
+            self.ctx.log.info("stop_gate_cleared", opt_type=opt_type)
+
+        # Phase 2: update remaining gates
         for opt_type, gate in self._stop_gate.items():
             ltp = self._ltp_cache.get(gate["sid"])
             if ltp is None:
@@ -515,16 +531,13 @@ class DirectionalStrangle(Strategy):
             if ltp < gate["exit_px"]:
                 gate["n_below"] += 1
                 if gate["n_below"] >= 3:
-                    to_clear.append(opt_type)
+                    gate["ready"] = True  # will be cleared at start of NEXT bar
                     continue
             else:
                 gate["n_below"] = 0
             self._emit_event(StrangleEventType.STOP_GATE_WAIT,
                 opt_type=opt_type, exit_px=gate["exit_px"], ltp=ltp,
                 n_below=gate["n_below"])
-        for opt_type in to_clear:
-            del self._stop_gate[opt_type]
-            self.ctx.log.info("stop_gate_cleared", opt_type=opt_type)
 
     # ------------------------------------------------------------------ #
     # Bias input assembly                                                  #
