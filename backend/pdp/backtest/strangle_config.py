@@ -20,25 +20,56 @@ import yaml
 
 from pdp.signals.bias import DEFAULT_RATIO_TABLE, BiasBucket, BiasWeights
 
-# NSE NIFTY 50 lot-size history — effective dates and lot sizes.
-# Source: NSE F&O circulars / SEBI mandate changes.
-# Each entry: (effective_from, lot_size). Last entry covers "now".
-_NIFTY_LOT_HISTORY: list[tuple[date, int]] = [
-    (date(2000, 1, 1),  75),   # pre-Jul 2021 baseline
-    (date(2021, 7, 1),  50),   # reduced: NIFTY crossed 15k–16k
-    (date(2024, 4, 1),  25),   # halved: NIFTY near 22k+
-    (date(2025, 1, 1),  75),   # SEBI min contract value → ₹15L
-    (date(2026, 1, 1),  65),   # periodic review realignment
-]
+# Lot-size history per underlying — (effective_from, lot_size). Last entry covers "now".
+_LOT_HISTORY: dict[str, list[tuple[date, int]]] = {
+    "NIFTY": [
+        (date(2000, 1, 1),  75),   # pre-Jul 2021 baseline
+        (date(2021, 7, 1),  50),   # reduced: NIFTY crossed 15k–16k
+        (date(2024, 4, 1),  25),   # halved: NIFTY near 22k+
+        (date(2025, 1, 1),  75),   # SEBI min contract value → ₹15L
+        (date(2026, 1, 1),  65),   # periodic review realignment
+    ],
+    "BANKNIFTY": [
+        (date(2000, 1, 1),  25),   # pre-Nov 2019 baseline
+        (date(2019, 11, 1), 20),   # increased margin: BN near 32k
+        (date(2021, 7, 1),  25),   # reverted after SEBI review
+        (date(2024, 4, 1),  15),   # halved: BN near 48k+
+        (date(2025, 1, 1),  30),   # SEBI min contract value → ₹15L
+    ],
+    "SENSEX": [
+        (date(2000, 1, 1),  10),   # BSE SENSEX options lot size (stable)
+        (date(2025, 1, 1),  20),   # SEBI min contract value → ₹15L
+    ],
+}
+
+# Security IDs on Dhan IDX_I segment.
+SECURITY_IDS: dict[str, str] = {
+    "NIFTY": "13",
+    "BANKNIFTY": "25",
+    "SENSEX": "51",
+}
+
+# Weekly expiry weekday per underlying (Python weekday: Mon=0 … Fri=4).
+EXPIRY_WEEKDAY: dict[str, int] = {
+    "NIFTY": 1,      # Tuesday
+    "BANKNIFTY": 3,  # Thursday
+    "SENSEX": 4,     # Friday
+}
 
 
-def nifty_lot_size(trade_date: date) -> int:
-    """Return the NSE-mandated NIFTY 50 lot size that was in effect on *trade_date*."""
-    lot = _NIFTY_LOT_HISTORY[0][1]
-    for eff_date, size in _NIFTY_LOT_HISTORY:
+def lot_size_for_date(underlying: str, trade_date: date) -> int:
+    """Return the exchange-mandated lot size for *underlying* on *trade_date*."""
+    history = _LOT_HISTORY.get(underlying, _LOT_HISTORY["NIFTY"])
+    lot = history[0][1]
+    for eff_date, size in history:
         if trade_date >= eff_date:
             lot = size
     return lot
+
+
+def nifty_lot_size(trade_date: date) -> int:
+    """Kept for backward-compat; prefer lot_size_for_date('NIFTY', date)."""
+    return lot_size_for_date("NIFTY", trade_date)
 
 STRIKE_PREMIUM = "premium"  # nearest strike with premium > premium_floor
 STRIKE_DELTA = "delta"      # strike nearest target_delta (IV solved from premium)
@@ -55,6 +86,10 @@ def _parse_hhmm(value: str | time) -> time:
 @dataclass
 class StrangleConfig:
     """All knobs for one directional-strangle variant."""
+
+    # Underlying index and its Dhan spot security ID.
+    underlying: str = "NIFTY"
+    security_id: str = "13"
 
     # Signal/decision timeframe (minutes)
     timeframe_min: int = 5

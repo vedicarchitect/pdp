@@ -27,7 +27,11 @@ from pdp.settings import get_settings
 
 load_dotenv()
 
-NIFTY_SID = "13"
+SYMBOL_SIDS: dict[str, str] = {
+    "NIFTY": "13",
+    "BANKNIFTY": "25",
+    "SENSEX": "51",
+}
 SPOT_THRESHOLD = 350   # >= this many 1m spot bars => "adequate" day (full session ~375)
 VIX_THRESHOLD = 300
 
@@ -45,11 +49,11 @@ def _spot_count(col: Any, sid: str, day: date) -> int:
     })
 
 
-def _option_strikes(col: Any, day: date) -> int:
-    """Distinct strikes present for NIFTY options on this trade day (any expiry)."""
+def _option_strikes(col: Any, day: date, underlying: str = "NIFTY") -> int:
+    """Distinct strikes present for *underlying* options on this trade day (any expiry)."""
     lo, hi = _day_window(day)
     strikes = col.distinct("strike", {
-        "underlying": "NIFTY", "timeframe": "1m", "ts": {"$gte": lo, "$lt": hi},
+        "underlying": underlying, "timeframe": "1m", "ts": {"$gte": lo, "$lt": hi},
     })
     return len(strikes)
 
@@ -58,8 +62,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Per-year strangle data-coverage audit.")
     ap.add_argument("--from", dest="date_from", required=True)
     ap.add_argument("--to", dest="date_to", default=date.today().isoformat())
+    ap.add_argument("--symbol", default="NIFTY", choices=list(SYMBOL_SIDS),
+                    help="Underlying to audit (default: NIFTY)")
     ap.add_argument("--vix-sid", default=os.getenv("VIX_SECURITY_ID", "21"))
     a = ap.parse_args()
+
+    spot_sid = SYMBOL_SIDS[a.symbol]
 
     from pymongo import MongoClient
     s = get_settings()
@@ -76,17 +84,17 @@ def main() -> int:
     for d in days:
         y = by_year[d.year]
         y["days"] += 1
-        if _spot_count(mkt, NIFTY_SID, d) >= SPOT_THRESHOLD:
+        if _spot_count(mkt, spot_sid, d) >= SPOT_THRESHOLD:
             y["spot"] += 1
             if earliest_spot is None:
                 earliest_spot = d
-        if _option_strikes(opt, d) >= 5:
+        if _option_strikes(opt, d, a.symbol) >= 5:
             y["opt"] += 1
         if _spot_count(mkt, a.vix_sid, d) >= VIX_THRESHOLD:
             y["vix"] += 1
 
     print(f"\n{'='*72}")
-    print(f"  STRANGLE DATA COVERAGE  ({days[0]} .. {days[-1]})")
+    print(f"  STRANGLE DATA COVERAGE [{a.symbol}]  ({days[0]} .. {days[-1]})")
     print(f"{'='*72}")
     print(f"  {'Year':<6}  {'TrDays':>7}  {'Spot':>10}  {'Options':>10}  {'VIX':>10}")
     print(f"  {'-'*6}  {'-'*7}  {'-'*10}  {'-'*10}  {'-'*10}")

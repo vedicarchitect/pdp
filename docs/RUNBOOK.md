@@ -1240,13 +1240,13 @@ all_legs_closed            — squareoff or full close
 
 ```powershell
 # Quick 30-day run (canonical config)
-task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --days 30
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --days 30
 
 # 2026 YTD
-task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2026-01-01 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2026-01-01 --out-dir backtest/runs
 
 # Full 5-year (takes ~12 min)
-task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs
 
 # Trace mode (every-minute status.log per day)
 task backtest:strangle -- --from 2026-06-20 --days 3 --trace
@@ -1283,8 +1283,12 @@ uv run python scripts/audit_strangle_data.py
 
 ### 17.7 Config reference
 
-Canonical config: `backtest/configs/strangle_tren_cons_tp05_hedged.yaml`
-Live config: `strategies/directional_strangle.yaml`
+| Role | NIFTY | BANKNIFTY | SENSEX |
+|------|-------|-----------|--------|
+| Backtest config | `backtest/configs/strangle_nifty_hedged.yaml` | `backtest/configs/strangle_banknifty_hedged.yaml` | `backtest/configs/strangle_sensex_hedged.yaml` |
+| Live strategy YAML | `strategies/directional_strangle_nifty.yaml` | `strategies/directional_strangle_banknifty.yaml` | `strategies/directional_strangle_sensex.yaml` |
+| strategy_id | `directional_strangle_nifty` | `directional_strangle_banknifty` | `directional_strangle_sensex` |
+| option_segment | `NSE_FNO` | `NSE_FNO` | `BSE_FNO` |
 
 Key knobs:
 
@@ -1339,59 +1343,220 @@ task backtest:strangle:wf -- --from 2021-09-01 --to 2026-06-25 --out logs/wf.csv
 
 ---
 
-## 18. Strangle — Paper Mode Startup Checklist
+## 18. Multi-Index Paper Trade — Day-of-Trading Guide
 
-Run this checklist before every paper trading session.
+Three simultaneous DirectionalStrangle instances: **NIFTY + BANKNIFTY + SENSEX**.
+Combined paper exposure only — no real orders until `LIVE=1` is set.
 
-### 18.1 Pre-market (before 09:15 IST)
+---
 
+### 18.1 Pre-market startup (before 09:00 IST)
+
+**Step 1 — Databases**
 ```powershell
-# 1. Ensure the DB stack is running
-task db:up
-
-# 2. Apply any pending migrations
-task db:migrate
-
-# 3. Start the API (paper mode by default — no LIVE=1)
-task dev
+task db:up        # postgres:5432 + redis:6379 + mongo:27017
+task db:migrate   # safe to re-run; no-op if already current
 ```
 
-Confirm the strategy loaded correctly:
+**Step 2 — Start API (paper mode)**
+```powershell
+task dev          # http://localhost:8000  (LIVE is unset = paper)
+```
+
+**Step 3 — Confirm all 3 strategies loaded**
 ```powershell
 curl http://localhost:8000/api/v1/strategies
-# Expect: [{"id": "directional_strangle", "status": "RUNNING", "dropped_ticks": 0, ...}]
+```
+Expected (all 3 with `"mode": "paper"`, `"status": "active"`):
+```json
+[
+  {"id": "directional_strangle_nifty",      "mode": "paper", "status": "active"},
+  {"id": "directional_strangle_banknifty",  "mode": "paper", "status": "active"},
+  {"id": "directional_strangle_sensex",     "mode": "paper", "status": "active"}
+]
+```
+If any strategy is missing → check the API logs for import errors.
+
+**Step 4 — Verify instruments are loaded for today's expiry**
+```powershell
+# NIFTY options (NSE_FNO, next Tuesday expiry)
+curl "http://localhost:8000/api/v1/instruments/search?underlying=NIFTY&limit=5"
+
+# BANKNIFTY options (NSE_FNO, next Thursday expiry)
+curl "http://localhost:8000/api/v1/instruments/search?underlying=BANKNIFTY&limit=5"
+
+# SENSEX options (BSE_FNO, next Friday expiry)
+curl "http://localhost:8000/api/v1/instruments/search?underlying=SENSEX&limit=5"
+```
+If any returns empty → the scrip master hasn't been loaded for today.
+Fix: the API auto-loads instruments on startup when `DHAN_CLIENT_ID` is set.
+Manual trigger: `curl -X POST http://localhost:8000/api/v1/instruments/reload`
+
+### 18.2 Environment variables required
+
+| Variable | Paper value | Notes |
+|----------|-------------|-------|
+| `LIVE` | _(unset or `0`)_ | **Never** set to `1` during paper runs |
+| `DHAN_CLIENT_ID` | your client id | Required for live Dhan tick feed |
+| `DHAN_ACCESS_TOKEN` | your token | Required for live Dhan tick feed |
+| `BROKER` | `paper` | Default; implicit when LIVE is not set |
+
+Without `DHAN_CLIENT_ID`, the tick feed uses a mock source — no real market data, bias scores stay 0.
+
+---
+
+### 18.3 Trading hours monitoring (10:15–15:10 IST)
+
+**Quick overview — all 3 strategies at once**
+```powershell
+# All running strategies + their heartbeat fields
+curl http://localhost:8000/api/v1/strategies
 ```
 
-### 18.2 Confirm data freshness
+**Per-strategy status (bucket, score, open legs, day P&L)**
+```powershell
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_nifty"
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_banknifty"
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_sensex"
+```
+Key fields to watch:
+- `bucket` — current bias bucket (most_bull / neutral / most_bear etc.)
+- `score` — −1 to +1 (negative = bearish; positive = bullish)
+- `n_open_shorts`, `n_open_hedges` — should be > 0 after first entry after 10:15
+- `day_pnl` — paper P&L (realized + unrealized)
+- `done_for_day` — becomes `true` after 15:10 or day-loss-cap hit
+
+**Live activity feed (last 20 events for each)**
+```powershell
+curl "http://localhost:8000/api/v1/strangle/activity?strategy_id=directional_strangle_nifty&n=20"
+curl "http://localhost:8000/api/v1/strangle/activity?strategy_id=directional_strangle_banknifty&n=20"
+curl "http://localhost:8000/api/v1/strangle/activity?strategy_id=directional_strangle_sensex&n=20"
+```
+Normal pattern after 10:15: `bias_evaluated → leg_status` repeating every 5m.
+On entry: `leg_open (short) → leg_open (hedge)`.
+On exit: `leg_close` or `take_profit` or `stop_all`.
+
+**Tail the structlog (all strategies in one stream)**
+```powershell
+# In a separate terminal — all strategy events in real time
+task dev 2>&1 | Select-String "bias_evaluated|leg_open|leg_close|take_profit|stop_all|day_loss_cap|square_off"
+```
+
+**Watch the per-strategy daily log files**
+```powershell
+# One per strategy, keyed by strategy_id
+Get-Content "backend\logs\directional_strangle_nifty\$(Get-Date -Format 'yyyy-MM-dd').log" -Wait -Tail 5
+Get-Content "backend\logs\directional_strangle_banknifty\$(Get-Date -Format 'yyyy-MM-dd').log" -Wait -Tail 5
+Get-Content "backend\logs\directional_strangle_sensex\$(Get-Date -Format 'yyyy-MM-dd').log" -Wait -Tail 5
+```
+
+---
+
+### 18.4 Quick debug during trading hours
+
+**Problem: strategy shows no activity after 10:15**
 
 ```powershell
-# Check latest NIFTY bar
-curl "http://localhost:8000/api/v1/bars/latest?security_id=13&segment=IDX_I"
-# Expect: today's date in ts field (or Friday if weekend)
+# Check for bias_evaluated events
+curl "http://localhost:8000/api/v1/strangle/activity?strategy_id=directional_strangle_nifty&n=5"
+# If empty → strategy may not be receiving bars
 ```
 
-### 18.3 Confirm first 5m bar (at 10:15 IST)
-
-After 10:15, the strategy emits `bias_evaluated` on each 5m close. Confirm it's running:
+Cause A — Tick feed not connected (no `DHAN_CLIENT_ID`/token):
 ```powershell
-curl http://localhost:8000/api/v1/strangle/status
-# Expect: {"mode": "paper", "bucket": "...", "score": 0.xxx, "done_for_day": false, ...}
+curl http://localhost:8000/healthz
+# Look for: "market_feed": "connected" vs "disconnected"
 ```
 
-Read the live activity log:
+Cause B — Indicators not warmed (strategy logs `strategy_warmup_warning`):
 ```powershell
-curl "http://localhost:8000/api/v1/strangle/activity?n=5"
-# The first entry (newest) should be a bias_evaluated or leg_status event
+# Search today's log for warmup issues
+Select-String "warmup" "backend\logs\directional_strangle_nifty\$(Get-Date -Format 'yyyy-MM-dd').log"
+```
+Normal: warmed_timeframes=[5m,15m,1h]. If missing any TF → indicator engine hasn't received enough bars yet (resolves within 2–3 bars of session open).
+
+Cause C — Wrong security_id in watchlist (bars arriving under different sid):
+Check that `underlying_security_id` in the YAML matches what the tick feed sends (NIFTY=13, BANKNIFTY=25, SENSEX=51).
+
+---
+
+**Problem: SENSEX shows `no_instrument_for_strike`**
+
+SENSEX options are on `BSE_FNO`. Verify instruments are loaded:
+```powershell
+curl "http://localhost:8000/api/v1/instruments/search?underlying=SENSEX&limit=3"
+# If empty → BSE scrip master not loaded for today
+curl -X POST http://localhost:8000/api/v1/instruments/reload
 ```
 
-### 18.4 Environment variables for paper mode
+---
 
-| Variable | Value | Notes |
-|----------|-------|-------|
-| `LIVE` | _(unset or 0)_ | Must NOT be set to 1 for paper mode |
-| `BROKER` | `paper` | Default; can also be set explicitly |
-| `DHAN_CLIENT_ID` | _(optional)_ | Set for live market feed; else mock source |
-| `DHAN_ACCESS_TOKEN` | _(optional)_ | Same as above |
+**Problem: one strategy hit day_loss_cap and stopped**
+
+```powershell
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_banknifty"
+# Look for: "done_for_day": true
+```
+Other two strategies continue independently — each has its own loss cap.
+To confirm which event triggered it:
+```powershell
+curl "http://localhost:8000/api/v1/strangle/activity?strategy_id=directional_strangle_banknifty&n=10"
+# Look for: {"event_type": "day_loss_cap", ...}
+```
+
+---
+
+**Problem: API crashed / need to restart mid-day**
+
+```powershell
+# Stop API (Ctrl+C in the dev terminal, or kill process)
+
+# Restart — strategies resume from instruments table (open positions recovered via recovery.py)
+task dev
+
+# Verify all 3 reloaded
+curl http://localhost:8000/api/v1/strategies
+
+# Check each strategy re-subscribed to options (should show existing legs in memory)
+curl "http://localhost:8000/api/v1/strangle/legs?strategy_id=directional_strangle_nifty"
+```
+
+> **Note:** On restart the in-memory `_activity` ring buffer is empty (events since restart only). The daily log file persists — check it for pre-restart history.
+
+---
+
+### 18.5 End-of-day checks (after 15:10 IST)
+
+```powershell
+# Confirm all 3 strategies squared off
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_nifty"
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_banknifty"
+curl "http://localhost:8000/api/v1/strangle/status?strategy_id=directional_strangle_sensex"
+# Expect: "done_for_day": true, "n_open_shorts": 0, "n_open_hedges": 0
+
+# Day P&L for each
+curl "http://localhost:8000/api/v1/strangle/stats?strategy_id=directional_strangle_nifty"
+curl "http://localhost:8000/api/v1/strangle/stats?strategy_id=directional_strangle_banknifty"
+curl "http://localhost:8000/api/v1/strangle/stats?strategy_id=directional_strangle_sensex"
+
+# All paper orders placed today (all strategies)
+curl "http://localhost:8000/api/v1/orders?today=1"
+
+# Portfolio summary
+curl http://localhost:8000/api/v1/portfolio/summary
+
+# Paper journal in MongoDB
+docker exec -it pdp-mongo mongosh pdp --eval "db.paper_journal.find().sort({date:-1}).limit(3).pretty()"
+```
+
+### 18.6 Backtest commands (3-index)
+
+```powershell
+# Run any single index (replace config file)
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --days 30
+task backtest:strangle -- --config-file backtest/configs/strangle_banknifty_hedged.yaml --from 2021-08-04 --to 2024-12-31 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_sensex_hedged.yaml --from 2024-01-01 --out-dir backtest/runs
+```
 
 ---
 

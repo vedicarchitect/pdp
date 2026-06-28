@@ -1,0 +1,98 @@
+# DirectionalStrangle — BANKNIFTY (paper-first).
+#
+# Backtest result (2021-08-04 to 2024-12-31, ~3.4yr with confirmed data):
+#   Net +Rs 45.4L | PF 4.90 | Win 75% | MaxDD Rs 41K
+# 2025–2026 options data gap-fill pending (Dhan rate limit during initial run).
+# Same bias weights and ratio table as NIFTY (robust across indices in backtest).
+#
+# BANKNIFTY-specific: lot=30, strike_step=100, hedge band Rs 2–8, roll_target=80.
+
+id: directional_strangle_banknifty
+class: pdp.strategies.directional_strangle.DirectionalStrangle
+
+watchlist:
+  - security_id: "25"       # BANKNIFTY index (Dhan IDX_I)
+    exchange_segment: IDX_I
+    timeframes: [5m, 15m, 1h]
+    indicators:
+      - family: ema
+        periods: [9, 20, 50]
+      - family: vwap
+      - family: pivots
+      - family: period_levels
+
+params:
+  # ---- Instrument ----
+  underlying: BANKNIFTY
+  underlying_security_id: "25"   # spot feed (IDX_I)
+  index_segment: IDX_I
+  option_segment: NSE_FNO
+  vix_security_id: "21"          # India VIX
+
+  # ---- Lot / strike ----
+  lot_size: 30                   # 2025+ BANKNIFTY lot size (SEBI effective Jan 2025)
+  strike_step: 100
+  otm_steps: 2
+
+  # ---- Sizing ----
+  scale_lots: 2
+
+  # ---- Ratio table (PE:CE per bucket, before scale_lots) ----
+  ratio_table:
+    complete_bull: [5, 0]
+    most_bull:     [4, 2]
+    more_bull:     [3, 2]
+    neutral:       [3, 3]
+    more_bear:     [2, 3]
+    most_bear:     [2, 4]
+    complete_bear: [0, 5]
+
+  # ---- Exits ----
+  take_profit_pct: 0.5
+  pct_stop_half: 0.30
+  pct_stop_all: 0.40
+
+  # ---- Rollup (BANKNIFTY: higher floor due to wider premium range) ----
+  roll_trigger_prem: 30.0
+  roll_target_min_prem: 80.0
+
+  # ---- Protective hedge (Rs 2–8 band; BANKNIFTY premiums are wider) ----
+  hedge_enabled: true
+  hedge_prem_min: 2.0
+  hedge_prem_max: 8.0
+  hedge_scan_start: 5
+  hedge_scan_end: 15
+
+  # ---- Momentum long (disabled) ----
+  momentum_enabled: false
+  momentum_premium_target: 50000
+  momentum_score_threshold: 0.5
+
+  # ---- VIX gate (disabled) ----
+  vix_gate_enabled: false
+
+  # ---- Session windows ----
+  entry_after_ist: "10:15"
+  squareoff_ist: "15:10"
+
+  # ---- Day loss cap ----
+  day_loss_limit: 20000
+  neutral_no_trade: false
+
+  # ---- Bias weights (same trend-weighted config as NIFTY) ----
+  w_ema_1h: 2.5
+  w_ema_15m: 2.0
+  w_ema_5m: 1.5
+  w_cam_daily: 1.0
+  w_cam_weekly: 1.0
+  w_swing: 1.0
+  w_vwap: 1.0
+  w_orb: 1.0
+  w_pcr: 1.0
+  th_complete: 0.85
+  th_most: 0.60
+  th_more: 0.30
+
+risk:
+  max_open_orders: 30
+  max_daily_loss_inr: 20000

@@ -18,11 +18,11 @@ Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instr
 - [ ] 1.1 Spot backfill: `uv run python scripts/backfill_spot.py --symbol BANKNIFTY --from 2021-01-01 --only-missing`
   - Security ID: look up from scrip master (Dhan IDX_I)
   - Store into `market_bars` with `security_id=<banknifty_sid>`
-- [ ] 1.2 VIX already shared — India VIX applies to all indices
+- [x] 1.2 VIX already shared — India VIX applies to all indices
 - [ ] 1.3 Options backfill (expired): adapt `scripts/backfill_expired_options.py` for BANKNIFTY expiry calendar (Thursday weekly)
   - Strike step: 100 (BANKNIFTY)
   - Lot size history: 15 → 25 → 15 (check NSE lot size table)
-- [ ] 1.4 Audit: `uv run python scripts/audit_strangle_data.py --symbol BANKNIFTY`
+- [x] 1.4 Audit: `uv run python scripts/audit_strangle_data.py --symbol BANKNIFTY`
 
 ---
 
@@ -34,13 +34,13 @@ Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instr
   - Strike step: 100 (SENSEX)
   - Lot size: 10 (SENSEX)
   - Adapt `backfill_options.py` for BSE exchange segment
-- [ ] 2.3 Audit: `uv run python scripts/audit_strangle_data.py --symbol SENSEX`
+- [x] 2.3 Audit: `uv run python scripts/audit_strangle_data.py --symbol SENSEX`
 
 ---
 
 ## 3. BANKNIFTY backtest configs
 
-- [ ] 3.1 Create `backtest/configs/strangle_banknifty_hedged.yaml`:
+- [x] 3.1 Create `backtest/configs/strangle_banknifty_hedged.yaml`:
   ```yaml
   underlying: BANKNIFTY
   underlying_security_id: "<banknifty_sid>"
@@ -55,18 +55,22 @@ Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instr
   day_loss_limit: 20000 # higher cap for higher-premium index
   # ... same bias weights as NIFTY canonical config
   ```
-- [ ] 3.2 Run 5-year backtest: `task backtest:strangle -- --config-file backtest/configs/strangle_banknifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs`
-- [ ] 3.3 Report year-by-year metrics; compare with NIFTY baseline
+- [x] 3.2 Run 5-year backtest: `task backtest:strangle -- --config-file backtest/configs/strangle_banknifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs`
+  - Ran 2021-08-04 to 2024-12-31 (4yr data-complete window; 2025+ options gap being filled)
+  - Result: Net +₹45.4L | PF 4.90 | Win 75% | MaxDD ₹41K | 827 days | run: strangle_20260628-211917
+- [x] 3.3 Report year-by-year metrics; compare with NIFTY baseline
 
 ---
 
 ## 4. SENSEX backtest configs
 
-- [ ] 4.1 Create `backtest/configs/strangle_sensex_hedged.yaml` analogous to BANKNIFTY config
+- [x] 4.1 Create `backtest/configs/strangle_sensex_hedged.yaml` analogous to BANKNIFTY config
   - Strike step: 100 (SENSEX)
   - Lot size: 10
   - Hedge band: Rs 3–8 (test empirically)
-- [ ] 4.2 Run 5-year backtest; report metrics
+- [x] 4.2 Run 5-year backtest; report metrics
+  - Ran 2024-01-01 to 2026-06-25 (full options window available)
+  - Result: Net +₹24.3L | PF 6.44 | Win 70% | MaxDD ₹55K | 607 days | run: strangle_20260628-212217
 
 ---
 
@@ -74,16 +78,16 @@ Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instr
 
 The current `strangle_loader.py` assumes NIFTY security IDs for VIX and PCR. Make it generic:
 
-- [ ] 5.1 Accept `underlying` and `security_id` as loader params; resolve from `StrangleConfig`
-- [ ] 5.2 PCR: for BANKNIFTY/SENSEX, compute from respective option chain OI (not NIFTY)
-- [ ] 5.3 VIX gate: India VIX (sid 21) applies to all — no change needed
+- [x] 5.1 Accept `underlying` and `security_id` as loader params; resolve from `StrangleConfig`
+- [x] 5.2 PCR: for BANKNIFTY/SENSEX, compute from respective option chain OI (not NIFTY)
+- [x] 5.3 VIX gate: India VIX (sid 21) applies to all — no change needed
 
 ---
 
 ## 6. Comparison report
 
-- [ ] 6.1 Generate a side-by-side table: NIFTY vs BANKNIFTY vs SENSEX (5-year Net, PF, MaxDD, Calmar, Win%, per-year)
-- [ ] 6.2 If all three are profitable with acceptable DD, consider running all three simultaneously (non-correlated premium income)
+- [x] 6.1 Generate a side-by-side table: NIFTY vs BANKNIFTY vs SENSEX (5-year Net, PF, MaxDD, Calmar, Win%, per-year)
+- [x] 6.2 If all three are profitable with acceptable DD, consider running all three simultaneously (non-correlated premium income)
 - [ ] 6.3 Confirm legs don't exceed Dhan NIFTY/BANKNIFTY/SENSEX margin limits when running concurrent strategies
 
 ---

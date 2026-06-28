@@ -21,8 +21,8 @@ Paper mode wired; Monday start checklist below. Live hedge fixed to Rs 2–5 pre
 
 MaxDD Rs 71,579 | PF 5.72 | Calmar 26x | Zero losing months
 
-Config: `backtest/configs/strangle_tren_cons_tp05_hedged.yaml`
-Run: `task backtest:strangle -- --config-file backtest/configs/strangle_tren_cons_tp05_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs`
+Config: `backtest/configs/strangle_nifty_hedged.yaml`
+Run: `task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs`
 
 ### Momentum Long — Tested, Disabled
 An ITM+1 directional long on COMPLETE_BULL/BEAR was tested:
@@ -116,7 +116,7 @@ Thresholds: |score| ≥ 0.85 = COMPLETE, ≥ 0.60 = MOST, ≥ 0.30 = MORE
 | `src/pdp/backtest/strangle_report.py` | RunWriter — archives per-day artifacts |
 | `backtest/strangle_run.py` | CLI runner (5yr quarter-chunked) |
 | `backtest/strangle_walkforward.py` | IS/OOS walk-forward optimizer |
-| `backtest/configs/strangle_tren_cons_tp05_hedged.yaml` | CANONICAL CONFIG (dominant WF winner) |
+| `backtest/configs/strangle_nifty_hedged.yaml` | CANONICAL CONFIG (dominant WF winner) |
 | `backtest/configs/strangle_premium.yaml` | Naked variant |
 | `backtest/configs/strangle_premium_hedged.yaml` | Hedged variant |
 | `src/pdp/strategies/directional_strangle.py` | Live paper strategy (Strategy ABC) |

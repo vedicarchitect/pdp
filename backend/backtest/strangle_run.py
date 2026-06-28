@@ -31,7 +31,7 @@ from pymongo import MongoClient  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
 from pdp.backtest.day_loader import biz_days, load_window  # noqa: E402
-from pdp.backtest.strangle_config import StrangleConfig, nifty_lot_size  # noqa: E402
+from pdp.backtest.strangle_config import EXPIRY_WEEKDAY, SECURITY_IDS, StrangleConfig, lot_size_for_date  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_report import RunWriter  # noqa: E402
 from pdp.backtest.strangle_sim import BarStatus, format_status_line, simulate_strangle_day  # noqa: E402
@@ -116,11 +116,12 @@ def _quarter_chunks(days: list[date]) -> list[list[date]]:
     return [chunks[k] for k in sorted(chunks)]
 
 
-def _print_summary(results: list, m: dict) -> None:
+def _print_summary(results: list, m: dict, underlying: str = "NIFTY") -> None:
+    chg_hdr = f"{underlying} Chg"
     print(f"\n{'='*92}")
-    print(f"  DIRECTIONAL STRANGLE  —  {m['days']} traded days")
+    print(f"  DIRECTIONAL STRANGLE [{underlying}]  —  {m['days']} traded days")
     print(f"{'='*92}")
-    print(f"  {'Date':<12}  {'NIFTY Chg':>9}  {'Trades':>6}  {'Gross':>11}  {'Comm':>8}  {'Net':>11}  Status")
+    print(f"  {'Date':<12}  {chg_hdr:>9}  {'Trades':>6}  {'Gross':>11}  {'Comm':>8}  {'Net':>11}  Status")
     print(f"  {'-'*12}  {'-'*9}  {'-'*6}  {'-'*11}  {'-'*8}  {'-'*11}  ------")
     for r in results:
         flag = "P" if r.realized >= 0 else "L"
@@ -202,11 +203,20 @@ def main() -> int:
 
     s = get_settings()
     mdb = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]
+
+    # Load the expiry calendar for the configured underlying.
+    _cal_paths = {
+        "NIFTY": s.EXPIRY_CACHE_PATH,
+        "BANKNIFTY": s.BANKNIFTY_EXPIRY_CACHE_PATH,
+        "SENSEX": s.SENSEX_EXPIRY_CACHE_PATH,
+    }
+    _cal_path = _cal_paths.get(cfg.underlying, s.EXPIRY_CACHE_PATH)
     try:
-        cal = NiftyExpiryCalendar.load(s.EXPIRY_CACHE_PATH)
+        cal = NiftyExpiryCalendar.load(_cal_path)
     except Exception as exc:
         cal = None
-        log.warning("expiry calendar unavailable (%s); using Tuesday fallback", exc)
+        log.warning("expiry calendar unavailable (%s); using %s weekday fallback",
+                    exc, cfg.underlying)
 
     calc = NullCommissionCalculator(s.backtest_commission) if args.no_commission \
         else CommissionCalculator(s.backtest_commission)
@@ -239,10 +249,16 @@ def main() -> int:
     skipped = 0
     vix_days_seen = 0
     for ci, chunk in enumerate(chunks, 1):
-        window = load_window(mdb, cal, chunk)
+        window = load_window(
+            mdb, cal, chunk,
+            security_id=cfg.security_id,
+            underlying=cfg.underlying,
+            expiry_weekday=EXPIRY_WEEKDAY.get(cfg.underlying, 1),
+        )
         vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
-        pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk)
+        pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk,
+                                     underlying=cfg.underlying)
         skipped += len(window.skipped)
         msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]}: "
                f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, "
@@ -257,8 +273,8 @@ def main() -> int:
                 if expiry is not None and (expiry - d).days > cfg.dte_max:
                     skipped += 1
                     continue
-            # Apply correct NSE lot size for this trade date (lot size changes over time).
-            day_lot = nifty_lot_size(d)
+            # Apply correct lot size for this trade date (changes over time per underlying).
+            day_lot = lot_size_for_date(cfg.underlying, d)
             day_cfg = (cfg if day_lot == cfg.lot_size
                        else StrangleConfig.from_dict({**cfg.to_dict(), "lot_size": day_lot}))
             t0 = time.perf_counter()
@@ -287,7 +303,7 @@ def main() -> int:
         print("No results (no decision bars / chain data in window).")
         return 1
     m = aggregate(results)
-    _print_summary(results, m) if not writer else _print_summary_compact(results, m)
+    _print_summary(results, m, cfg.underlying) if not writer else _print_summary_compact(results, m, cfg.underlying)
     if writer:
         out = writer.finalize(
             window={"from": str(days[0]), "to": str(days[-1]), "biz_days": len(days),
@@ -300,11 +316,11 @@ def main() -> int:
     return 0
 
 
-def _print_summary_compact(results: list, m: dict) -> None:
+def _print_summary_compact(results: list, m: dict, underlying: str = "NIFTY") -> None:
     """Headline-only summary (the per-day detail is in the archived summary.csv)."""
     pf = "inf" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
     print(f"\n{'='*92}")
-    print(f"  DIRECTIONAL STRANGLE  —  {m['days']} traded days")
+    print(f"  DIRECTIONAL STRANGLE [{underlying}]  —  {m['days']} traded days")
     print(f"  Net {m['net']:>+.0f}  |  PF {pf}  |  Win {m['win_rate']:.0f}%  |  "
           f"MaxDD {m['max_dd']:.0f}  |  Trades {m['trades']}  |  Halted {m['halted']}")
     print(f"{'='*92}")

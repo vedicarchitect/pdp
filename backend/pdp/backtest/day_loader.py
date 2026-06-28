@@ -31,16 +31,16 @@ def biz_days(end: date, n: int) -> list[date]:
     return list(reversed(days))
 
 
-def _next_weekly_expiry(d: date) -> date:
-    return d + timedelta(days=(NIFTY_EXPIRY_WEEKDAY - d.weekday()) % 7)
+def _next_weekly_expiry(d: date, expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY) -> date:
+    return d + timedelta(days=(expiry_weekday - d.weekday()) % 7)
 
 
-def _resolve_expiry(cal: Any, d: date) -> date:
+def _resolve_expiry(cal: Any, d: date, expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY) -> date:
     if cal is not None:
         e = cal.resolve_expiry(d, "WEEK", 1)
         if e is not None:
             return e
-    return _next_weekly_expiry(d)
+    return _next_weekly_expiry(d, expiry_weekday)
 
 
 @dataclass
@@ -54,7 +54,15 @@ class WindowData:
     skipped: dict[date, str] = field(default_factory=dict)
 
 
-def load_window(mdb: Any, cal: Any, days: list[date]) -> WindowData:
+def load_window(
+    mdb: Any,
+    cal: Any,
+    days: list[date],
+    *,
+    security_id: str = NIFTY_SID,
+    underlying: str = "NIFTY",
+    expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY,
+) -> WindowData:
     """Load raw 1-minute spot + option chains for ``days`` and run the completeness gate."""
     # ── Spot: one query for the whole range, bucketed by IST trade-date. ──
     spot_by_day: dict[date, list[dict]] = {}
@@ -62,19 +70,19 @@ def load_window(mdb: Any, cal: Any, days: list[date]) -> WindowData:
         lo = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=timezone.utc)
         hi = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=timezone.utc)
         for b in mdb["market_bars"].find(
-            {"metadata.security_id": NIFTY_SID, "metadata.timeframe": "1m",
+            {"metadata.security_id": security_id, "metadata.timeframe": "1m",
              "ts": {"$gte": lo, "$lte": hi}}).sort("ts", 1):
             ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=timezone.utc)
             spot_by_day.setdefault((ts + _IST).date(), []).append(b)
 
     # ── Expiry per day, then one chain query per expiry (1-minute bars). ──
-    expiry_by_day = {d: _resolve_expiry(cal, d) for d in days}
+    expiry_by_day = {d: _resolve_expiry(cal, d, expiry_weekday) for d in days}
     by_exp: dict[date, list[date]] = {}
     for d, e in expiry_by_day.items():
         by_exp.setdefault(e, []).append(d)
     chain_1m: dict[tuple[date, str], dict[float, list]] = {}
     for exp, tds in by_exp.items():
-        store, _ = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=1)
+        store, _ = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=1, underlying=underlying)
         chain_1m.update(store)
 
     # ── Completeness gate (on the raw 1m spot series). ──

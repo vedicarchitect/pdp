@@ -56,25 +56,36 @@ async def stop_strategy(strategy_id: str, request: Request) -> JSONResponse:
 # Strangle execution console — read-only API                          #
 # ------------------------------------------------------------------ #
 
-def _get_strangle(request: Request):
+def _get_strangle(request: Request, strategy_id: str | None = None):
     from pdp.strategies.directional_strangle import DirectionalStrangle
     host: StrategyHost = request.app.state.strategy_host
-    for state in host._running.values():
+    for sid, state in host._running.items():
         if isinstance(state.instance, DirectionalStrangle):
-            return state.instance
-    raise HTTPException(status_code=404, detail="DirectionalStrangle not running")
+            if strategy_id is None or sid == strategy_id:
+                return state.instance
+    detail = (
+        f"DirectionalStrangle '{strategy_id}' not running"
+        if strategy_id else "DirectionalStrangle not running"
+    )
+    raise HTTPException(status_code=404, detail=detail)
 
 
 @strangle_router.get("/status")
-async def strangle_status(request: Request) -> JSONResponse:
-    strategy = _get_strangle(request)
+async def strangle_status(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+) -> JSONResponse:
+    strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
     return JSONResponse(content=data)
 
 
 @strangle_router.get("/legs")
-async def strangle_legs(request: Request) -> JSONResponse:
-    strategy = _get_strangle(request)
+async def strangle_legs(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+) -> JSONResponse:
+    strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
     return JSONResponse(content={"legs": data["legs"]})
 
@@ -83,16 +94,20 @@ async def strangle_legs(request: Request) -> JSONResponse:
 async def strangle_activity(
     request: Request,
     n: int = Query(default=50, ge=1, le=200),
+    strategy_id: str | None = Query(default=None),
 ) -> JSONResponse:
-    strategy = _get_strangle(request)
+    strategy = _get_strangle(request, strategy_id)
     events = list(strategy._activity)
     events.reverse()       # newest-first
     return JSONResponse(content={"events": events[:n], "total": len(events)})
 
 
 @strangle_router.get("/stats")
-async def strangle_stats(request: Request) -> JSONResponse:
-    strategy = _get_strangle(request)
+async def strangle_stats(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+) -> JSONResponse:
+    strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
     open_pe_lots = sum(lg["lots"] for lg in data["legs"]
                        if not lg["is_hedge"] and not lg["is_momentum"] and lg["opt_type"] == "PE")

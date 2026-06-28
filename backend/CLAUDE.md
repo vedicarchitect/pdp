@@ -64,5 +64,5 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 ## Notes
 - `task lint`/`task test` carry **pre-existing** debt (267 ruff items, 27 test failures e.g.
   `PositionState` needing `strategy_id`) unrelated to layout — clean up in a dedicated change.
-- Some `backtest/configs/strangle_*.yaml` carry a stale `vix_gate_enabled` key (VIX gate was
-  removed) — they error until updated; the default `StrangleConfig()` runs clean.
+- The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
+  `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old stale `strangle_tren_cons_tp05_hedged.yaml` is deleted.

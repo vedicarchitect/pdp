@@ -1,22 +1,23 @@
+underlying: BANKNIFTY
+security_id: "25"
 adjustment_on_flip: true
-vix_gate_enabled: false
 momentum_enabled: false
 momentum_premium_target: 50000.0
 momentum_score_threshold: 0.5
-day_loss_limit: 15000.0
+day_loss_limit: 20000.0
 dte_max: null
 entry_after_ist: '10:15'
 extreme_atm: true
 hedge_enabled: true
-hedge_prem_max: 5.0
+hedge_prem_max: 8.0
 hedge_prem_min: 2.0
-lot_size: 65
+lot_size: 30
 neutral_no_trade: false
 otm_steps: 2
 pct_stop_all: 0.4
 pct_stop_enabled: true
 pct_stop_half: 0.3
-premium_floor: 50.0
+premium_floor: 80.0
 ratio_table:
   complete_bear:
   - 0
@@ -40,12 +41,12 @@ ratio_table:
   - 3
   - 3
 roll_enabled: true
-roll_target_min_prem: 50.0
-roll_trigger_prem: 20.0
+roll_target_min_prem: 80.0
+roll_trigger_prem: 30.0
 scale_lots: 2
 squareoff_ist: '15:10'
 strike_method: premium
-strike_step: 50
+strike_step: 100
 take_profit_extreme_only: false
 take_profit_pct: 0.5
 target_delta: 0.6
