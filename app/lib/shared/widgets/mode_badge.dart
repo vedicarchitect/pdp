@@ -13,20 +13,26 @@ class ModeBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final isLive = mode.toLowerCase() == 'live';
     final color = isLive ? AppColors.loss : AppColors.warning;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: color.withAlpha(38),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color),
-      ),
-      child: Text(
-        isLive ? 'LIVE' : 'PAPER',
-        style: TextStyle(
-          color: color,
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.8,
+    return Semantics(
+      label: isLive ? 'Live trading mode active' : 'Paper simulated trading mode active',
+      child: Tooltip(
+        message: isLive ? 'Live Trading (Real Money)' : 'Paper Trading (Simulated)',
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: color.withAlpha(38),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color),
+          ),
+          child: Text(
+            isLive ? 'LIVE' : 'PAPER',
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.8,
+            ),
+          ),
         ),
       ),
     );
