@@ -426,6 +426,7 @@ def create_app() -> FastAPI:
     from pdp.positional.routes import router as positional_router
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
+    from pdp.strategy.routes import strangle_router
     from pdp.backtest.routes import router as backtest_router
     from pdp.backtest.warehouse_routes import router as strangle_bt_router
     from pdp.jobs.routes import router as jobs_router
@@ -452,6 +453,7 @@ def create_app() -> FastAPI:
     app.include_router(risk_router)
     app.include_router(settings_router)
     app.include_router(strategy_router)
+    app.include_router(strangle_router)
     app.include_router(backtest_router)
     app.include_router(strangle_bt_router)
     app.include_router(jobs_router, prefix="/api/v1/jobs", tags=["Jobs"])

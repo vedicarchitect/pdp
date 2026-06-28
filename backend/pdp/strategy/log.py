@@ -2,8 +2,24 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+
+class StrangleEventType(StrEnum):
+    LEG_OPEN = "leg_open"
+    LEG_CLOSE = "leg_close"
+    TAKE_PROFIT = "take_profit"
+    STOP_HALF = "stop_half"
+    STOP_ALL = "stop_all"
+    DAY_LOSS_CAP = "day_loss_cap"
+    ROLLED = "rolled"
+    STOP_GATE_WAIT = "stop_gate_wait"
+    BUCKET_CHANGE = "bucket_change"
+    BIAS_EVALUATED = "bias_evaluated"
+    LEG_STATUS = "leg_status"
+    SQUARE_OFF = "square_off"
 
 _IST = ZoneInfo("Asia/Kolkata")
 _LOGS_DIR = Path("logs")

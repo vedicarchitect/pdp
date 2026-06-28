@@ -20,11 +20,21 @@ Lifecycle per IST session:
   4. on_tick: per-leg take-profit (TP%) and premium stop (half@30%, all@40%).
   5. Day-loss cap: flatten all + halt when day realized P&L <= -day_loss_limit.
   6. Square-off: close all remaining legs at squareoff_ist (15:10 IST).
+
+Parity additions (chunk 4 strangle-execution-console):
+  - Per-signal bias votes in bias_evaluated event
+  - leg_status heartbeat after every bias_evaluated
+  - Rollup: close short when LTP < roll_trigger_prem (20), reopen at next OTM with prem >= 50
+  - Stop-gate: 3-bar cooldown (15 min) before re-entry after a stop
+  - Weekly Camarilla: ind.pivots(sid, "1w") — returns None until 1w bar support added
+  - Live PCR: not yet wired (no ind.pcr or accessible poller.latest_pcr)
+  - Indicator timeframe audit on startup
 """
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -38,6 +48,7 @@ from pdp.signals.bias import (
     score_bias,
 )
 from pdp.strategy.abc import Strategy
+from pdp.strategy.log import StrangleEventType
 from pdp.strategy.strikes import (
     STRIKE_STEP,
     nearest_weekly_expiry,
@@ -134,6 +145,10 @@ class DirectionalStrangle(Strategy):
         self._momentum_premium_target: int = int(p.get("momentum_premium_target", 50000))
         self._momentum_score_threshold: float = float(p.get("momentum_score_threshold", 0.5))
 
+        # Rollup params: close short when LTP < roll_trigger_prem, reopen at >= roll_target_min_prem
+        self._roll_trigger_prem: float = float(p.get("roll_trigger_prem", 20.0))
+        self._roll_target_min_prem: float = float(p.get("roll_target_min_prem", 50.0))
+
         # Bias weights (dominant tren/cons walk-forward config)
         self._weights = BiasWeights(
             w_ema_1h=float(p.get("w_ema_1h", 2.5)),
@@ -186,6 +201,28 @@ class DirectionalStrangle(Strategy):
         self._day_baseline: dict[str, Decimal] = {}
         self._touched_sids: set[str] = set()
 
+        # LTP cache: updated on every tick for all subscribed options
+        self._ltp_cache: dict[str, float] = {}
+
+        # Activity ring buffer: last 200 canonical events; lost on restart (daily log is durable)
+        self._activity: collections.deque[dict] = collections.deque(maxlen=200)
+
+        # Stop-gate state: keyed by opt_type ("PE"/"CE")
+        # Each entry: {"exit_px": float, "sid": str, "n_below": int}
+        self._stop_gate: dict[str, dict] = {}
+
+        # Set of security_ids currently being rolled (prevents re-entrant roll)
+        self._rolling: set[str] = set()
+
+        # Cache last spot for use in _roll_leg (on_tick doesn't have bar.close)
+        self._last_spot: float | None = None
+
+        # Suppress repeated cam_weekly_missing warnings within a session
+        self._cam_weekly_warned: bool = False
+
+        # Session start timestamp
+        self._started_at: datetime = datetime.now(tz=_IST)
+
         if ctx.market is not None:
             await ctx.market.subscribe(self.sid, self.index_segment)
             await ctx.market.subscribe(self._vix_sid, self.index_segment)
@@ -200,7 +237,31 @@ class DirectionalStrangle(Strategy):
             neutral_no_trade=self._neutral_no_trade,
             entry_after=self._entry_after_ist.isoformat(),
             squareoff=self._squareoff_ist.isoformat(),
+            roll_trigger_prem=self._roll_trigger_prem,
+            roll_target_min_prem=self._roll_target_min_prem,
         )
+
+        # Timeframe key audit: check which indicator timeframes are warmed
+        ind = ctx.indicators
+        warmed: list[str] = []
+        missing: list[str] = []
+        for tf in ("5m", "15m", "1h"):
+            if ind and ind.ema(self.sid, tf) is not None:
+                warmed.append(tf)
+            else:
+                missing.append(tf)
+        ctx.log.info(
+            "strategy_warmup_check",
+            warmed_timeframes=warmed,
+            missing_timeframes=missing,
+            strategy_id=self.strategy_id,
+        )
+        for tf in missing:
+            ctx.log.warning(
+                "strategy_warmup_warning",
+                missing_timeframe=tf,
+                strategy_id=self.strategy_id,
+            )
 
     # ------------------------------------------------------------------ #
     # Bar handler                                                          #
@@ -225,6 +286,7 @@ class DirectionalStrangle(Strategy):
             return
 
         spot = float(bar.close)
+        self._last_spot = spot
 
         if now >= self._squareoff_ist:
             if self._short_legs or self._hedge_legs or self._momentum_legs:
@@ -238,11 +300,14 @@ class DirectionalStrangle(Strategy):
             self.log_heartbeat(bar.bar_time)
             return
 
+        # Update stop-gate counters on each 5m bar
+        self._update_stop_gates()
+
         day_pnl = await self._day_realized()
         if day_pnl <= -self._day_loss_limit:
             if self._short_legs or self._hedge_legs or self._momentum_legs:
                 await self._close_all("day_loss_cap")
-            self.ctx.log.info("day_loss_cap_halt", day_pnl=str(day_pnl))
+            self._emit_event(StrangleEventType.DAY_LOSS_CAP, day_pnl=float(day_pnl))
             self._done_for_day = True
             return
 
@@ -250,16 +315,20 @@ class DirectionalStrangle(Strategy):
         result = score_bias(inp, weights=self._weights, ratio_table=self._ratio_table)
         self._last_score = result.score
 
-        self.log_heartbeat(bar.bar_time)
-        self.ctx.log.info(
-            "bias_evaluated",
+        # Canonical bias_evaluated event (replaces ad-hoc log_heartbeat + ctx.log.info)
+        self._emit_event(
+            StrangleEventType.BIAS_EVALUATED,
             score=round(result.score, 3),
-            bucket=result.bucket,
+            bucket=result.bucket.value if result.bucket else None,
             gated=result.gated,
             reason=result.reason,
             shorts=len(self._short_legs),
             momentum=len(self._momentum_legs),
+            votes=result.votes,
         )
+
+        # Leg status heartbeat after every bias_evaluated
+        self._emit_leg_status()
 
         if result.gated:
             return
@@ -275,6 +344,8 @@ class DirectionalStrangle(Strategy):
 
         if self._current_bucket != bucket_str:
             if self._short_legs or self._hedge_legs:
+                self._emit_event(StrangleEventType.BUCKET_CHANGE,
+                    old_bucket=self._current_bucket, new_bucket=bucket_str)
                 await self._close_shorts_and_hedges("bucket_change")
             self._current_bucket = bucket_str
             await self._open_bucket(spot, pe_lots, ce_lots)
@@ -306,14 +377,25 @@ class DirectionalStrangle(Strategy):
         if ltp <= 0:
             return
 
+        # Update LTP cache for all option ticks
+        self._ltp_cache[sid] = ltp
+
         # Only watch short legs (momentum longs exit on score signal, not premium)
         legs = [lg for lg in self._short_legs if lg.security_id == sid]
         for leg in legs:
             entry = float(leg.entry_price)
             if entry <= 0:
                 continue
+
+            # Rollup: close and reopen when premium decays below roll_trigger_prem
+            if ltp < self._roll_trigger_prem and leg.security_id not in self._rolling:
+                await self._roll_leg(leg)
+                return
+
             if ltp <= entry * self._take_profit_pct:
-                self.ctx.log.info("take_profit", sid=sid, ltp=ltp, entry=entry)
+                self._emit_event(StrangleEventType.TAKE_PROFIT,
+                    sid=sid, ltp=ltp, entry=entry,
+                    opt_type=leg.opt_type, strike=leg.strike)
                 await self._close_short_leg(leg, "take_profit")
                 await self._close_matching_hedge(leg)
                 return
@@ -323,11 +405,21 @@ class DirectionalStrangle(Strategy):
                     await self._place(sid, leg.segment, "BUY", close_lots)
                     leg.lots -= close_lots
                     leg.half_stopped = True
-                    self.ctx.log.info("stop_half", sid=sid, ltp=ltp, remaining=leg.lots)
-                    self.log_decision("stop_half", "premium_stop_half",
-                                      security_id=sid, ltp=ltp, remaining_lots=leg.lots)
+                    self._emit_event(StrangleEventType.STOP_HALF,
+                        sid=sid, ltp=ltp, remaining=leg.lots,
+                        opt_type=leg.opt_type, strike=leg.strike)
+                    # Record stop gate for this side
+                    self._stop_gate[leg.opt_type] = {
+                        "exit_px": ltp, "sid": sid, "n_below": 0,
+                    }
             if ltp >= entry * (1 + self._pct_stop_all):
-                self.ctx.log.info("stop_all", sid=sid, ltp=ltp, entry=entry)
+                self._emit_event(StrangleEventType.STOP_ALL,
+                    sid=sid, ltp=ltp, entry=entry,
+                    opt_type=leg.opt_type, strike=leg.strike)
+                # Record stop gate before closing
+                self._stop_gate[leg.opt_type] = {
+                    "exit_px": ltp, "sid": sid, "n_below": 0,
+                }
                 await self._close_short_leg(leg, "premium_stop")
                 await self._close_matching_hedge(leg)
 
@@ -361,6 +453,80 @@ class DirectionalStrangle(Strategy):
         }
 
     # ------------------------------------------------------------------ #
+    # Canonical event emission                                             #
+    # ------------------------------------------------------------------ #
+
+    def _emit_event(self, event_type: str, **fields: Any) -> None:
+        """Emit a structured canonical event to structlog, daily log file, and activity buffer."""
+        ist_now = datetime.now(tz=_IST).isoformat()
+        record: dict[str, Any] = {
+            "event_type": event_type,
+            "strategy_id": self.strategy_id,
+            "snapshot_date": self._day_key.isoformat() if self._day_key else None,
+            "ist_time": ist_now,
+            "underlying": self.underlying,
+            "score": round(self._last_score, 3),
+            "bucket": self._current_bucket,
+            **fields,
+        }
+        self.ctx.log.info(event_type, **{k: str(v) if isinstance(v, Decimal) else v
+                                         for k, v in record.items()})
+        if self._slog:
+            self._slog.write(record)
+        self._activity.append(record)
+
+    def _emit_leg_status(self) -> None:
+        """Emit a leg_status snapshot after each bias_evaluated."""
+        legs = []
+        for lg in self._short_legs + self._hedge_legs:
+            ltp = self._ltp_cache.get(lg.security_id)
+            mtm: float | None = None
+            if ltp is not None:
+                entry = float(lg.entry_price)
+                mtm = round(
+                    (ltp - entry if lg.is_hedge else entry - ltp) * lg.lots * self._lot_size,
+                    2,
+                )
+            legs.append({
+                "sid": lg.security_id,
+                "opt_type": lg.opt_type,
+                "strike": lg.strike,
+                "lots": lg.lots,
+                "entry_price": float(lg.entry_price),
+                "ltp": ltp,
+                "mtm": mtm,
+                "is_hedge": lg.is_hedge,
+            })
+        self._emit_event(StrangleEventType.LEG_STATUS, legs=legs)
+
+    # ------------------------------------------------------------------ #
+    # Stop-gate management                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _update_stop_gates(self) -> None:
+        """Called on each 5m bar: update cooldown counters; clear gates when safe to re-enter."""
+        to_clear: list[str] = []
+        for opt_type, gate in self._stop_gate.items():
+            ltp = self._ltp_cache.get(gate["sid"])
+            if ltp is None:
+                self._emit_event(StrangleEventType.STOP_GATE_WAIT,
+                    opt_type=opt_type, reason="no_ltp")
+                continue
+            if ltp < gate["exit_px"]:
+                gate["n_below"] += 1
+                if gate["n_below"] >= 3:
+                    to_clear.append(opt_type)
+                    continue
+            else:
+                gate["n_below"] = 0
+            self._emit_event(StrangleEventType.STOP_GATE_WAIT,
+                opt_type=opt_type, exit_px=gate["exit_px"], ltp=ltp,
+                n_below=gate["n_below"])
+        for opt_type in to_clear:
+            del self._stop_gate[opt_type]
+            self.ctx.log.info("stop_gate_cleared", opt_type=opt_type)
+
+    # ------------------------------------------------------------------ #
     # Bias input assembly                                                  #
     # ------------------------------------------------------------------ #
 
@@ -374,8 +540,18 @@ class DirectionalStrangle(Strategy):
         pivot = ind.pivots(self.sid, "5m") if ind else None
         cam_daily = _to_cam(pivot)
 
+        # Weekly Camarilla: read from "1w" pivot snapshot; returns None until 1w bar support added
+        weekly_pivot = ind.pivots(self.sid, "1w") if ind else None
+        cam_weekly = _to_cam(weekly_pivot)
+        if cam_weekly is None and not self._cam_weekly_warned:
+            self._cam_weekly_warned = True
+            self.ctx.log.debug("cam_weekly_missing", reason="1w_bar_not_supported_yet")
+
         pl = ind.period_levels(self.sid, "5m") if ind else None
         vwap_s = ind.vwap(self.sid, "5m") if ind else None
+
+        # PCR: no indicator engine method yet; keep None (vote is skipped by bias engine)
+        pcr: float | None = None
 
         return BiasInputs(
             spot=spot,
@@ -383,7 +559,7 @@ class DirectionalStrangle(Strategy):
             ema_15m=ema_15m,
             ema_5m=ema_5m,
             cam_daily=cam_daily,
-            cam_weekly=None,
+            cam_weekly=cam_weekly,
             pdh=pl.pdh if pl else None,
             pdl=pl.pdl if pl else None,
             pwh=pl.pwh if pl else None,
@@ -391,7 +567,7 @@ class DirectionalStrangle(Strategy):
             vwap=vwap_s.vwap if vwap_s else None,
             orb_high=self._orb_high,
             orb_low=self._orb_low,
-            pcr=None,
+            pcr=pcr,
             vix_now=self._vix_now if self._vix_gate_enabled else None,
             vix_day_open=self._vix_day_open if self._vix_gate_enabled else None,
             vix_day_high=self._vix_day_high if self._vix_gate_enabled else None,
@@ -409,6 +585,12 @@ class DirectionalStrangle(Strategy):
             await self._open_short(spot, "CE", ce_lots)
 
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
+        # Stop-gate check: block re-entry for 3 bars after a stop on this side
+        if opt_type in self._stop_gate:
+            self._emit_event(StrangleEventType.STOP_GATE_WAIT,
+                opt_type=opt_type, reason="open_blocked")
+            return
+
         if self.ctx.session_maker is None:
             return
 
@@ -441,9 +623,9 @@ class DirectionalStrangle(Strategy):
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px,
         ))
-        self.ctx.log.info("short_opened", opt_type=opt_type, strike=strike, lots=lots, sid=sid)
-        self.log_decision("open", "bucket_entry",
-                          opt_type=opt_type, strike=strike, lots=lots, security_id=sid)
+        self._emit_event(StrangleEventType.LEG_OPEN,
+            sid=sid, opt_type=opt_type, strike=strike,
+            lots=lots, entry_price=float(avg_px), is_hedge=False)
 
         if self._hedge_enabled:
             await self._open_hedge(opt_type, spot, lots, segment)
@@ -502,7 +684,9 @@ class DirectionalStrangle(Strategy):
             security_id=h_sid, segment=segment, opt_type=opt_type,
             strike=h_strike, lots=lots, entry_price=avg_px, is_hedge=True,
         ))
-        self.ctx.log.info("hedge_opened", opt_type=opt_type, strike=h_strike, sid=h_sid)
+        self._emit_event(StrangleEventType.LEG_OPEN,
+            sid=h_sid, opt_type=opt_type, strike=h_strike,
+            lots=lots, entry_price=float(avg_px), is_hedge=True)
 
     # ------------------------------------------------------------------ #
     # Momentum long — ITM+1 on COMPLETE_BULL / COMPLETE_BEAR             #
@@ -555,12 +739,10 @@ class DirectionalStrangle(Strategy):
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,
         ))
-        self.ctx.log.info(
-            "momentum_opened", opt_type=opt_type, strike=strike, lots=lots,
-            sid=sid, premium=premium, target=self._momentum_premium_target,
-        )
-        self.log_decision("open", "momentum_itm",
-                          opt_type=opt_type, strike=strike, lots=lots, security_id=sid)
+        self._emit_event(StrangleEventType.LEG_OPEN,
+            sid=sid, opt_type=opt_type, strike=strike,
+            lots=lots, entry_price=float(avg_px), is_momentum=True,
+            premium=premium, target=self._momentum_premium_target)
 
     async def _maybe_close_momentum(self, score: float) -> None:
         """Close all momentum longs when |score| falls below threshold."""
@@ -579,8 +761,64 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
-        self.ctx.log.info("momentum_closed", sid=leg.security_id, reason=reason)
-        self.log_decision(reason, "momentum_closed", security_id=leg.security_id)
+        self._emit_event(StrangleEventType.LEG_CLOSE,
+            sid=leg.security_id, opt_type=leg.opt_type, reason=reason, is_momentum=True)
+
+    # ------------------------------------------------------------------ #
+    # Rollup                                                               #
+    # ------------------------------------------------------------------ #
+
+    async def _roll_leg(self, leg: OpenLeg) -> None:
+        """Close a decayed short (LTP < roll_trigger_prem) and reopen at same OTM level."""
+        sid = leg.security_id
+        self._rolling.add(sid)
+        old_strike = leg.strike
+        old_opt_type = leg.opt_type
+        old_lots = leg.lots
+        try:
+            await self._close_short_leg(leg, "roll")
+            await self._close_matching_hedge(leg)
+
+            spot = self._last_spot
+            if spot is None or self.ctx.session_maker is None:
+                self._emit_event(StrangleEventType.ROLLED,
+                    opt_type=old_opt_type, old_strike=old_strike,
+                    lots=old_lots, result="skipped_no_spot")
+                return
+
+            # Check if the new OTM strike has sufficient premium before opening
+            async with self.ctx.session_maker() as session:
+                new_inst = await resolve_otm_option(
+                    session, underlying=self.underlying, spot=spot,
+                    option_type=old_opt_type, otm_steps=self._otm_steps,
+                    strike_step=self._strike_step,
+                )
+            if new_inst is None:
+                self._emit_event(StrangleEventType.ROLLED,
+                    opt_type=old_opt_type, old_strike=old_strike,
+                    lots=old_lots, result="no_instrument")
+                return
+
+            ltp, _ = (
+                await self.ctx.market.ltp_with_age(new_inst.security_id)
+                if self.ctx.market else (None, None)
+            )
+            premium = float(ltp) if ltp and ltp > 0 else 0.0
+            new_strike = float(new_inst.strike or 0)
+
+            if premium < self._roll_target_min_prem:
+                self._emit_event(StrangleEventType.ROLLED,
+                    opt_type=old_opt_type, old_strike=old_strike, new_strike=new_strike,
+                    lots=old_lots, new_prem=round(premium, 2), result="skipped_low_prem")
+                return
+
+            # Open the new short (stop-gate check is inside _open_short)
+            await self._open_short(spot, old_opt_type, old_lots)
+            self._emit_event(StrangleEventType.ROLLED,
+                opt_type=old_opt_type, old_strike=old_strike, new_strike=new_strike,
+                lots=old_lots, new_prem=round(premium, 2), result="ok")
+        finally:
+            self._rolling.discard(sid)
 
     # ------------------------------------------------------------------ #
     # Leg close                                                            #
@@ -597,7 +835,12 @@ class DirectionalStrangle(Strategy):
         self._hedge_legs.clear()
         self._momentum_legs.clear()
         self._current_bucket = None
-        self.log_decision(reason, "all_legs_closed")
+        self._stop_gate.clear()
+        if reason in ("square_off", "day_loss_cap"):
+            event_type = StrangleEventType.SQUARE_OFF if reason == "square_off" else StrangleEventType.DAY_LOSS_CAP
+            self._emit_event(event_type, reason=reason)
+        else:
+            self._emit_event(StrangleEventType.LEG_CLOSE, reason=reason, all_legs=True)
 
     async def _close_shorts_and_hedges(self, reason: str) -> None:
         for leg in list(self._short_legs):
@@ -617,8 +860,9 @@ class DirectionalStrangle(Strategy):
         close_lots = abs(net_qty) // self._lot_size
         if close_lots > 0:
             await self._place(leg.security_id, leg.segment, "BUY", close_lots)
-        self.ctx.log.info("short_closed", sid=leg.security_id, reason=reason)
-        self.log_decision(reason, "short_closed", security_id=leg.security_id)
+        self._emit_event(StrangleEventType.LEG_CLOSE,
+            sid=leg.security_id, opt_type=leg.opt_type,
+            strike=leg.strike, reason=reason)
         self._short_legs = [l for l in self._short_legs if l is not leg]
 
     async def _close_hedge_leg(self, leg: OpenLeg, reason: str) -> None:
@@ -630,13 +874,79 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
-        self.ctx.log.info("hedge_closed", sid=leg.security_id, reason=reason)
+        self._emit_event(StrangleEventType.LEG_CLOSE,
+            sid=leg.security_id, opt_type=leg.opt_type,
+            strike=leg.strike, reason=reason, is_hedge=True)
         self._hedge_legs = [l for l in self._hedge_legs if l is not leg]
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
         matching = [h for h in self._hedge_legs if h.opt_type == short_leg.opt_type]
         for h in matching:
             await self._close_hedge_leg(h, "tp_hedge_close")
+
+    # ------------------------------------------------------------------ #
+    # Execution console state                                              #
+    # ------------------------------------------------------------------ #
+
+    async def state(self) -> dict[str, Any]:
+        """Return current execution state for the REST console API."""
+        day_realized = await self._day_realized()
+        day_unrealized = self._compute_unrealized()
+        legs = []
+        for lg in self._short_legs + self._hedge_legs + self._momentum_legs:
+            ltp = self._ltp_cache.get(lg.security_id)
+            mtm: float | None = None
+            if ltp is not None:
+                entry = float(lg.entry_price)
+                if lg.is_hedge or lg.is_momentum:
+                    mtm = round((ltp - entry) * lg.lots * self._lot_size, 2)
+                else:
+                    mtm = round((entry - ltp) * lg.lots * self._lot_size, 2)
+            legs.append({
+                "security_id": lg.security_id,
+                "opt_type": lg.opt_type,
+                "strike": lg.strike,
+                "lots": lg.lots,
+                "entry_price": float(lg.entry_price),
+                "ltp": ltp,
+                "mtm": mtm,
+                "is_hedge": lg.is_hedge,
+                "is_momentum": lg.is_momentum,
+            })
+        day_realized_f = float(day_realized)
+        return {
+            "mode": self._mode,
+            "strategy_id": self.strategy_id,
+            "bucket": self._current_bucket,
+            "score": round(self._last_score, 3),
+            "legs": legs,
+            "day_realized": day_realized_f,
+            "day_unrealized": day_unrealized,
+            "day_pnl": round(day_realized_f + day_unrealized, 2),
+            "done_for_day": self._done_for_day,
+            "vix_now": self._vix_now,
+            "n_open_legs": len(self._short_legs) + len(self._hedge_legs) + len(self._momentum_legs),
+            "n_open_shorts": len(self._short_legs),
+            "n_open_hedges": len(self._hedge_legs),
+            "n_open_momentum": len(self._momentum_legs),
+            "started_at": self._started_at.isoformat(),
+        }
+
+    def _compute_unrealized(self) -> float:
+        total = 0.0
+        for lg in self._short_legs:
+            ltp = self._ltp_cache.get(lg.security_id)
+            if ltp is not None:
+                total += (float(lg.entry_price) - ltp) * lg.lots * self._lot_size
+        for lg in self._hedge_legs:
+            ltp = self._ltp_cache.get(lg.security_id)
+            if ltp is not None:
+                total += (ltp - float(lg.entry_price)) * lg.lots * self._lot_size
+        for lg in self._momentum_legs:
+            ltp = self._ltp_cache.get(lg.security_id)
+            if ltp is not None:
+                total += (ltp - float(lg.entry_price)) * lg.lots * self._lot_size
+        return round(total, 2)
 
     # ------------------------------------------------------------------ #
     # Day management                                                       #
@@ -653,6 +963,8 @@ class DirectionalStrangle(Strategy):
             self._vix_recent.clear()
             self._day_baseline.clear()
             self._touched_sids.clear()
+            self._stop_gate.clear()
+            self._cam_weekly_warned = False
 
     async def _day_realized(self) -> Decimal:
         total = Decimal("0")

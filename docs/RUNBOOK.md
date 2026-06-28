@@ -1335,3 +1335,168 @@ docker exec -it pdp-mongo mongosh pdp --eval "db.paper_journal.find().sort({date
 # Walk-forward IS/OOS optimizer (reference only — 5yr full-window already validated)
 task backtest:strangle:wf -- --from 2021-09-01 --to 2026-06-25 --out logs/wf.csv
 ```
+
+---
+
+## 18. Strangle — Paper Mode Startup Checklist
+
+Run this checklist before every paper trading session.
+
+### 18.1 Pre-market (before 09:15 IST)
+
+```powershell
+# 1. Ensure the DB stack is running
+task db:up
+
+# 2. Apply any pending migrations
+task db:migrate
+
+# 3. Start the API (paper mode by default — no LIVE=1)
+task dev
+```
+
+Confirm the strategy loaded correctly:
+```powershell
+curl http://localhost:8000/api/v1/strategies
+# Expect: [{"id": "directional_strangle", "status": "RUNNING", "dropped_ticks": 0, ...}]
+```
+
+### 18.2 Confirm data freshness
+
+```powershell
+# Check latest NIFTY bar
+curl "http://localhost:8000/api/v1/bars/latest?security_id=13&segment=IDX_I"
+# Expect: today's date in ts field (or Friday if weekend)
+```
+
+### 18.3 Confirm first 5m bar (at 10:15 IST)
+
+After 10:15, the strategy emits `bias_evaluated` on each 5m close. Confirm it's running:
+```powershell
+curl http://localhost:8000/api/v1/strangle/status
+# Expect: {"mode": "paper", "bucket": "...", "score": 0.xxx, "done_for_day": false, ...}
+```
+
+Read the live activity log:
+```powershell
+curl "http://localhost:8000/api/v1/strangle/activity?n=5"
+# The first entry (newest) should be a bias_evaluated or leg_status event
+```
+
+### 18.4 Environment variables for paper mode
+
+| Variable | Value | Notes |
+|----------|-------|-------|
+| `LIVE` | _(unset or 0)_ | Must NOT be set to 1 for paper mode |
+| `BROKER` | `paper` | Default; can also be set explicitly |
+| `DHAN_CLIENT_ID` | _(optional)_ | Set for live market feed; else mock source |
+| `DHAN_ACCESS_TOKEN` | _(optional)_ | Same as above |
+
+---
+
+## 19. Strangle — Weekly Parity Check Procedure
+
+Run this after any live trading week to verify paper P&L matches backtest replay.
+
+### 19.1 Run backtest for the same period
+
+```powershell
+# Replace YYYY-MM-DD with the Monday of the week
+task backtest:strangle -- --from YYYY-MM-DD --to YYYY-MM-DD --trace
+```
+
+This writes `backtest/runs/<run_id>/days/<date>/status.log` with one BarStatus line per bar.
+
+### 19.2 Compare with live bias_evaluated events
+
+The live daily log is at `backend/logs/directional_strangle/<YYYY-MM-DD>.log`.
+
+```powershell
+# Extract live bias_evaluated lines
+grep '"event_type": "bias_evaluated"' backend/logs/directional_strangle/YYYY-MM-DD.log | python -c "
+import sys, json
+for line in sys.stdin:
+    d = json.loads(line)
+    print(d['ist_time'], d['bucket'], round(d['score'], 3), dict(sorted(d.get('votes', {}).items())))
+"
+
+# Compare with backtest status.log
+cat backtest/runs/<run_id>/days/YYYY-MM-DD/status.log | head -30
+```
+
+### 19.3 What to look for
+
+| Match | Verdict |
+|-------|---------|
+| Bucket agrees on 90%+ of bars | Parity OK |
+| Score differs by < 0.05 per bar | Minor input variance (normal) |
+| Bucket differs by > 10% of bars | Investigate; check missing signals (cam_weekly, pcr) |
+| Trades fire at same bars | Execution matches |
+| P&L within ±5% of backtest | Expected slippage |
+
+### 19.4 Common parity gaps
+
+| Gap | Root cause | Fix |
+|-----|-----------|-----|
+| `cam_weekly` always None in live | 1w bar not yet supported | Track in `claude-ops-agents` chunk |
+| `pcr` always None in live | No indicator engine method | Track in `claude-ops-agents` chunk |
+| Score differs by ~0.1 | ORB from 15m vs exact 9:15 bar | Acceptable |
+
+---
+
+## 20. Strangle — Canonical Event Types Reference
+
+Every significant strategy action emits a structured JSON event to both structlog and the
+daily log file (`backend/logs/directional_strangle/<YYYY-MM-DD>.log`).
+
+### 20.1 Common base fields (on every event)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_type` | str | One of the types below |
+| `strategy_id` | str | Always `directional_strangle` |
+| `snapshot_date` | str | IST date of the current session (YYYY-MM-DD) |
+| `ist_time` | str | IST ISO timestamp of emission |
+| `underlying` | str | Always `NIFTY` |
+| `score` | float | Current bias score (−1 to +1) |
+| `bucket` | str or None | Current bucket (e.g. `most_bull`) |
+
+### 20.2 Event type catalogue
+
+| Event type | When emitted | Key extra fields |
+|-----------|-------------|-----------------|
+| `bias_evaluated` | Every 5m bar (trading window) | `votes`, `gated`, `reason`, `shorts`, `momentum` |
+| `leg_status` | After every `bias_evaluated` | `legs[]` (sid, opt_type, strike, lots, entry_price, ltp, mtm, is_hedge) |
+| `leg_open` | Short or hedge opened | `sid`, `opt_type`, `strike`, `lots`, `entry_price`, `is_hedge`, `is_momentum` |
+| `leg_close` | Short, hedge, or momentum closed | `sid`, `opt_type`, `strike`, `reason` |
+| `take_profit` | TP at 50% premium decay | `sid`, `ltp`, `entry`, `opt_type`, `strike` |
+| `stop_half` | 30% premium rise — partial close | `sid`, `ltp`, `remaining`, `opt_type`, `strike` |
+| `stop_all` | 40% premium rise — full close | `sid`, `ltp`, `entry`, `opt_type`, `strike` |
+| `day_loss_cap` | Day P&L ≤ −Rs 15,000 | `day_pnl` |
+| `rolled` | Premium decayed < Rs 20; reopen | `opt_type`, `old_strike`, `new_strike`, `lots`, `new_prem`, `result` |
+| `stop_gate_wait` | Re-entry blocked after stop | `opt_type`, `exit_px`, `ltp`, `n_below` |
+| `bucket_change` | Bias bucket shifted | `old_bucket`, `new_bucket` |
+| `square_off` | 15:10 IST hard flatten | `reason` |
+
+### 20.3 Reading the daily log
+
+```powershell
+# Pretty-print today's events
+python -c "
+import json, sys
+with open('backend/logs/directional_strangle/YYYY-MM-DD.log') as f:
+    for line in f:
+        e = json.loads(line)
+        t = e.get('ist_time', '')[-8:]  # HH:MM:SS
+        print(f\"{t}  {e['event_type']:<20}  {e.get('bucket',''):>12}  score={e.get('score', '')}\")
+"
+```
+
+### 20.4 Invoke the Claude review skill after a session
+
+```
+/strangle:review
+```
+
+The skill reads today's log, parses all events, and produces: session summary, bias
+timeline, per-signal vote analysis, trades table, and improvement suggestions.

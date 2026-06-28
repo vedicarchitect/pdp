@@ -5,6 +5,35 @@ from typing import Any
 import msgspec
 
 
+class StrangleLeg(msgspec.Struct):
+    security_id: str
+    opt_type: str
+    strike: float
+    lots: int
+    entry_price: float
+    ltp: float | None
+    mtm: float | None
+    is_hedge: bool
+    is_momentum: bool
+
+
+class StrangleState(msgspec.Struct):
+    mode: str
+    strategy_id: str
+    bucket: str | None
+    score: float
+    day_realized: float
+    day_unrealized: float
+    day_pnl: float
+    done_for_day: bool
+    vix_now: float | None
+    n_open_legs: int
+    n_open_shorts: int
+    n_open_hedges: int
+    n_open_momentum: int
+    started_at: str | None
+
+
 class WatchlistEntryOut(msgspec.Struct):
     security_id: str
     exchange_segment: str
