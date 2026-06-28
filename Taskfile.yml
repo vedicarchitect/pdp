@@ -15,8 +15,14 @@ tasks:
     cmds:
       - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
 
+  trade:
+    desc: "Pre-market checks + live monitor for 3-index paper trading (requires API running). Args: -- [check|monitor]"
+    dir: backend
+    cmds:
+      - uv run python scripts/trade_day.py {{.CLI_ARGS}}
+
   monitor:
-    desc: Run the live strategy monitor (Perl, read-only Redis+API client)
+    desc: Run the legacy Perl strategy monitor (Redis+API)
     dir: backend
     cmds:
       - perl scripts/monitor.pl
