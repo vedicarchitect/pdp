@@ -77,23 +77,27 @@ class TickRouter:
         ltp_str = str(tick.ltp)
         sid = tick.security_id
 
-        # 1 — hot LTP cache + timestamp (TTL=5s so stale data auto-expires)
-        await redis.set(f"ltp:{sid}", ltp_str, ex=5)
-        await redis.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
+        # ⚡ Bolt Optimization: Use pipeline to batch Redis commands and reduce network roundtrips
+        # on the high-frequency hot path.
+        async with redis.pipeline(transaction=False) as pipe:
+            # 1 — hot LTP cache + timestamp (TTL=5s so stale data auto-expires)
+            pipe.set(f"ltp:{sid}", ltp_str, ex=5)
+            pipe.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
 
-        # 2 — pub/sub fan-out for downstream consumers
-        tick_payload = json.dumps(
-            {
-                "type": "tick",
-                "security_id": sid,
-                "exchange_segment": tick.exchange_segment,
-                "ltp": ltp_str,
-                "volume": tick.volume,
-                "oi": tick.oi,
-                "ltt": tick.ltt.isoformat(),
-            }
-        )
-        await redis.publish(f"tick.{sid}", tick_payload)
+            # 2 — pub/sub fan-out for downstream consumers
+            tick_payload = json.dumps(
+                {
+                    "type": "tick",
+                    "security_id": sid,
+                    "exchange_segment": tick.exchange_segment,
+                    "ltp": ltp_str,
+                    "volume": tick.volume,
+                    "oi": tick.oi,
+                    "ltt": tick.ltt.isoformat(),
+                }
+            )
+            pipe.publish(f"tick.{sid}", tick_payload)
+            await pipe.execute()
 
         # 2.5 — alert evaluator (evaluate price conditions on new tick)
         if self._alert_evaluator is not None:
