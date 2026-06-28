@@ -15,13 +15,17 @@ automated / scheduled counterparts and backend API endpoints that feed them.
 
 ## What Changes
 
-- **Backend log-export API**: `GET /api/v1/strangle/log?date=YYYY-MM-DD` serves the daily
-  structured log file as JSON lines so Claude agents can read it without filesystem access.
+- **Log-export API** *(superseded by chunk 5)*: `GET /api/v1/strangle/log?date=YYYY-MM-DD`
+  is no longer needed. Chunk 5 (`trade-analysis-feedback-loop`) ships every log to OpenSearch
+  in realtime. Agents now use:
+  - `GET /api/v1/analysis/session?date=YYYY-MM-DD` — bar-anchored session narrative
+  - `GET /api/v1/observability/logs?source=strategy&date=YYYY-MM-DD` — full log search
+  - `backend/scripts/analysis/strangle_review_prompt.md` — Claude review prompt template
 - **Health-check API** (`GET /api/v1/health/detail`): structured JSON covering DB, Mongo,
   broker sync, strategy status, backfill freshness — machine-readable for agent consumption.
 - **Scheduled agent hooks**: Claude Code `CronCreate` invocations for:
   - Pre-market (9:00 IST weekdays): warmup check + data freshness alert
-  - EOD (15:45 IST weekdays): auto-trigger `/strangle:review` for today
+  - EOD (15:45 IST weekdays): auto-trigger `/strangle:review` using session narrative from OS
   - Weekly (Saturday 10:00 IST): auto-trigger `/pdp:insights` for the week
 - **Notification hooks** in `settings.local.json`: emit PushNotification on broker sync
   failure, recon mismatch, or dropped_ticks spike.
@@ -40,9 +44,8 @@ _(none)_
 
 ## Impact
 
-- **`backend/pdp/strategy/routes.py`**: `GET /api/v1/strangle/log`
 - **`backend/pdp/main.py`**: `GET /api/v1/health/detail`
 - **`.claude/settings.local.json`**: notification hooks
 - **`.claude/skills/pdp-recon/SKILL.md`**: new `/pdp:recon` skill
 - **Scheduled agents**: created via `CronCreate` (Claude Code cloud agents)
-- **Depends on**: `strangle-execution-console` (chunk 4) for canonical log schema
+- **Depends on**: `strangle-execution-console` (chunk 4) for canonical log schema; `trade-analysis-feedback-loop` (chunk 5) for observability API + session narrative (✓ done)

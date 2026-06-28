@@ -117,6 +117,20 @@ tasks:
     cmds:
       - docker compose --profile tools up -d pgadmin
 
+  # ── Observability: unified OpenSearch log pipeline ───────────────────────────
+  search:up:
+    desc: Start OpenSearch (:9200) + Dashboards (:5601) for the log pipeline
+    dir: infra/compose
+    cmds:
+      - docker compose up -d opensearch
+      - docker compose --profile tools up -d opensearch-dashboards
+
+  search:init:
+    desc: Apply index templates + import the dashboards-as-code saved objects
+    dir: backend
+    cmds:
+      - uv run python -m pdp.observability.init
+
   # ── Data backfill ────────────────────────────────────────────────────────────
   # Pass args after -- e.g:
   #   task backfill:nifty -- --from 2026-02-09 --to 2026-06-12

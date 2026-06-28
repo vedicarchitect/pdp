@@ -44,6 +44,26 @@ def _safe_float(v: Any) -> float | None:
         return None
 
 
+def _ship_backtest(kind: str, doc: dict[str, Any]) -> None:
+    """Dual-sink a backtest document to OpenSearch (no-op when indexer inactive — e.g. scripts)."""
+    from pdp.observability.indexer import get_active_indexer
+
+    indexer = get_active_indexer()
+    if indexer is None:
+        return
+    from pdp.observability import sinks
+
+    if kind == "run":
+        d, did = sinks.backtest_run_doc(doc)
+        indexer.enqueue(sinks.BACKTEST_RUNS, d, did)
+    elif kind == "day":
+        d, did = sinks.backtest_day_doc(doc)
+        indexer.enqueue(sinks.BACKTEST_DAYS, d, did)
+    elif kind == "trade":
+        d, did = sinks.backtest_trade_doc(doc)
+        indexer.enqueue(sinks.BACKTEST_TRADES, d, did)
+
+
 # ── Document builders ─────────────────────────────────────────────────────────
 
 
@@ -303,6 +323,7 @@ class BacktestStore:
             upsert=True,
         )
         log.info("backtest_run_upserted", run_id=doc["run_id"], kind=doc.get("kind"))
+        _ship_backtest("run", doc)
 
     def upsert_days(self, docs: list[dict[str, Any]]) -> int:
         if not docs:
@@ -313,6 +334,7 @@ class BacktestStore:
                 {"$set": doc},
                 upsert=True,
             )
+            _ship_backtest("day", doc)
         return len(docs)
 
     def upsert_folds(self, docs: list[dict[str, Any]]) -> int:
@@ -335,6 +357,7 @@ class BacktestStore:
                 {"$set": doc},
                 upsert=True,
             )
+            _ship_backtest("trade", doc)
         return len(docs)
 
     # -- high-level ingest ------------------------------------------------------ #

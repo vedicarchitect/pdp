@@ -30,6 +30,19 @@ def _now_ist() -> datetime:
     return datetime.now(tz=_IST)
 
 
+def _ship_event(record: dict) -> None:
+    """Dual-sink the canonical event to OpenSearch (no-op when the indexer is inactive)."""
+    from pdp.observability.indexer import get_active_indexer
+
+    indexer = get_active_indexer()
+    if indexer is None:
+        return
+    from pdp.observability.sinks import STRANGLE_EVENTS, strangle_event_doc
+
+    doc, doc_id = strangle_event_doc(record)
+    indexer.enqueue(STRANGLE_EVENTS, doc, doc_id)
+
+
 class StrategyDailyLog:
     """Append-mode daily log: logs/<strategy_id>/<YYYY-MM-DD>.log (IST date).
 
@@ -56,6 +69,7 @@ class StrategyDailyLog:
         self._ensure_open()
         if self._handle is not None:
             self._handle.write(json.dumps(record, default=str) + "\n")
+        _ship_event(record)
 
     def close(self) -> None:
         self._do_close()

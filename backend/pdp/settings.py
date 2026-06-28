@@ -158,6 +158,21 @@ class Settings(BaseSettings):
 
     backtest_commission: BacktestCommissionSettings = BacktestCommissionSettings()
 
+    # ── Unified OpenSearch log pipeline (trade-analysis-feedback-loop capability) ──
+    # Every backend + Flutter UI log auto-ships to OpenSearch in realtime through one
+    # non-blocking indexer, segregated by `source`. Disabled by default; the URL is the
+    # only thing that changes between local compose and AWS OpenSearch Service (chunk 16).
+    OPENSEARCH_ENABLED: bool = False
+    OPENSEARCH_URL: str = "http://localhost:9200"
+    OPENSEARCH_USER: str = ""
+    OPENSEARCH_PASSWORD: str = ""
+    OPENSEARCH_VERIFY_CERTS: bool = False
+    OPENSEARCH_INDEX_PREFIX: str = "pdp"
+    OPENSEARCH_BULK_INTERVAL: float = 2.0   # seconds between background bulk flushes
+    OPENSEARCH_BULK_MAX: int = 500          # flush early once this many docs are queued
+    OPENSEARCH_QUEUE_MAX: int = 10000       # drop-on-full beyond this (never blocks callers)
+    OPENSEARCH_LOG_LEVEL: str = "INFO"      # min structlog level shipped to pdp-logs-*
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -9,7 +9,7 @@ Full stack/layout: [`openspec/project.md`](openspec/project.md) · **How to run*
 |---------|------|---------------|
 | `backend/` | All Python: FastAPI app (`pdp/`), backtests, migrations, scripts, tests | [`backend/CLAUDE.md`](backend/CLAUDE.md) |
 | `app/` | Flutter (Dart) trading app — Riverpod + fl_chart | [`app/CLAUDE.md`](app/CLAUDE.md) |
-| `infra/` | Ops + infra-as-code: `compose/`, `launchers/`, `loadtest/`, reserved `terraform/`+`deploy/` | — |
+| `infra/` | Ops + infra-as-code: `compose/`, `opensearch/` (dashboards NDJSON), `launchers/`, `loadtest/`, reserved `terraform/`+`deploy/` | — |
 | `docs/` | Long-form docs (`ARCHITECTURE.md`, `RUNBOOK.md`, feature docs) | [`docs/CLAUDE.md`](docs/CLAUDE.md) |
 | `openspec/` | Specs (source of truth) + in-flight changes | [`openspec/project.md`](openspec/project.md) |
 
@@ -42,9 +42,9 @@ Each dev activity loads **only** the files it needs:
 
 ## Program roadmap (chunks = OpenSpec changes)
 
-Foundation **1** `repo-restructure-and-claude-arch` (this). Then:
-**2** `broker-account-sync` · **3** `broker-reports-vault` · **4** `strangle-execution-console` ·
-**5** `trade-analysis-feedback-loop` · **6** `flutter-dashboard` · **7** `flutter-screener` ·
+Foundation **1** `repo-restructure-and-claude-arch` (✓ done). Then:
+**2** `broker-account-sync` (✓ done) · **3** `broker-reports-vault` · **4** `strangle-execution-console` (42/43 — owner paper-run pending) ·
+**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) · **6** `flutter-dashboard` · **7** `flutter-screener` ·
 **8** `flutter-backtest-console` · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
 **11** `flutter-portfolio-advisory` · **12** `flutter-market-intel` · **13** `flutter-event-feed` ·
 **14** `flutter-management-hub` · **15** `multi-broker-kite` · **16** `cloud-deploy-aws`.
@@ -59,5 +59,6 @@ task test / lint / fmt / typecheck            # ruff/pytest/pyright in backend/
 task backtest:strangle -- --days 90           # directional-strangle backtest
 task backfill:nifty -- --from YYYY-MM-DD [--only-missing]   # + :banknifty / :sensex / :options
 task app:run / app:live / app:test            # Flutter (Windows desktop)
+task search:up / search:init                  # OpenSearch + Dashboards (:9200 / :5601)
 task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
 ```

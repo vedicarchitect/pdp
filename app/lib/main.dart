@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'core/observability/log_shipper.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 
 void main() {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    LogShipper.instance.ship(
+      level: 'error',
+      event: details.exceptionAsString(),
+      screen: 'flutter_error',
+      context: {'library': details.library ?? ''},
+    );
+  };
   runApp(const ProviderScope(child: TradingApp()));
 }
 

@@ -13,6 +13,8 @@ REQUEST_ID_HEADER = "X-Request-ID"
 
 
 def configure_logging(level: str = "INFO") -> None:
+    from pdp.observability.processor import opensearch_sink
+
     logging.basicConfig(format="%(message)s", level=level.upper())
     structlog.configure(
         processors=[
@@ -21,6 +23,9 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            # Tier-A: ship every record to OpenSearch (no-op until the indexer is active).
+            # Runs before JSONRenderer so it sees the structured dict, not a string.
+            opensearch_sink,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
@@ -37,7 +42,8 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
-        structlog.contextvars.bind_contextvars(request_id=request_id)
+        # `source=api` segregates request-path logs from background-service logs in pdp-logs-*.
+        structlog.contextvars.bind_contextvars(request_id=request_id, source="api")
         try:
             response = await call_next(request)
         finally:

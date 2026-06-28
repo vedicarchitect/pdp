@@ -18,6 +18,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 | ML signals | `pdp/ml/`, `scripts/ml_train.py` |
 | Migrations | `alembic/`, `alembic.ini` |
 | Broker account/report sync (chunk 2–3) | `pdp/portfolio/`, `pdp/orders/`, `pdp/db/`, `dhanhq` skill |
+| Unified log pipeline / OpenSearch | `pdp/observability/` (+ `CLAUDE.md` there), `pdp/logging.py`, `pdp/settings.py` (`OPENSEARCH_*`), `infra/compose/docker-compose.yml` |
 
 ## Module map (`backend/pdp/*` — each folder has its own CLAUDE.md)
 
@@ -47,6 +48,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 | `pdp/strategies/` | Strategy implementations |
 | `pdp/strategy/` | StrategyHost, BaseStrategy ABC |
 | `pdp/warehouse/` | Options warehouse — multi-underlying feed + self-healing gap-backfill |
+| `pdp/observability/` | Unified OpenSearch log pipeline (chunk 5): structlog processor, indexer, typed sinks, ingest endpoint, routes — see `pdp/observability/CLAUDE.md` |
 
 ## Non-pdp dirs
 

@@ -31,6 +31,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 15. [Common Troubleshooting](#15-common-troubleshooting)
 16. [Alert System — Setup & Usage Guide](#16-alert-system--setup--usage-guide)
 17. [Directional Strangle — Paper Mode Operations](#17-directional-strangle--paper-mode-operations)
+18. [Unified Log Pipeline (OpenSearch)](#18-unified-log-pipeline-opensearch)
 
 ---
 
@@ -1500,3 +1501,88 @@ with open('backend/logs/directional_strangle/YYYY-MM-DD.log') as f:
 
 The skill reads today's log, parses all events, and produces: session summary, bias
 timeline, per-signal vote analysis, trades table, and improvement suggestions.
+
+---
+
+## 18. Unified Log Pipeline (OpenSearch)
+
+Every log in the system — API request logs, strategy events, journal flushes, backtest
+results, and Flutter UI logs — auto-ships to OpenSearch in realtime through one pipeline.
+Logs land in `pdp-logs-*` (universal) and high-value events in typed analytics indices,
+all segregated by a `source` field. Disabled by default (`OPENSEARCH_ENABLED=false`).
+
+### 18.1 Settings (add to `backend/.env`)
+
+```env
+OPENSEARCH_ENABLED=true
+OPENSEARCH_URL=http://localhost:9200        # or AWS OpenSearch endpoint in prod
+OPENSEARCH_USER=                           # leave blank for dev (security disabled)
+OPENSEARCH_PASSWORD=
+OPENSEARCH_VERIFY_CERTS=false              # true for prod (AWS)
+OPENSEARCH_INDEX_PREFIX=pdp               # prefix for all index names
+OPENSEARCH_BULK_INTERVAL=2.0              # flush interval in seconds
+OPENSEARCH_BULK_MAX=500                   # max docs per bulk request
+OPENSEARCH_QUEUE_MAX=10000                # in-memory queue cap (drop-on-full)
+OPENSEARCH_LOG_LEVEL=INFO                 # min level shipped to pdp-logs-*
+```
+
+### 18.2 Start + bootstrap
+
+```bash
+# Start OpenSearch (and optionally Dashboards at :5601)
+task search:up
+
+# Apply index templates + import 8 dashboards (idempotent, safe to re-run)
+task search:init
+```
+
+### 18.3 Indices
+
+| Index pattern | Source | What |
+|---|---|---|
+| `pdp-logs-*` | all | Every structlog record + Flutter UI logs. Filter by `source` field: `api`, `strategy`, `orders`, `market`, `ui`, … |
+| `pdp-strangle-events-*` | strategy | Per-bar events: bias evaluations, leg open/close/stop |
+| `pdp-trades-*` | journal | Individual fills / order executions |
+| `pdp-journal-*` | journal | Daily stats: realized P&L, win/loss counts, premium sold/bought |
+| `pdp-backtest-runs-*` | backtest | Per-run metrics (net, PF, Sharpe, MaxDD, verdict) |
+| `pdp-backtest-days-*` | backtest | Per-day equity curve within a run |
+| `pdp-backtest-trades-*` | backtest | Simulated fills inside a backtest |
+
+All indices are monthly date-suffixed (`pdp-logs-2026.06`) and use `dynamic: false` mappings.
+
+### 18.4 Dashboards
+
+Open `http://localhost:5601` after `task search:up && task search:init`. Eight dashboards
+are pre-imported:
+
+| # | Dashboard | Key question |
+|---|---|---|
+| 1 | Unified Log Explorer | What's happening across all sources right now? |
+| 2 | Live Strategy Session | How did NIFTY and the strangle behave today? |
+| 3 | Trade Blotter & P&L | What fills happened and what's the realized P&L? |
+| 4 | Journal Analytics | Daily/weekly P&L trends and win rate? |
+| 5 | Backtest Explorer | Which run is the best config? |
+| 6 | Bias Effectiveness | Is the bucket signal actually predictive? |
+| 7 | Live ↔ Backtest Parity | Does live performance match backtest expectations? |
+| 8 | UI Health | Are there Flutter errors spiking on a specific screen? |
+
+### 18.5 Claude session review
+
+After a live session:
+
+```bash
+GET /api/v1/analysis/session?date=YYYY-MM-DD&strategy_id=directional_strangle
+```
+
+Returns a bar-anchored JSON narrative. Feed it to Claude with the prompt at
+`backend/scripts/analysis/strangle_review_prompt.md` for a structured verdict.
+
+### 18.6 Hot-path safety
+
+- **OS down = no-op**: if OpenSearch is unreachable the indexer logs one warning and
+  discards the queue. All stdout/file logging and JSONL/Mongo sources of truth are
+  unaffected.
+- **Queue pressure**: if the in-memory queue fills (> `OPENSEARCH_QUEUE_MAX` docs) new
+  records are dropped silently. Check `indexer.dropped` metric in the `/healthz` endpoint.
+- **No feedback loop**: the `pdp.observability` logger itself binds `_no_ship=True` so
+  indexer log records are never re-enqueued.

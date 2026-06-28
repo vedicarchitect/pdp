@@ -28,6 +28,22 @@ def _ist_today() -> str:
     return datetime.now(_IST).date().isoformat()
 
 
+def _ship_journal(day: str, trades: list[dict[str, Any]], stats: dict[str, Any]) -> None:
+    """Dual-sink fills + the daily rollup to OpenSearch (no-op when indexer inactive)."""
+    from pdp.observability.indexer import get_active_indexer
+
+    indexer = get_active_indexer()
+    if indexer is None:
+        return
+    from pdp.observability.sinks import JOURNAL, TRADES, fill_doc, journal_day_doc
+
+    for entry in trades:
+        doc, doc_id = fill_doc(entry)
+        indexer.enqueue(TRADES, doc, doc_id)
+    jdoc, jid = journal_day_doc(day, stats)
+    indexer.enqueue(JOURNAL, jdoc, jid)
+
+
 class JournalService:
     def __init__(self, mongo_db: Any = None) -> None:
         self._mongo = mongo_db
@@ -114,11 +130,12 @@ class JournalService:
         self._dirty_days.clear()
         for day in days:
             trades = self._trades_by_day.get(day, [])
+            stats = compute_daily_stats(trades)
             doc = {
                 "date": day,
                 "mode": "paper",
                 "trades": trades,
-                "stats": compute_daily_stats(trades),
+                "stats": stats,
                 "updated_at": datetime.now(UTC),
             }
             try:
@@ -128,3 +145,4 @@ class JournalService:
             except Exception as exc:
                 log.warning("journal_flush_failed", day=day, exc=str(exc))
                 self._dirty_days.add(day)  # retry next cycle
+            _ship_journal(day, trades, stats)

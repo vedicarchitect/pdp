@@ -31,6 +31,30 @@ async def lifespan(app: FastAPI):
     app.state.mongo_client = mongo_client
     app.state.mongo_db = mongo_db
     await init_collections(mongo_db, settings)
+
+    # Unified OpenSearch log pipeline — bootstrap templates + start the single non-blocking
+    # indexer early so subsequent service logs auto-ship. No-op when OPENSEARCH_ENABLED=false.
+    app.state.opensearch_indexer = None
+    if settings.OPENSEARCH_ENABLED:
+        from pdp.observability import OpenSearchIndexer, get_opensearch, set_active_indexer
+        from pdp.observability.mappings import ensure_templates
+        from pdp.observability.processor import set_level_floor
+
+        os_client = get_opensearch()
+        if os_client is not None:
+            await ensure_templates(os_client, settings.OPENSEARCH_INDEX_PREFIX)
+            set_level_floor(settings.OPENSEARCH_LOG_LEVEL)
+            os_indexer = OpenSearchIndexer(
+                os_client,
+                prefix=settings.OPENSEARCH_INDEX_PREFIX,
+                bulk_interval=settings.OPENSEARCH_BULK_INTERVAL,
+                bulk_max=settings.OPENSEARCH_BULK_MAX,
+                queue_max=settings.OPENSEARCH_QUEUE_MAX,
+            )
+            await os_indexer.start()
+            set_active_indexer(os_indexer)
+            app.state.opensearch_indexer = os_indexer
+
     log.info(
         "app_starting",
         app=settings.APP_NAME,
@@ -400,6 +424,12 @@ async def lifespan(app: FastAPI):
         if dhan_broker is not None:
             await dhan_broker.stop()
         await paper_broker.stop()
+        if app.state.opensearch_indexer is not None:
+            from pdp.observability import close_opensearch, set_active_indexer
+
+            await app.state.opensearch_indexer.stop()
+            set_active_indexer(None)
+            await close_opensearch()
         await app.state.redis.aclose()
         mongo_disconnect(app.state.mongo_client)
         await dispose_engine()
@@ -434,6 +464,8 @@ def create_app() -> FastAPI:
     from pdp.ml.routes import router as ml_router
     from pdp.housekeeping.routes import router as housekeeping_router
     from pdp.broker_sync.routes import router as broker_sync_router
+    from pdp.observability.ingest import router as logs_ingest_router
+    from pdp.observability.routes import router as observability_router
 
     app.include_router(alerts_router)
     app.include_router(alerts_ws_router)
@@ -461,6 +493,8 @@ def create_app() -> FastAPI:
     app.include_router(ml_router, prefix="/api/v1/ml", tags=["ML"])
     app.include_router(housekeeping_router, prefix="/api/v1/housekeeping", tags=["Housekeeping"])
     app.include_router(broker_sync_router)
+    app.include_router(logs_ingest_router)
+    app.include_router(observability_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

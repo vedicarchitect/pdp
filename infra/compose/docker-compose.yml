@@ -48,6 +48,45 @@ services:
       timeout: 3s
       retries: 10
 
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: pdp-opensearch
+    environment:
+      # Single-node dev cluster, security plugin disabled (local only — enable + TLS in AWS).
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.17.1
+    container_name: pdp-opensearch-dashboards
+    profiles: ["tools"]
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: pdp-pgadmin
@@ -65,3 +104,4 @@ volumes:
   postgres_data:
   redis_data:
   mongo_data:
+  opensearch_data:

@@ -24,12 +24,13 @@ Everything is spec-first: no implementation lands without a proposal under `open
 | DB (hot/cache)   | Redis 7 (pub/sub + streams + hash)                |
 | ORM / migrations | SQLAlchemy 2.0 async + Alembic                    |
 | HTTP client      | httpx (async)                                     |
-| Logging          | structlog (JSON to stdout)                        |
+| Logging          | structlog (JSON to stdout + OpenSearch via non-blocking processor) |
 | Tests            | pytest + pytest-asyncio                           |
 | Lint/format      | ruff                                              |
 | Type check       | pyright (strict on `src/pdp/`)                    |
 | Task runner      | Taskfile.yml                                      |
 | Broker (v1)      | Dhan (paper + live-gated)                         |
+| Search/analytics | OpenSearch 2.x (unified log pipeline + realtime analytics dashboards) |
 | Frontend (app)   | Flutter (Dart) + Riverpod + fl_chart + web_socket_channel (Android + Windows desktop) |
 
 ## Architecture
@@ -56,6 +57,13 @@ flowchart LR
 
     OptPoller[OptionsChainPoller] -->|chain snapshots| Mongo
     Portfolio[PortfolioService] -->|MTM P&amp;L| PG
+
+    subgraph obs ["Unified Log Pipeline (chunk 5)"]
+      SL[structlog processor] -->|put_nowait| IDX[OpenSearchIndexer<br/>async queue]
+      IDX -->|bulk flush| OS[("OpenSearch 2.x<br/>pdp-logs-* · typed indices")]
+    end
+    API --> SL
+    Flutter[Flutter app] -->|POST /logs/ingest| API
 ```
 
 ## Conventions
@@ -97,6 +105,7 @@ PDP/
 ├── app/                    # Flutter (Dart) client
 ├── infra/
 │   ├── compose/            # docker-compose.yml (project name pinned: pdp)
+│   ├── opensearch/         # dashboards-as-code (8 NDJSON saved-object files → task search:init)
 │   ├── launchers/  loadtest/  logs/
 │   └── terraform/  deploy/  # reserved for cloud-deploy-aws (chunk 16)
 ├── docs/                   # ARCHITECTURE.md, RUNBOOK.md, feature docs
