@@ -1,3 +1,6 @@
 ## 2024-06-13 - Batching High-Frequency WebSocket Broadcasts
 **Learning:** In high-frequency market data processing, synchronous websocket broadcasts triggered on every tick can severely block the asyncio event loop and cause CPU spikes due to repetitive JSON serialization of unchanged/rapidly changing state.
 **Action:** When handling tick streams or similarly rapid events, use a dirty flag (`_needs_broadcast = True`) to debounce updates and defer the actual heavy lifting (serialization and broadcasting) to an existing periodic flush loop (e.g., a 100ms ticker). Always clear the dirty flag *before* beginning the heavy work to prevent losing subsequent updates.
+## 2024-06-28 - Pipelining Redis Commands on Hot Paths
+**Learning:** In high-frequency data ingestion paths, executing multiple consecutive asynchronous Redis commands (`set`, `publish`) causes unnecessary network roundtrips per event. Even though they are non-blocking, the sheer volume of events can introduce overhead and slight delays.
+**Action:** Use `async with redis.pipeline(transaction=False) as pipe:` to batch multiple non-dependent Redis commands together in a single network request. The `transaction=False` argument avoids the heavier `MULTI`/`EXEC` wrapper since atomicity is not strictly needed for these independent cache updates and broadcasts.
