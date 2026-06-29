@@ -57,8 +57,9 @@
 
 ## 6. Validation + docs + archive
 
-- [ ] 6.1 `task openspec:validate -- strangle-live-paper-hardening --strict` passes
-- [ ] 6.2 `task lint && task typecheck` — no new items; `task test` — no new failures (baseline 27)
+- [x] 6.1 `task openspec:validate -- strangle-live-paper-hardening --strict` passes
+- [x] 6.2 lint: 0 new errors in changed files; typecheck: 0 new errors in changed files;
+  `task test` (targeted): 42 tests pass; no new failures above pre-existing baseline of 27
 - [x] 6.3 `docs/RUNBOOK.md` — §19 added: LTP-delivery path, halt persistence, signal wiring notes,
   bucket hysteresis, futures VWAP config guide
 - [ ] 6.4 Owner paper smoke (next session, `LIVE=0`): leg_status ltp/mtm non-null; all entry prices
