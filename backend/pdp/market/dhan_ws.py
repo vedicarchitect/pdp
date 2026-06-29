@@ -63,11 +63,18 @@ class DhanTickerAdapter:
     """
 
     QUEUE_SIZE = 1000
-    MAX_RECONNECT_DELAY = 30.0
 
-    def __init__(self, client_id: str, access_token: str) -> None:
+    def __init__(
+        self,
+        client_id: str,
+        access_token: str,
+        reconnect_base_delay: float = 1.0,
+        reconnect_max_delay: float = 30.0,
+    ) -> None:
         self._ctx = DhanContext(client_id, access_token)
         self._queue: asyncio.Queue[Tick] = asyncio.Queue(maxsize=self.QUEUE_SIZE)
+        self._reconnect_base_delay = reconnect_base_delay
+        self._reconnect_max_delay = reconnect_max_delay
         # (security_id, exchange_segment) -> MarketFeed exchange code
         self._subs: dict[tuple[str, str], int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -140,11 +147,11 @@ class DhanTickerAdapter:
     # ------------------------------------------------------------------ #
 
     async def _connection_loop(self) -> None:
-        delay = 1.0
+        delay = self._reconnect_base_delay
         while not self._stop_event.is_set():
             try:
                 await self._run_feed()
-                delay = 1.0  # reset on clean disconnect
+                delay = self._reconnect_base_delay  # reset on clean disconnect
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -153,7 +160,7 @@ class DhanTickerAdapter:
                 break
             log.info("dhan_ws_reconnecting", delay=delay)
             await asyncio.sleep(delay)
-            delay = min(delay * 2, self.MAX_RECONNECT_DELAY)
+            delay = min(delay * 2, self._reconnect_max_delay)
 
     async def _run_feed(self) -> None:
         """Spin up a MarketFeed in the thread pool; resolve when it disconnects."""

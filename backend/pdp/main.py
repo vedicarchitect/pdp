@@ -251,7 +251,12 @@ async def lifespan(app: FastAPI):
         bar_writer = BarWriter(app.state.mongo_db["market_bars"])
         await bar_writer.start()
 
-        adapter = DhanTickerAdapter(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
+        adapter = DhanTickerAdapter(
+            settings.DHAN_CLIENT_ID,
+            settings.DHAN_ACCESS_TOKEN,
+            reconnect_base_delay=settings.FEED_RECONNECT_BASE_DELAY,
+            reconnect_max_delay=settings.FEED_RECONNECT_MAX_DELAY,
+        )
         app.state.dhan_adapter = adapter
         strategy_host.set_market_adapter(adapter)
         async with get_session_maker()() as session:
@@ -269,9 +274,17 @@ async def lifespan(app: FastAPI):
             tick_router.run(adapter.queue, app.state.redis),
             name="tick-router",
         )
+
+        from pdp.market.watchdog import FeedWatchdog
+
+        feed_watchdog = FeedWatchdog(tick_router, adapter, settings.FEED_STALE_SECONDS)
+        await feed_watchdog.start()
+        app.state.feed_watchdog = feed_watchdog
+
         log.info("market_feed_started", client_id=settings.DHAN_CLIENT_ID, alerts_engine="enabled")
     else:
         app.state.dhan_adapter = None
+        app.state.feed_watchdog = None
         log.info("market_feed_skipped", reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set")
 
     # Portfolio service — always started (works in paper and live mode)
@@ -403,10 +416,23 @@ async def lifespan(app: FastAPI):
         app.state.broker_sync_service = None
         log.info("broker_sync_disabled")
 
+    # Scrip-master refresh — daily pre-open refresh of instrument master (gated).
+    scrip_refresh_scheduler = None
+    if settings.SCRIP_REFRESH_ENABLED:
+        from pdp.instruments.scheduler import ScripRefreshScheduler
+
+        scrip_refresh_scheduler = ScripRefreshScheduler(get_session_maker(), settings)
+        await scrip_refresh_scheduler.start()
+        log.info("scrip_refresh_enabled", refresh_time=settings.SCRIP_REFRESH_TIME)
+    else:
+        log.info("scrip_refresh_disabled")
+
     try:
         yield
     finally:
         log.info("app_shutting_down")
+        if scrip_refresh_scheduler is not None:
+            await scrip_refresh_scheduler.stop()
         if broker_sync_scheduler is not None:
             await broker_sync_scheduler.stop()
         if event_service is not None:
@@ -414,6 +440,9 @@ async def lifespan(app: FastAPI):
         await journal_service.stop()
         await portfolio_service.stop()
         if tick_router_task is not None:
+            watchdog = getattr(app.state, "feed_watchdog", None)
+            if watchdog:
+                await watchdog.stop()
             adapter = app.state.dhan_adapter
             if adapter:
                 await adapter.stop()

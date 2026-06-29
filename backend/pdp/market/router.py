@@ -54,6 +54,13 @@ class TickRouter:
         self._indicator_engine = indicator_engine
         # Set post-construction in main.py lifespan once positions/portfolio exist.
         self.event_service = event_service
+        # Monotonic wall-clock stamp of the last received tick (for stale-feed watchdog).
+        self._last_tick_ts: float = _time.monotonic()
+
+    @property
+    def last_tick_ts(self) -> float:
+        """Monotonic timestamp of the most recently processed tick."""
+        return self._last_tick_ts
 
     async def run(self, queue: asyncio.Queue[Tick], redis: Redis) -> None:
         self._running = True
@@ -74,6 +81,7 @@ class TickRouter:
         self._running = False
 
     async def _handle(self, tick: Tick, redis: Redis) -> None:
+        self._last_tick_ts = _time.monotonic()  # watchdog stamp (hot path — single assignment)
         ltp_str = str(tick.ltp)
         sid = tick.security_id
 

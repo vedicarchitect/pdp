@@ -1776,7 +1776,49 @@ Returns a bar-anchored JSON narrative. Feed it to Claude with the prompt at
 
 ---
 
-## 19. Order Pre-Flight Checks (broker-order-safety)
+## 19. Market Feed Resilience (market-feed-resilience)
+
+### Stale-feed watchdog
+
+A `FeedWatchdog` runs alongside the live Dhan tick feed (started only when `DHAN_CLIENT_ID` is set).
+Every second it checks whether any tick arrived within `FEED_STALE_SECONDS`.  If no tick comes
+during market hours (09:15–15:35 IST) it logs a `feed_stale` warning and forces a reconnect on
+the adapter by closing the underlying WebSocket — the exponential-backoff connection loop then
+re-establishes the feed automatically.
+
+This does NOT auto-evict subscriptions (a silent underlying is legitimate).
+
+```env
+FEED_STALE_SECONDS=60         # seconds without a tick before watchdog fires
+FEED_RECONNECT_BASE_DELAY=1.0 # initial backoff in seconds
+FEED_RECONNECT_MAX_DELAY=30.0 # cap for exponential reconnect backoff
+```
+
+### Backfill interior-gap protection
+
+`gap_backfill.py:fill_day` now runs an interior-gap check on the spot minute series before
+persisting any option bars.  If the spot data has an empty window between two non-empty windows,
+the whole day is skipped and a `backfill_interior_gap` warning is logged — the day remains
+visible to `days_missing` for retry in the next scheduled scan.
+
+Leading or trailing empty windows are *not* treated as gaps (pre-open / post-close windows are
+naturally empty).
+
+### Scrip-master daily refresh
+
+```env
+SCRIP_REFRESH_ENABLED=false  # set to true to activate
+SCRIP_REFRESH_TIME=08:45     # IST HH:MM — fires once per day before market open
+```
+
+When enabled, `ScripRefreshScheduler` downloads the Dhan scrip master at the configured time,
+upserts it into the `instruments` PG table (including the new `freeze_qty` column), and writes a
+filtered snapshot CSV to `data/masters/<YYYY-MM-DD>.csv` for historical backtest lookups.
+Failures log `scrip_refresh_failed` and retry the next day without blocking startup.
+
+---
+
+## 20. Order Pre-Flight Checks (broker-order-safety)
 
 Every order passes a pre-flight gate in `OrderRouter._preflight` before reaching the broker.
 

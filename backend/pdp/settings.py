@@ -173,6 +173,13 @@ class Settings(BaseSettings):
     OPENSEARCH_QUEUE_MAX: int = 10000       # drop-on-full beyond this (never blocks callers)
     OPENSEARCH_LOG_LEVEL: str = "INFO"      # min structlog level shipped to pdp-logs-*
 
+    # ── Market feed resilience (market-feed-resilience capability) ────────
+    FEED_STALE_SECONDS: int = 60            # seconds without a tick before feed_stale fires
+    FEED_RECONNECT_BASE_DELAY: float = 1.0  # initial reconnect back-off (seconds)
+    FEED_RECONNECT_MAX_DELAY: float = 30.0  # cap for exponential reconnect back-off
+    SCRIP_REFRESH_ENABLED: bool = False     # daily pre-open scrip master refresh
+    SCRIP_REFRESH_TIME: str = "08:45"       # IST HH:MM for the daily refresh
+
     # ── Order pre-flight safety net (broker-order-safety capability) ───────
     ORDER_PREFLIGHT_ENABLED: bool = True
     MARGIN_CHECK_ENABLED: bool = False      # live Dhan margin API; off until creds confirmed

@@ -207,6 +207,31 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
         log.warning("gap_fill_no_spot", day=ds, underlying=underlying)
         return 0
 
+    # Interior-gap check on spot bars: if there is a hole in the minute series
+    # between the first and last bar the day is suspect; skip rather than persist holes.
+    spot_keys = sorted(spot.keys())
+    if spot_keys:
+        expected_minutes = int(
+            (spot_keys[-1] - spot_keys[0]).total_seconds() / 60
+        ) + 1
+        if expected_minutes > 1:
+            # Build a list of per-minute presence booleans and treat each as a "chunk"
+            from datetime import timedelta as _td
+            minute_chunks = [
+                [spot_keys[0] + _td(minutes=m)]
+                if (spot_keys[0] + _td(minutes=m)) in spot
+                else []
+                for m in range(expected_minutes)
+            ]
+            if has_interior_gap(minute_chunks):
+                log.warning(
+                    "backfill_interior_gap",
+                    day=ds,
+                    underlying=underlying,
+                    reason="spot minute series has interior empty chunks; skipping day",
+                )
+                return 0
+
     # Resolve expiries once per code (avoids repeated calendar lookups in threads).
     expiries: dict[int, date | None] = {}
     for code in codes:
@@ -271,6 +296,29 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
                 log.warning("gap_fill_worker_error", day=ds, task=str(task), exc=str(exc))
 
     return upsert_option_bars_sync(col, all_docs)
+
+
+# ── Interior-gap detection (market-feed-resilience) ──────────────────────────
+
+def nonempty_idx(chunks: list[list]) -> list[int]:
+    """Return indices of non-empty chunks (those with at least one bar)."""
+    return [i for i, ch in enumerate(chunks) if ch]
+
+
+def has_interior_gap(chunks: list[list]) -> bool:
+    """Return True if any empty chunk sits strictly between two non-empty chunks.
+
+    A leading or trailing empty window is acceptable (market not yet open / already
+    closed).  An empty chunk with data on both sides indicates a Dhan fetch hole.
+    """
+    ne = nonempty_idx(chunks)
+    if len(ne) < 2:
+        return False
+    first, last = ne[0], ne[-1]
+    for i in range(first + 1, last):
+        if not chunks[i]:
+            return True
+    return False
 
 
 # ── Gap detection ─────────────────────────────────────────────────────────────
