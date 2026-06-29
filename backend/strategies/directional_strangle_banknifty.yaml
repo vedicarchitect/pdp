@@ -28,6 +28,7 @@ params:
   index_segment: IDX_I
   option_segment: NSE_FNO
   vix_security_id: "21"          # India VIX
+  # futures_security_id: null    # Set to front-month BANKNIFTY futures Dhan SID for VWAP (update monthly)
 
   # ---- Lot / strike ----
   lot_size: 30                   # 2025+ BANKNIFTY lot size (SEBI effective Jan 2025)

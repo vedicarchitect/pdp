@@ -427,3 +427,63 @@ async def test_unwatched_non_subscribed_sid_is_not_dispatched(tmp_path):
     assert state.instance.received_ticks == []
 
     await host.stop("dyn3")
+
+
+class _CtxExposingSubscribingStrategy(Strategy):
+    """Subscribes an option SID in on_init; exposes ctx so the test can unsubscribe."""
+
+    OPT_SID = "OPT_PE_UNSUB"
+
+    async def on_init(self, ctx: StrategyContext) -> None:
+        self.received_ticks: list = []
+        self._ctx = ctx
+        await ctx.market.subscribe(self.OPT_SID, "NSE_FNO")
+
+    async def on_tick(self, tick) -> None:
+        self.received_ticks.append(tick)
+
+
+@pytest.mark.asyncio
+async def test_unsubscribed_sid_no_longer_dispatched(tmp_path):
+    """After unsubscribe(), ticks for that SID must not reach the strategy."""
+    yaml_content = (
+        "id: dyn4\n"
+        "class: tests.strategy.test_host._CtxExposingSubscribingStrategy\n"
+        "watchlist:\n"
+        "  - security_id: '1333'\n"
+        "    exchange_segment: NSE_EQ\n"
+        "    timeframes: [5m]\n"
+    )
+    (tmp_path / "dyn4.yaml").write_text(yaml_content)
+
+    host = _make_host_with_mock_adapter(tmp_path)
+    host.load_registry()
+    await host.start("dyn4")
+
+    state = host._running["dyn4"]
+    instance = state.instance
+
+    # Confirm the SID is in the dynamic set after on_init.
+    assert _CtxExposingSubscribingStrategy.OPT_SID in state.dynamic_sids
+
+    # Tick while subscribed — must arrive.
+    tick_before = _tick(_CtxExposingSubscribingStrategy.OPT_SID)
+    host.on_tick(tick_before)
+    await asyncio.sleep(0.05)
+    assert tick_before in instance.received_ticks
+
+    # Unsubscribe via the strategy's own context (same path the strangle uses on leg close).
+    await instance._ctx.market.unsubscribe(_CtxExposingSubscribingStrategy.OPT_SID, "NSE_FNO")
+
+    # SID must be gone from dynamic set immediately.
+    assert _CtxExposingSubscribingStrategy.OPT_SID not in state.dynamic_sids
+
+    # Subsequent tick for the same SID must NOT reach the strategy.
+    tick_after = _tick(_CtxExposingSubscribingStrategy.OPT_SID)
+    host.on_tick(tick_after)
+    await asyncio.sleep(0.05)
+    assert tick_after not in instance.received_ticks, (
+        "Tick must be dropped after unsubscribe removes SID from dynamic set"
+    )
+
+    await host.stop("dyn4")

@@ -105,11 +105,14 @@ class PaperBroker:
         self._open_orders: dict[str, list[Order]] = {}
         # cached costs: instrument_type -> ChargesCalculator
         self._costs: dict[str, ChargesCalculator] = {}
+        # Redis client stored on start() so add_order() can fill MARKET orders immediately.
+        self._redis: Redis | None = None
 
     def set_hub(self, hub: OrdersHub) -> None:
         self._hub = hub
 
     async def start(self, redis: Redis) -> None:
+        self._redis = redis
         await self._load_open_orders()
         await self._load_costs()
         self._task = asyncio.create_task(
@@ -127,11 +130,27 @@ class PaperBroker:
                 pass
 
     async def add_order(self, order: Order) -> None:
-        """Register a freshly-created OPEN order for tick monitoring."""
+        """Register a freshly-created OPEN order for tick monitoring.
+
+        For MARKET orders, immediately attempts a fill from the Redis ``ltp:<sid>``
+        cache so the strategy does not have to wait for the next pub/sub tick.  If no
+        cached price is available the order stays OPEN and the pub/sub run-loop fills
+        it on the next tick.
+        """
         sid = order.security_id
         if sid not in self._open_orders:
             self._open_orders[sid] = []
         self._open_orders[sid].append(order)
+
+        if order.order_type == OrderType.MARKET and self._redis is not None:
+            raw = await self._redis.get(f"ltp:{sid}")
+            if raw is not None:
+                try:
+                    ltp = Decimal(str(raw))
+                    if ltp > Decimal("0"):
+                        await self._fill(order, ltp, "")
+                except Exception as exc:
+                    log.warning("paper_immediate_fill_error", sid=sid, exc=str(exc))
 
     def notify_subscribe(self, security_id: str) -> None:
         """Pre-register security_id so the run-loop subscribes tick.{sid} immediately.
@@ -366,22 +385,36 @@ async def upsert_position(
         new_qty = old_qty + qty
 
         if new_qty == 0:
-            # Fully closed
-            realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
-            pos.realized_pnl += realized
+            # Fully closed — skip realized if avg is zero (fill-timing race guard)
+            if old_avg == Decimal("0"):
+                log.warning(
+                    "zero_avg_realized_skipped",
+                    security_id=order.security_id,
+                    strategy_id=order.strategy_id,
+                )
+            else:
+                realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
+                pos.realized_pnl += realized
             pos.avg_price = Decimal("0")
         elif (old_qty > 0 and qty > 0) or (old_qty < 0 and qty < 0):
             # Adding to position — weighted average (abs so short-side old_qty sign doesn't invert cost)
             total_cost = old_avg * Decimal(str(abs(old_qty))) + fill_price * Decimal(str(order.qty))
             pos.avg_price = _round4(total_cost / Decimal(str(abs(new_qty))))
         else:
-            # Reducing position
+            # Reducing position — skip realized if avg is zero (fill-timing race guard)
             reduce_qty = min(abs(qty), abs(old_qty))
-            if old_qty > 0:
+            if old_avg == Decimal("0"):
+                log.warning(
+                    "zero_avg_realized_skipped",
+                    security_id=order.security_id,
+                    strategy_id=order.strategy_id,
+                )
+            elif old_qty > 0:
                 realized = _round4((fill_price - old_avg) * Decimal(str(reduce_qty)))
+                pos.realized_pnl += realized
             else:
                 realized = _round4((old_avg - fill_price) * Decimal(str(reduce_qty)))
-            pos.realized_pnl += realized
+                pos.realized_pnl += realized
 
         pos.net_qty = new_qty
         pos.updated_at = now

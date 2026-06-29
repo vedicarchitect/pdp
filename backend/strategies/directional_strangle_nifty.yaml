@@ -29,6 +29,7 @@ params:
   index_segment: IDX_I
   option_segment: NSE_FNO
   vix_security_id: "21"          # India VIX
+  # futures_security_id: null    # Set to front-month NIFTY futures Dhan SID for VWAP (update monthly)
 
   # ---- Lot / strike ----
   lot_size: 65                   # Jan 2026+ NIFTY lot size

@@ -19,11 +19,14 @@ from pdp.orders.models import (
     OrderStatus,
     OrderType,
     Position,
+    PreflightResult,
     Product,
     Side,
+    TradeMode,
 )
 from pdp.orders.paper import PaperBroker, _should_fill
 from pdp.orders.router import OrderRouter
+from pdp.risk.feed_halt import FeedStaleHalt
 
 
 def _open_order(
@@ -449,3 +452,137 @@ class TestImmediateFillFromCache:
         broker._fill.assert_not_called()
         # Order remains in the watch list for pub/sub fill
         assert order in broker._open_orders.get("OPT_5678", [])
+
+
+# ------------------------------------------------------------------ #
+# W3 — Paper advisory: preflight failure must not block paper orders  #
+# ------------------------------------------------------------------ #
+
+def _make_paper_broker() -> PaperBroker:
+    broker = PaperBroker.__new__(PaperBroker)
+    broker._open_orders = {}
+    broker._costs = {}
+    broker._redis = None
+    broker._hub = None
+    broker.add_order = AsyncMock()
+    return broker
+
+
+def _make_mock_session(existing_order=None) -> AsyncMock:
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = existing_order
+    result.first.return_value = None  # no instrument row → _validate_lot_size skips
+    session.execute = AsyncMock(return_value=result)
+    session.add = MagicMock()  # session.add is synchronous in SQLAlchemy
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+    return session
+
+
+async def _place(router: OrderRouter, session: AsyncMock) -> Order:
+    return await router.place_order(
+        session,
+        client_order_id=None,
+        security_id="OPT_1234",
+        exchange_segment="NSE_FNO",
+        side="SELL",
+        qty=100,
+        order_type="MARKET",
+        price=None,
+        trigger_price=None,
+        product="NRML",
+        strategy_id="st_01",
+    )
+
+
+class TestPaperAdvisory:
+    @pytest.mark.asyncio
+    async def test_paper_advisory_does_not_block_order(self) -> None:
+        """Preflight violations in paper mode are advisory: order must still be OPEN."""
+        paper = _make_paper_broker()
+        settings = _make_settings(live=False)
+        settings.ORDER_PREFLIGHT_ENABLED = True
+
+        router = OrderRouter(settings=settings, paper=paper)
+        # Force _preflight to return a violation
+        router._preflight = AsyncMock(
+            return_value=PreflightResult(ok=False, violations=["lot_check_failed"])
+        )
+
+        order = await _place(router, _make_mock_session())
+
+        assert order.status == OrderStatus.OPEN, (
+            f"paper advisory must not block — expected OPEN, got {order.status}"
+        )
+        paper.add_order.assert_called_once_with(order)
+
+    @pytest.mark.asyncio
+    async def test_live_preflight_failure_blocks_order(self) -> None:
+        """Preflight violations in live mode must REJECT the order."""
+        paper = _make_paper_broker()
+        settings = MagicMock()
+        settings.LIVE = True
+        settings.BROKER = "dhan"
+        settings.DHAN_CLIENT_ID = "client123"
+        settings.ORDER_PREFLIGHT_ENABLED = True
+
+        router = OrderRouter(settings=settings, paper=paper)
+        router._preflight = AsyncMock(
+            return_value=PreflightResult(ok=False, violations=["insufficient_margin"])
+        )
+
+        order = await _place(router, _make_mock_session())
+
+        assert order.status == OrderStatus.REJECTED
+        assert "insufficient_margin" in (order.reject_reason or "")
+        paper.add_order.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+# W4 — Feed-halt gate: live orders blocked when halt engaged          #
+# ------------------------------------------------------------------ #
+
+class TestFeedHaltGate:
+    @pytest.mark.asyncio
+    async def test_feed_stale_halt_blocks_live_order(self) -> None:
+        """When FeedStaleHalt is engaged, live MARKET orders must be REJECTED immediately."""
+        feed_halt = FeedStaleHalt(halt_after_seconds=0)
+        feed_halt.on_feed_stale()
+        feed_halt.on_feed_stale()
+        assert feed_halt.live_blocked is True
+
+        paper = _make_paper_broker()
+        settings = MagicMock()
+        settings.LIVE = True
+        settings.BROKER = "dhan"
+        settings.DHAN_CLIENT_ID = "client123"
+        settings.ORDER_PREFLIGHT_ENABLED = False  # skip preflight
+
+        router = OrderRouter(settings=settings, paper=paper, feed_halt=feed_halt)
+        order = await _place(router, _make_mock_session())
+
+        assert order.status == OrderStatus.REJECTED
+        assert "feed_stale_halt" in (order.reject_reason or ""), (
+            f"reject_reason should mention feed_stale_halt, got: {order.reject_reason!r}"
+        )
+        paper.add_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_paper_order_unaffected_by_feed_halt(self) -> None:
+        """Feed-halt must NOT block paper orders (no real money at risk)."""
+        feed_halt = FeedStaleHalt(halt_after_seconds=0)
+        feed_halt.on_feed_stale()
+        feed_halt.on_feed_stale()
+        assert feed_halt.live_blocked is True
+
+        paper = _make_paper_broker()
+        settings = _make_settings(live=False)  # PAPER mode
+        settings.ORDER_PREFLIGHT_ENABLED = False
+
+        router = OrderRouter(settings=settings, paper=paper, feed_halt=feed_halt)
+        order = await _place(router, _make_mock_session())
+
+        assert order.status == OrderStatus.OPEN
+        paper.add_order.assert_called_once_with(order)

@@ -24,6 +24,33 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 
+def _check_lot_freeze(
+    qty: int,
+    lot_size: int,
+    freeze_qty: int | None,
+    freeze_qty_by_underlying: dict[str, int],
+    security_id: str,
+    exchange_segment: str,
+) -> list[str]:
+    """Pure lot/freeze validator; returns a list of violation strings (empty = pass).
+
+    Called only when an instrument row exists. Extracted from _preflight so it can
+    be unit-tested without a DB session.
+    """
+    violations: list[str] = []
+    if lot_size > 1 and qty % lot_size != 0:
+        violations.append(f"qty {qty} not a multiple of lot_size {lot_size}")
+    effective_freeze = freeze_qty
+    if effective_freeze is None:
+        for underlying, fz in freeze_qty_by_underlying.items():
+            if underlying in (security_id + exchange_segment).upper():
+                effective_freeze = fz
+                break
+    if effective_freeze is not None and qty > effective_freeze:
+        violations.append(f"qty {qty} exceeds exchange freeze limit {effective_freeze}")
+    return violations
+
+
 def select_broker(settings: Settings) -> tuple[str, str]:
     """Return (broker_name, mode) based on settings.  v1 always returns paper."""
     if settings.LIVE and settings.BROKER == "dhan" and settings.DHAN_CLIENT_ID:
@@ -266,20 +293,12 @@ class OrderRouter:
         row = inst_row.first()
         if row is not None:
             lot_size, freeze_qty = row
-            if lot_size > 1 and qty % lot_size != 0:
-                result.violations.append(f"qty {qty} not a multiple of lot_size {lot_size}")
-            # Resolve freeze limit: instrument column wins, then settings map, then no check
-            effective_freeze = freeze_qty
-            if effective_freeze is None:
-                # Derive underlying from exchange segment heuristic (best-effort)
-                for underlying, fz in s.FREEZE_QTY_BY_UNDERLYING.items():
-                    if underlying in (security_id + exchange_segment).upper():
-                        effective_freeze = fz
-                        break
-            if effective_freeze is not None and qty > effective_freeze:
-                result.violations.append(
-                    f"qty {qty} exceeds exchange freeze limit {effective_freeze}"
+            result.violations.extend(
+                _check_lot_freeze(
+                    qty, lot_size, freeze_qty,
+                    s.FREEZE_QTY_BY_UNDERLYING, security_id, exchange_segment,
                 )
+            )
 
         # 2. Charge estimate (reuses PaperBroker's ChargesCalculator; no new cost model)
         if self._paper._costs:

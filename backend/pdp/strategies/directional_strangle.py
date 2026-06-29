@@ -1053,6 +1053,9 @@ class DirectionalStrangle(Strategy):
             self._cam_weekly_warned = False
             self._pending_bucket = None
             self._pending_bucket_count = 0
+            # _current_bucket is intentionally NOT reset: open legs persist across
+            # trading days, so carrying the bucket forward prevents a spurious
+            # close/reopen on the first bar of the new session.
 
     async def _day_realized(self) -> Decimal:
         total = Decimal("0")

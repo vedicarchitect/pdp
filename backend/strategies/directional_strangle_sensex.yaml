@@ -28,6 +28,7 @@ params:
   index_segment: IDX_I
   option_segment: BSE_FNO        # SENSEX options trade on BSE
   vix_security_id: "21"          # India VIX
+  # futures_security_id: null    # Set to front-month SENSEX futures Dhan SID for VWAP (update monthly)
 
   # ---- Lot / strike ----
   lot_size: 20                   # 2025+ SENSEX lot size

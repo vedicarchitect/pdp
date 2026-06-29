@@ -22,6 +22,9 @@ no traded volume), and `pcr` (derived from the option-chain poller). The intent 
 single signal's influence so a lone `ema_5m` flip no longer changes the bucket on its own.
 
 #### Scenario: All configured signals vote when warmed
+<!-- deferred: cam_weekly vote requires 1w bar-aggregator support, not yet implemented;
+     existing cam_weekly_missing debug log fires once per session as a runtime marker.
+     This scenario is aspirational and will pass fully once 1w support lands. -->
 - **WHEN** the engine evaluates bias after warmup and chain data are available
 - **THEN** the `bias_evaluated.votes` record contains entries for `ema_1h`, `ema_15m`, `ema_5m`,
   `cam_daily`, `cam_weekly`, `swing`, `vwap`, `orb`, and `pcr`
