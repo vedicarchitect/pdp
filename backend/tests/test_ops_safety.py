@@ -6,11 +6,8 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from pdp.logging import sensitive_data_filter, _ErrorsJsonlSink, _REDACT_MARKER
+from pdp.logging import _REDACT_MARKER, _ErrorsJsonlSink, sensitive_data_filter
 from pdp.risk.feed_halt import FeedStaleHalt
-
 
 # ── sensitive_data_filter ─────────────────────────────────────────────────────
 
@@ -96,7 +93,6 @@ def test_feed_halt_not_blocked_initially():
 
 
 def test_feed_halt_engages_after_threshold():
-    import time
 
     halt = FeedStaleHalt(halt_after_seconds=0)
     halt.on_feed_stale()
@@ -122,3 +118,9 @@ def test_feed_halt_recovery_clears_timer_not_halt():
     halt.on_feed_recovered()
     # halt remains until operator clears it
     assert halt.live_blocked is True
+
+def test_redact_nested_dict():
+    out = _apply({"event": "test", "context": {"api_key": "mySuperKey", "nested": [{"password": "abc", "safe": 123}]}})
+    assert out["context"]["api_key"] == _REDACT_MARKER
+    assert out["context"]["nested"][0]["password"] == _REDACT_MARKER
+    assert out["context"]["nested"][0]["safe"] == 123
