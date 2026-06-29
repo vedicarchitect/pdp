@@ -26,7 +26,14 @@ _REDACT_MARKER = "***"
 
 
 def _redact_value(v: Any) -> Any:
-    if not isinstance(v, str):
+    if isinstance(v, dict):
+        return {
+            k: _REDACT_MARKER if isinstance(k, str) and _REDACT_KEY_RE.search(k) else _redact_value(val)
+            for k, val in v.items()
+        }
+    elif isinstance(v, list):
+        return [_redact_value(item) for item in v]
+    elif not isinstance(v, str):
         return v
     if _REDACT_JWT_RE.search(v):
         return _REDACT_MARKER
