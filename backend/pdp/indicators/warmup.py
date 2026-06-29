@@ -40,6 +40,19 @@ _TF_SESSION_BARS: dict[str, int] = {
 }
 _DEFAULT_SESSION_BARS = 75
 
+# Calendar days to look back per timeframe so EMA(50) is seeded on startup.
+# EMA(50) needs 50 bars; sessions per calendar day ~ _TF_SESSION_BARS value.
+# We go back ceil(50 / session_bars) sessions + 4 days padding for weekends/holidays.
+_TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
+    "1m": 1,
+    "5m": 1,
+    "15m": 6,   # ceil(50/25)=2 sessions + 4 padding
+    "25m": 8,   # ceil(50/15)=4 sessions + 4 padding
+    "1H": 14,   # ceil(50/7)=8 sessions + 6 padding
+    "1h": 14,
+}
+_DEFAULT_WARMUP_CALENDAR_DAYS = 1
+
 # Timeframe label → Dhan interval integer
 _TF_TO_DHAN_INTERVAL: dict[str, int] = {
     "1m": 1,
@@ -79,19 +92,22 @@ async def warm_up_indicator_engine(
 
     holiday_set = _load_holidays(settings.NSE_HOLIDAYS_JSON)
     prior_day = _prior_trading_day(holiday_set)
-    since = datetime(
-        prior_day.year, prior_day.month, prior_day.day,
-        _SESSION_START_UTC_H, _SESSION_START_UTC_M,
-        tzinfo=UTC,
-    )
-    log.info("indicator_warmup_start", prior_day=str(prior_day), since=since.isoformat())
+    log.info("indicator_warmup_start", prior_day=str(prior_day))
 
     for entry in watchlist:
         sid = str(entry["security_id"])
         segment = str(entry["exchange_segment"])
         for tf in entry.get("timeframes", []):
+            # Per-timeframe lookback: slower TFs (1H/15m) need more history for EMA(50).
+            lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(tf, _DEFAULT_WARMUP_CALENDAR_DAYS)
+            warmup_from = prior_day - timedelta(days=lookback_days - 1)
+            since = datetime(
+                warmup_from.year, warmup_from.month, warmup_from.day,
+                _SESSION_START_UTC_H, _SESSION_START_UTC_M,
+                tzinfo=UTC,
+            )
             try:
-                await _warm_one(engine, mongo_db, settings, sid, segment, tf, since, prior_day)
+                await _warm_one(engine, mongo_db, settings, sid, segment, tf, since, warmup_from, prior_day)
             except Exception as exc:
                 log.warning(
                     "indicator_warmup_failed",
@@ -109,22 +125,26 @@ async def _warm_one(
     segment: str,
     timeframe: str,
     since: datetime,
+    warmup_from: date,
     prior_day: date,
 ) -> None:
     col = mongo_db["market_bars"]
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
 
+    # Minimum bars expected across the full lookback window (not just one session).
+    lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(timeframe, _DEFAULT_WARMUP_CALENDAR_DAYS)
     session_bars = _TF_SESSION_BARS.get(timeframe, _DEFAULT_SESSION_BARS)
-    if len(bars) < session_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+    target_bars = session_bars * max(1, lookback_days // 2)
+    if len(bars) < target_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
             security_id=security_id,
             timeframe=timeframe,
             mongo_count=len(bars),
-            session_target=session_bars,
+            target=target_bars,
         )
         api_bars = await asyncio.get_running_loop().run_in_executor(
-            None, _fetch_from_dhan, settings, security_id, segment, timeframe, prior_day
+            None, _fetch_from_dhan, settings, security_id, segment, timeframe, warmup_from
         )
         if api_bars:
             await _persist_bars(col, api_bars)
@@ -148,10 +168,19 @@ async def _warm_one(
     fed = engine.seed_from_bars(bars)
 
     # Derive prior-session HLC for PivotTrackers in the suite bundle.
+    # Use only bars from the most recent prior trading day to get its HLC, not the
+    # entire extended lookback window (which would give a multi-day high/low).
     if bars:
-        prior_h = max(float(b.high) for b in bars)
-        prior_l = min(float(b.low) for b in bars)
-        prior_c = float(bars[-1].close)
+        prior_day_start = datetime(
+            prior_day.year, prior_day.month, prior_day.day,
+            _SESSION_START_UTC_H, _SESSION_START_UTC_M,
+            tzinfo=UTC,
+        )
+        prior_session_bars = [b for b in bars if b.bar_time >= prior_day_start]
+        pivot_bars = prior_session_bars if prior_session_bars else bars[-10:]
+        prior_h = max(float(b.high) for b in pivot_bars)
+        prior_l = min(float(b.low) for b in pivot_bars)
+        prior_c = float(pivot_bars[-1].close)
         engine.seed_prior_session_pivots(security_id, timeframe, prior_h, prior_l, prior_c, prior_day)
 
     log.info(

@@ -131,6 +131,8 @@ async def _build_strategy(
     market.unsubscribe = AsyncMock()
     ltp_val = Decimal(str(ltp_override or 100.0))
     market.ltp_with_age = AsyncMock(return_value=(ltp_val, 0.1))
+    market.cache_get = AsyncMock(return_value=None)  # no halt marker by default
+    market.cache_set = AsyncMock()
 
     orders = _FakeOrders()
 
@@ -147,6 +149,7 @@ async def _build_strategy(
         market=market,
         orders=orders,
         session_maker=session_maker,
+        chain_hub=None,
     )
 
     await s.on_init(ctx)
@@ -336,3 +339,293 @@ async def test_activity_newest_first_and_n_cap():
 
     # Verify newest-first: last emitted event (test_event_9) should appear first
     assert events[0]["event_type"] == "test_event_9", "Newest event must be first"
+
+
+# ---------------------------------------------------------------------------
+# R4 — Bucket-change hysteresis (bucket_confirm_bars)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_single_bar_bucket_flip_does_not_churn():
+    """A one-bar bucket change must not close/reopen legs (bucket_confirm_bars=2)."""
+    from pdp.signals.bias import BiasResult, BiasBucket
+    from unittest.mock import patch
+
+    s = await _build_strategy(params={"bucket_confirm_bars": 2})
+
+    # Prime the strategy to think it's in MORE_BULL with open short legs.
+    s._current_bucket = "more_bull"
+    fake_leg = OpenLeg(
+        security_id="short_1",
+        segment="NSE_FNO",
+        opt_type="CE",
+        strike=24200.0,
+        lots=2,
+        entry_price=Decimal("100"),
+    )
+    s._short_legs.append(fake_leg)
+
+    # Mock score_bias to return MORE_BEAR for one bar.
+    bear_result = BiasResult(
+        score=-0.4, bucket=BiasBucket.MORE_BEAR, pe_lots=3, ce_lots=2,
+        gated=False, reason="test", votes={},
+    )
+
+    bar = _make_bar(ist_hhmm="10:20")
+    with (
+        patch("pdp.strategies.directional_strangle.score_bias", return_value=bear_result),
+        patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(return_value=None)),
+    ):
+        await s.on_bar(bar)
+
+    # Bucket must NOT have changed — pending_bucket_count == 1, threshold is 2.
+    assert s._current_bucket == "more_bull", (
+        "Single-bar flip must not churn; current bucket must stay MORE_BULL"
+    )
+    assert s._pending_bucket == "more_bear"
+    assert s._pending_bucket_count == 1
+    # Legs must still be open.
+    assert len(s._short_legs) == 1, "Legs must not be closed on single-bar flip"
+
+
+@pytest.mark.asyncio
+async def test_sustained_bucket_change_acts_after_n_bars():
+    """N-bar sustained bucket change must close/reopen legs after confirmation."""
+    from pdp.signals.bias import BiasResult, BiasBucket
+
+    s = await _build_strategy(params={"bucket_confirm_bars": 2})
+    s._current_bucket = "more_bull"
+    fake_leg = OpenLeg(
+        security_id="short_1",
+        segment="NSE_FNO",
+        opt_type="CE",
+        strike=24200.0,
+        lots=2,
+        entry_price=Decimal("100"),
+    )
+    s._short_legs.append(fake_leg)
+    s.ctx.orders._p("short_1")["net"] = -2
+
+    bear_result = BiasResult(
+        score=-0.4, bucket=BiasBucket.MORE_BEAR, pe_lots=3, ce_lots=2,
+        gated=False, reason="test", votes={},
+    )
+
+    bar1 = _make_bar(ist_hhmm="10:20")
+    bar2 = _make_bar(ist_hhmm="10:25")
+
+    new_inst = _make_instrument("pe_new", 24000.0, "PE")
+    with (
+        patch("pdp.strategies.directional_strangle.score_bias", return_value=bear_result),
+        patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(return_value=new_inst)),
+    ):
+        await s.on_bar(bar1)  # bar 1: pending_count = 1, no action
+        assert s._current_bucket == "more_bull"
+
+        await s.on_bar(bar2)  # bar 2: pending_count = 2 >= 2, act
+        assert s._current_bucket == "more_bear", (
+            "After 2 consecutive bars with new bucket, change must be committed"
+        )
+        assert s._pending_bucket is None, "pending_bucket must be cleared after commitment"
+
+
+@pytest.mark.asyncio
+async def test_bucket_revert_before_confirmation_resets_counter():
+    """A bucket that reverts before confirmation must reset the counter."""
+    from pdp.signals.bias import BiasResult, BiasBucket
+
+    s = await _build_strategy(params={"bucket_confirm_bars": 3})
+    s._current_bucket = "more_bull"
+
+    bear_result = BiasResult(
+        score=-0.4, bucket=BiasBucket.MORE_BEAR, pe_lots=3, ce_lots=2,
+        gated=False, reason="test", votes={},
+    )
+    bull_result = BiasResult(
+        score=0.4, bucket=BiasBucket.MORE_BULL, pe_lots=2, ce_lots=3,
+        gated=False, reason="test", votes={},
+    )
+
+    bar1 = _make_bar(ist_hhmm="10:20")
+    bar2 = _make_bar(ist_hhmm="10:25")
+    bar3 = _make_bar(ist_hhmm="10:30")
+
+    with patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(return_value=None)):
+        with patch("pdp.strategies.directional_strangle.score_bias", return_value=bear_result):
+            await s.on_bar(bar1)  # pending MORE_BEAR, count=1
+        assert s._pending_bucket == "more_bear" and s._pending_bucket_count == 1
+
+        with patch("pdp.strategies.directional_strangle.score_bias", return_value=bull_result):
+            await s.on_bar(bar2)  # reverts to MORE_BULL; counter must reset
+        assert s._pending_bucket is None, "Revert must clear pending_bucket"
+        assert s._pending_bucket_count == 0
+        assert s._current_bucket == "more_bull"  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# R5 — day_loss_cap halt persists across same-day restart
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_halt_marker_blocks_reentry_on_same_day_restart():
+    """After day_loss_cap fires, a simulated restart on the same day must stay halted."""
+    from datetime import date
+
+    s = await _build_strategy(params={"day_loss_limit": 1})  # very low cap
+    # Simulate the halt marker already being set for today (simulates post-halt restart).
+    today = date(2026, 6, 28)  # matches _make_bar default date
+    expected_key = f"halt:{s.strategy_id}:{today.isoformat()}"
+    s.ctx.market.cache_get = AsyncMock(return_value="1")  # marker exists
+
+    # Force _day_key=None so _maybe_reset_day will trigger on first bar
+    s._day_key = None
+
+    # First bar: should restore halt from Redis and remain done_for_day
+    bar = _make_bar(ist_hhmm="10:20")
+    with patch(
+        "pdp.strategies.directional_strangle.resolve_otm_option",
+        AsyncMock(return_value=None),
+    ):
+        await s.on_bar(bar)
+
+    assert s._done_for_day is True, "Halt marker must be restored on first bar of same day"
+    # No orders should have been placed
+    assert s.ctx.orders.calls == [], "No orders must be placed when halt is active"
+
+
+@pytest.mark.asyncio
+async def test_halt_marker_clears_on_next_day():
+    """After a halt on day D, day D+1 must start un-halted (different Redis key, no marker)."""
+    from datetime import date
+
+    s = await _build_strategy(params={"day_loss_limit": 1})
+
+    # Simulate day 1 was halted: _day_key = June 28
+    s._day_key = date(2026, 6, 28)
+    s._done_for_day = True
+    s._halt_checked = True
+
+    # Day 2 bar arrives — different date so _maybe_reset_day will reset state.
+    s.ctx.market.cache_get = AsyncMock(return_value=None)  # no halt for day 2
+
+    bar_day2 = _make_bar(ist_hhmm="10:20")
+    # Reuse same bar but with date June 29
+    from datetime import datetime, timezone
+    bar_day2 = BarClosed(
+        security_id="13",
+        timeframe="5m",
+        bar_time=datetime(2026, 6, 29, 4, 50, tzinfo=timezone.utc),  # 10:20 IST
+        open=Decimal("24000"),
+        high=Decimal("24050"),
+        low=Decimal("23950"),
+        close=Decimal("24000"),
+        volume=1000,
+        oi=0,
+    )
+
+    with patch(
+        "pdp.strategies.directional_strangle.resolve_otm_option",
+        AsyncMock(return_value=None),
+    ):
+        await s.on_bar(bar_day2)
+
+    assert s._done_for_day is False, "Next day must start un-halted"
+    assert s._day_key == date(2026, 6, 29), "Day key must update to new date"
+
+
+@pytest.mark.asyncio
+async def test_day_loss_cap_writes_halt_marker_to_redis():
+    """When day_loss_cap fires, the halt marker must be written to Redis cache."""
+    from datetime import date
+    from unittest.mock import call
+
+    # Set day_loss_limit very low so it fires immediately
+    s = await _build_strategy(params={"day_loss_limit": 1})
+
+    # Inject a pre-existing realized loss so day_pnl <= -1
+    s.ctx.orders._p("13")["realized"] = Decimal("-100")
+    # Prime day key and baseline so _day_realized returns -100
+    s._day_key = date(2026, 6, 28)
+    s._touched_sids.add("13")
+    s._day_baseline["13"] = Decimal("0")
+
+    s.ctx.market.cache_set = AsyncMock()
+
+    bar = _make_bar(ist_hhmm="10:20")
+    with patch(
+        "pdp.strategies.directional_strangle.resolve_otm_option",
+        AsyncMock(return_value=None),
+    ):
+        await s.on_bar(bar)
+
+    expected_key = f"halt:{s.strategy_id}:{date(2026, 6, 28).isoformat()}"
+    s.ctx.market.cache_set.assert_called_once_with(expected_key, "1", ex=86400)
+
+
+# ---------------------------------------------------------------------------
+# R3 — Full bias signal set (PCR from chain hub, VWAP from futures config)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pcr_read_from_chain_hub_when_wired():
+    """When chain_hub is wired and returns a PCR, BiasInputs.pcr must be non-None."""
+    s = await _build_strategy()
+
+    # Wire a fake chain hub that returns a PCR value
+    fake_hub = MagicMock()
+    fake_hub.get_pcr.return_value = 1.25
+    s.ctx.chain_hub = fake_hub
+
+    inputs = s._build_bias_inputs(24000.0)
+
+    assert inputs.pcr == pytest.approx(1.25)
+    fake_hub.get_pcr.assert_called_once_with(s.underlying)
+
+
+@pytest.mark.asyncio
+async def test_pcr_is_none_when_chain_hub_not_wired():
+    """Without a chain hub, PCR must stay None (vote is skipped by bias engine)."""
+    s = await _build_strategy()
+    # ctx.chain_hub is None by default in _build_strategy
+
+    inputs = s._build_bias_inputs(24000.0)
+
+    assert inputs.pcr is None
+
+
+@pytest.mark.asyncio
+async def test_vwap_uses_futures_sid_when_configured():
+    """When futures_security_id is set, VWAP is read from the futures SID, not spot."""
+    from pdp.indicators.engine import IndicatorEngine
+    from pdp.indicators.vwap import VWAPState
+
+    futures_sid = "NIFTY_FUT_SID"
+    s = await _build_strategy(params={"futures_security_id": futures_sid})
+
+    # Futures SID returns a VWAP; spot SID returns None (as in production)
+    futures_vwap = VWAPState(vwap=23950.5, session_date=None)  # type: ignore[arg-type]
+    def _vwap_side_effect(sid, tf):
+        if sid == futures_sid:
+            return futures_vwap
+        return None
+
+    s.ctx.indicators.vwap.side_effect = _vwap_side_effect
+
+    inputs = s._build_bias_inputs(24000.0)
+
+    assert inputs.vwap == pytest.approx(23950.5)
+
+
+@pytest.mark.asyncio
+async def test_vwap_falls_back_to_spot_sid_when_no_futures_configured():
+    """Without futures_security_id, VWAP call uses the spot SID (may return None for index)."""
+    s = await _build_strategy()  # no futures_security_id in params
+
+    # Spot SID returns None (no volume on index), futures SID never called
+    s.ctx.indicators.vwap.return_value = None
+
+    inputs = s._build_bias_inputs(24000.0)
+
+    assert inputs.vwap is None
+    # Confirm it called with spot SID, not some unknown futures SID
+    s.ctx.indicators.vwap.assert_called_with(s.sid, "5m")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -135,27 +136,50 @@ class MarketControl:
         session_maker: async_sessionmaker[AsyncSession] | None,
         redis: Redis | None = None,
         paper_broker: PaperBroker | None = None,
+        on_subscribe: Callable[[str], None] | None = None,
+        on_unsubscribe: Callable[[str], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._session_maker = session_maker
         self._redis = redis
         self._paper_broker = paper_broker
+        self._on_subscribe = on_subscribe
+        self._on_unsubscribe = on_unsubscribe
 
     async def subscribe(self, security_id: str, segment: str) -> bool:
         # Pre-register with paper broker before the Dhan subscription so the first
         # tick after place_order() fills the MARKET order without being missed.
         if self._paper_broker is not None:
             self._paper_broker.notify_subscribe(security_id)
+        # Notify the host so this SID's ticks are routed to strategy.on_tick().
+        if self._on_subscribe is not None:
+            self._on_subscribe(security_id)
         if self._adapter is None or self._session_maker is None:
             return False
         async with self._session_maker() as session:
             return await self._adapter.subscribe(security_id, segment, session)
 
     async def unsubscribe(self, security_id: str, segment: str) -> None:
+        if self._on_unsubscribe is not None:
+            self._on_unsubscribe(security_id)
         if self._adapter is None or self._session_maker is None:
             return
         async with self._session_maker() as session:
             await self._adapter.unsubscribe(security_id, segment, session)
+
+    async def cache_get(self, key: str) -> str | None:
+        """Read an arbitrary string value from the Redis hot cache."""
+        if self._redis is None:
+            return None
+        raw = await self._redis.get(key)
+        if raw is None:
+            return None
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+
+    async def cache_set(self, key: str, value: str, ex: int | None = None) -> None:
+        """Write an arbitrary string value to the Redis hot cache."""
+        if self._redis is not None:
+            await self._redis.set(key, value, ex=ex)
 
     async def ltp(self, security_id: str) -> Decimal | None:
         """Latest traded price from the Redis hot cache, or None if unavailable.
@@ -211,6 +235,7 @@ class StrategyContext:
     indicators: IndicatorReader | None = None
     market: MarketControl | None = None
     session_maker: async_sessionmaker[AsyncSession] | None = None
+    chain_hub: Any | None = None
 
 
 class StrategyOrderClient:

@@ -32,6 +32,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 16. [Alert System — Setup & Usage Guide](#16-alert-system--setup--usage-guide)
 17. [Directional Strangle — Paper Mode Operations](#17-directional-strangle--paper-mode-operations)
 18. [Unified Log Pipeline (OpenSearch)](#18-unified-log-pipeline-opensearch)
+19. [Strangle Live-Paper Hardening](#19-strangle-live-paper-hardening-change-strangle-live-paper-hardening)
 
 ---
 
@@ -1914,5 +1915,113 @@ Violations are also logged as `order_preflight_failed` at INFO level with the fu
 3. Restart the API.
 4. The next paper run will log `margin_required` on every `order_preflight_ok` event.
 5. Promote to live (`LIVE=1`) only after paper validation passes.
+
+---
+
+## 19. Strangle Live-Paper Hardening (change `strangle-live-paper-hardening`)
+
+Fixes applied 2026-06-29 based on the first 3-index paper session. This section explains the
+new mechanisms so you know what to look for in the logs.
+
+### 19.1 LTP delivery to strategy (R1)
+
+**Problem:** option-leg `ltp/mtm` were always `null` because `StrategyHost.on_tick()` only
+dispatched ticks matching the static YAML watchlist, which contains only the index SID.
+Option SIDs are subscribed dynamically at runtime via `ctx.market.subscribe()`.
+
+**Fix:** each running strategy now maintains a `dynamic_sids: set[str]` tracked inside
+`_StrategyState`. `MarketControl.subscribe()` adds the SID; `on_tick()` dispatches if the SID
+is in either the static watchlist or the dynamic set. Leg-close paths call `unsubscribe()`;
+`stop()` clears the set.
+
+**Verify in log:** `leg_status` events should show `ltp` and `mtm` as non-null floats for
+every open leg from the first 5m bar after entry.
+
+### 19.2 Paper fill integrity (R2)
+
+**Problem:** `avg_price = 0` was stored when the MARKET order's pub/sub tick hadn't arrived
+yet. Closing the position then computed `(0 − close_px) × qty` → fabricated loss.
+
+**Fixes (dual-defence):**
+- `PaperBroker.add_order()` now reads `ltp:{sid}` from Redis immediately and fills on the
+  spot for MARKET orders if a price is cached (path: router sets `ltp:` cache on every tick).
+- `upsert_position` guards `old_avg == 0`: skips the realized-P&L computation and logs
+  `zero_avg_realized_skipped` warning instead of computing a nonsense number.
+
+**Verify in log:** no `zero_avg_realized_skipped` warnings. All `leg_open` events show
+`entry_price > 0`, including hedges.
+
+### 19.3 Day-loss halt persistence (R5)
+
+**Problem:** restarting the API on the same calendar day after `day_loss_cap` fired allowed
+re-entry, because `_done_for_day` resets to `False` on `on_init`.
+
+**Fix:** on `day_loss_cap`, the strategy writes a Redis key
+`halt:{strategy_id}:{YYYY-MM-DD}` (IST date) with 86400s TTL. On the first bar of each day,
+the strategy reads the key (`_maybe_restore_halt_marker`). If the key exists for today, it
+sets `_done_for_day = True` — the session is over. The marker is cleared automatically by the
+TTL and by `_maybe_reset_day` on IST date rollover.
+
+**Verify:** after a simulated `day_loss_cap` (set `day_loss_limit=1` briefly), stop and
+restart. The log should show `halt_marker_restored` at the first bar, and no new leg_open
+events for the rest of that calendar day.
+
+### 19.4 Bias signal set (R3)
+
+**PCR** — now read from `OptionsHub.get_pcr(underlying)` at each bias evaluation. PCR is
+computed from chain OI during each option-chain poll (only available when
+`OptionsChainPoller` is running, i.e., `LIVE=1`). In paper mode, PCR stays `None` and the
+vote is correctly skipped by the bias engine.
+
+**VWAP from futures** — the NIFTY/BANKNIFTY/SENSEX index has no traded volume; `vwap` from
+the spot SID is always `None`. Set `futures_security_id` in the strategy YAML params to the
+Dhan SID of the front-month index future (update monthly). Add a watchlist entry for that SID
+with `timeframes: [5m]` and `indicators: [{family: vwap}]` so bars flow to the indicator
+engine.
+
+**EMA warmup (15m / 1H)** — warmup now fetches multiple prior sessions rather than just one:
+6 calendar days for 15m (covering 2 sessions × 25 bars = 50 bars → EMA(50) seeded) and 14
+calendar days for 1H (covering ~8 sessions × 7 bars = 56 bars → EMA(50) seeded). Confirmed
+by `indicator_warmup_done` log at startup — check the `bars_fed` field.
+
+**cam_weekly** — weekly Camarilla requires `1w` bar support in the bar aggregator (not yet
+added). The `cam_weekly_missing` debug log fires once per strategy session; this is expected
+until the bar aggregator adds `1w` support.
+
+### 19.5 Bucket-change hysteresis (R4)
+
+**Problem:** a single 5m-bar bucket flip immediately closed and reopened all legs — 3
+reversals in 15 min were observed on BANKNIFTY.
+
+**Fix:** `bucket_confirm_bars` param (default 2). A new bucket must persist for N consecutive
+5m bars before the strategy acts. The pending bucket and counter reset if the bar reverts.
+
+**Tune:** if the market is trending strongly, you may want to lower to 1. The backtest used
+the default threshold, so 2 is validated over 5yr.
+
+### 19.6 Configuring futures SID for VWAP
+
+To enable real VWAP for NIFTY:
+
+1. Look up the front-month NIFTY futures SID in `data/masters/<YYYY-MM-DD>.csv` (the column
+   is `SEM_SMST_SECURITY_ID`; filter for `SM_SYMBOL_NAME = NIFTY` and the nearest monthly
+   expiry).
+2. Add to `strategies/directional_strangle_nifty.yaml`:
+   ```yaml
+   watchlist:
+     # ... existing spot entry ...
+     - security_id: "<FUTURES_SID>"
+       exchange_segment: NSE_FNO
+       timeframes: [5m]
+       indicators:
+         - family: vwap
+
+   params:
+     # ... existing params ...
+     futures_security_id: "<FUTURES_SID>"
+   ```
+3. Repeat monthly when the front-month rolls (last Thursday of the expiry month).
+
+Until configured, VWAP remains `None` and the vote is skipped (safe; no fabricated signal).
 
 Kill API: `Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process -Force`

@@ -118,6 +118,9 @@ class DirectionalStrangle(Strategy):
         self.index_segment: str = p.get("index_segment", "IDX_I")
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self._vix_sid: str = str(p.get("vix_security_id", "21"))
+        # Optional front-month futures SID for VWAP (real volume vs zero-volume index spot)
+        _futs = p.get("futures_security_id")
+        self._futures_sid: str | None = str(_futs) if _futs else None
 
         self._lot_size: int = int(p.get("lot_size", 65))
         self._scale_lots: int = int(p.get("scale_lots", 2))
@@ -146,6 +149,9 @@ class DirectionalStrangle(Strategy):
         self._momentum_enabled: bool = bool(p.get("momentum_enabled", True))
         self._momentum_premium_target: int = int(p.get("momentum_premium_target", 50000))
         self._momentum_score_threshold: float = float(p.get("momentum_score_threshold", 0.5))
+
+        # Bucket-change hysteresis: new bucket must persist for N bars before acting.
+        self._bucket_confirm_bars: int = int(p.get("bucket_confirm_bars", 2))
 
         # Rollup params: close short when LTP < roll_trigger_prem, reopen at >= roll_target_min_prem
         self._roll_trigger_prem: float = float(p.get("roll_trigger_prem", 20.0))
@@ -191,6 +197,9 @@ class DirectionalStrangle(Strategy):
         self._done_for_day = False
         self._day_key: date | None = None
         self._subscribed_option_sids: set[str] = set()
+        self._halt_checked: bool = False  # checked once per day to avoid repeated Redis reads
+        self._pending_bucket: str | None = None  # candidate new bucket awaiting confirmation
+        self._pending_bucket_count: int = 0      # consecutive bars seen for pending bucket
 
         self._vix_now: float | None = None
         self._vix_day_open: float | None = None
@@ -282,6 +291,11 @@ class DirectionalStrangle(Strategy):
 
         self._maybe_reset_day(bar_day)
 
+        # On first bar of each day, check Redis for a persisted halt marker.
+        if not self._halt_checked:
+            await self._maybe_restore_halt_marker()
+            self._halt_checked = True
+
         # 15m bar: capture Opening Range on first bar of the session
         if bar.timeframe == "15m" and not self._orb_high:
             self._orb_high = float(bar.high)
@@ -314,6 +328,9 @@ class DirectionalStrangle(Strategy):
                 await self._close_all("day_loss_cap")
             self._emit_event(StrangleEventType.DAY_LOSS_CAP, day_pnl=float(day_pnl))
             self._done_for_day = True
+            # Persist halt so a same-day restart stays halted (cleared by day rollover).
+            if self._day_key is not None and self.ctx.market is not None:
+                await self.ctx.market.cache_set(self._halt_key(self._day_key), "1", ex=86400)
             return
 
         inp = self._build_bias_inputs(spot)
@@ -348,12 +365,27 @@ class DirectionalStrangle(Strategy):
         pe_lots, ce_lots = self._ratio_for(result.bucket)
 
         if self._current_bucket != bucket_str:
-            if self._short_legs or self._hedge_legs:
-                self._emit_event(StrangleEventType.BUCKET_CHANGE,
-                    old_bucket=self._current_bucket, new_bucket=bucket_str)
-                await self._close_shorts_and_hedges("bucket_change")
-            self._current_bucket = bucket_str
-            await self._open_bucket(spot, pe_lots, ce_lots)
+            # Hysteresis: new bucket must persist for bucket_confirm_bars consecutive bars.
+            if self._pending_bucket == bucket_str:
+                self._pending_bucket_count += 1
+            else:
+                self._pending_bucket = bucket_str
+                self._pending_bucket_count = 1
+
+            if self._pending_bucket_count >= self._bucket_confirm_bars:
+                # Confirmation met — act on the bucket change.
+                if self._short_legs or self._hedge_legs:
+                    self._emit_event(StrangleEventType.BUCKET_CHANGE,
+                        old_bucket=self._current_bucket, new_bucket=bucket_str)
+                    await self._close_shorts_and_hedges("bucket_change")
+                self._current_bucket = bucket_str
+                self._pending_bucket = None
+                self._pending_bucket_count = 0
+                await self._open_bucket(spot, pe_lots, ce_lots)
+        else:
+            # Bucket matches current — clear any pending confirmation.
+            self._pending_bucket = None
+            self._pending_bucket_count = 0
 
         if self._momentum_enabled:
             if result.bucket in _EXTREME_BUCKETS and not self._momentum_legs:
@@ -562,10 +594,14 @@ class DirectionalStrangle(Strategy):
             self.ctx.log.debug("cam_weekly_missing", reason="1w_bar_not_supported_yet")
 
         pl = ind.period_levels(self.sid, "5m") if ind else None
-        vwap_s = ind.vwap(self.sid, "5m") if ind else None
+        # VWAP: prefer futures SID (has real volume); fall back to spot (returns None for index)
+        vwap_sid = self._futures_sid if self._futures_sid else self.sid
+        vwap_s = ind.vwap(vwap_sid, "5m") if ind else None
 
-        # PCR: no indicator engine method yet; keep None (vote is skipped by bias engine)
+        # PCR: read from chain hub if wired (only available during live chain polling)
         pcr: float | None = None
+        if self.ctx.chain_hub is not None:
+            pcr = self.ctx.chain_hub.get_pcr(self.underlying)
 
         return BiasInputs(
             spot=spot,
@@ -601,8 +637,8 @@ class DirectionalStrangle(Strategy):
     async def _await_fill_avg_px(self, sid: str) -> Decimal:
         """Poll get_position until paper broker fills the MARKET order (avg_px > 0).
 
-        Paper broker fills on the first Redis LTP tick for the SID, which arrives
-        asynchronously.  Yielding to the event loop a few times is enough.
+        With the immediate-fill-from-cache path in PaperBroker this usually resolves
+        on the first poll.  The loop is a fallback for when no cached LTP exists yet.
         """
         for _ in range(8):
             _, avg_px = await self.ctx.orders.get_position(sid)
@@ -610,6 +646,9 @@ class DirectionalStrangle(Strategy):
                 return avg_px
             await asyncio.sleep(0.15)
         _, avg_px = await self.ctx.orders.get_position(sid)
+        if avg_px is None or avg_px == Decimal("0"):
+            self.ctx.log.warning("fill_avg_px_zero", sid=sid)
+            return Decimal("0")
         return avg_px
 
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
@@ -702,6 +741,7 @@ class DirectionalStrangle(Strategy):
             return
 
         h_sid = target.security_id
+        await self._record_day_baseline(h_sid)
         order = await self._place(h_sid, segment, "BUY", lots)
         if order is None or order.status in ("CANCELLED", "REJECTED"):
             return
@@ -789,6 +829,7 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+        await self._unsubscribe_option(leg.security_id, leg.segment)
         self._emit_event(StrangleEventType.LEG_CLOSE,
             sid=leg.security_id, opt_type=leg.opt_type, reason=reason, is_momentum=True)
 
@@ -890,6 +931,7 @@ class DirectionalStrangle(Strategy):
         close_lots = abs(net_qty) // self._lot_size
         if close_lots > 0:
             await self._place(leg.security_id, leg.segment, "BUY", close_lots)
+        await self._unsubscribe_option(leg.security_id, leg.segment)
         self._emit_event(StrangleEventType.LEG_CLOSE,
             sid=leg.security_id, opt_type=leg.opt_type,
             strike=leg.strike, reason=reason)
@@ -904,6 +946,7 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+        await self._unsubscribe_option(leg.security_id, leg.segment)
         self._emit_event(StrangleEventType.LEG_CLOSE,
             sid=leg.security_id, opt_type=leg.opt_type,
             strike=leg.strike, reason=reason, is_hedge=True)
@@ -982,10 +1025,23 @@ class DirectionalStrangle(Strategy):
     # Day management                                                       #
     # ------------------------------------------------------------------ #
 
+    def _halt_key(self, day: date) -> str:
+        return f"halt:{self.strategy_id}:{day.isoformat()}"
+
+    async def _maybe_restore_halt_marker(self) -> None:
+        """On first bar of the day: restore _done_for_day from Redis if a halt marker exists."""
+        if self._day_key is None or self.ctx.market is None:
+            return
+        raw = await self.ctx.market.cache_get(self._halt_key(self._day_key))
+        if raw:
+            self._done_for_day = True
+            self.ctx.log.info("halt_marker_restored", day=str(self._day_key))
+
     def _maybe_reset_day(self, bar_day: date) -> None:
         if self._day_key != bar_day:
             self._day_key = bar_day
             self._done_for_day = False
+            self._halt_checked = False
             self._orb_high = None
             self._orb_low = None
             self._vix_day_open = None
@@ -995,6 +1051,8 @@ class DirectionalStrangle(Strategy):
             self._touched_sids.clear()
             self._stop_gate.clear()
             self._cam_weekly_warned = False
+            self._pending_bucket = None
+            self._pending_bucket_count = 0
 
     async def _day_realized(self) -> Decimal:
         total = Decimal("0")
@@ -1034,6 +1092,11 @@ class DirectionalStrangle(Strategy):
         if self.ctx.market is not None and sid not in self._subscribed_option_sids:
             if await self.ctx.market.subscribe(sid, segment):
                 self._subscribed_option_sids.add(sid)
+
+    async def _unsubscribe_option(self, sid: str, segment: str) -> None:
+        if self.ctx.market is not None and sid in self._subscribed_option_sids:
+            await self.ctx.market.unsubscribe(sid, segment)
+            self._subscribed_option_sids.discard(sid)
 
     async def _find_exact_option(self, opt_type: str, strike: int) -> Any:
         """Fetch instrument row by exact strike for the nearest weekly expiry."""

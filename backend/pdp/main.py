@@ -168,6 +168,7 @@ async def lifespan(app: FastAPI):
     strategy_host.load_registry()
     strategy_host.set_redis(app.state.redis)
     strategy_host.set_paper_broker(paper_broker)
+    strategy_host.set_options_hub(options_hub)
     app.state.strategy_host = strategy_host
 
     # Universal indicator engine — computes SuperTrend once per (security, timeframe)

@@ -78,6 +78,7 @@ class _StrategyState:
     status: StrategyStatus = StrategyStatus.RUNNING
     dropped_ticks: int = 0
     _drop_streak: int = field(default=0, repr=False)
+    dynamic_sids: set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ class StrategyHost:
         self._redis: Redis | None = None
         self._paper_broker: PaperBroker | None = None
         self._event_service: Any = None
+        self._options_hub: Any | None = None
 
     def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
         """Wire the universal indicator engine read by strategies via ctx.indicators."""
@@ -123,6 +125,10 @@ class StrategyHost:
     def set_event_service(self, event_service: Any) -> None:
         """Wire the event service so STRATEGY_SIGNAL events are emitted on fills."""
         self._event_service = event_service
+
+    def set_options_hub(self, hub: Any) -> None:
+        """Wire the OptionsHub so strategies can read live PCR via ctx.chain_hub."""
+        self._options_hub = hub
 
     # ------------------------------------------------------------------ #
     # Registry                                                             #
@@ -178,14 +184,25 @@ class StrategyHost:
             max_open_orders=cfg.risk.max_open_orders,
             max_daily_loss_inr=cfg.risk.max_daily_loss_inr,
         )
+        # Shared mutable set of runtime-subscribed SIDs; callbacks capture it by reference.
+        dynamic_sids: set[str] = set()
+
         ctx = StrategyContext(
             orders=order_client,
             params=dict(cfg.params),
             watchlist=list(cfg.watchlist),
             log=log.bind(strategy_id=cfg.id),
             indicators=IndicatorReader(self._indicator_engine),
-            market=MarketControl(self._market_adapter, self._session_maker, self._redis, self._paper_broker),
+            market=MarketControl(
+                self._market_adapter,
+                self._session_maker,
+                self._redis,
+                self._paper_broker,
+                on_subscribe=dynamic_sids.add,
+                on_unsubscribe=dynamic_sids.discard,
+            ),
             session_maker=self._session_maker,
+            chain_hub=self._options_hub,
         )
 
         inbox: asyncio.Queue[_Event] = asyncio.Queue(maxsize=_INBOX_SIZE)
@@ -209,6 +226,7 @@ class StrategyHost:
             instance=instance,
             inbox=inbox,
             task=task,
+            dynamic_sids=dynamic_sids,
         )
         log.info("strategy_started", strategy_id=strategy_id)
 
@@ -218,6 +236,7 @@ class StrategyHost:
             raise NotRunning(strategy_id)
 
         state = self._running.pop(strategy_id)
+        state.dynamic_sids.clear()
         try:
             await state.instance.on_shutdown()
         except Exception as exc:
@@ -241,7 +260,7 @@ class StrategyHost:
     def on_tick(self, tick: Tick) -> None:
         sid = tick.security_id
         for state in self._running.values():
-            if not _watches_security(state.config, sid):
+            if not _watches_security(state.config, sid) and sid not in state.dynamic_sids:
                 continue
             self._enqueue(state, _TickEvent(tick))
 

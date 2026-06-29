@@ -42,10 +42,16 @@ class OptionsHub:
         self._clients: set[_OptionsClient] = set()
         # Non-WS listeners (e.g. the event publisher) invoked on every snapshot.
         self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
+        # Latest PCR per underlying; updated on every broadcast.
+        self._pcr: dict[str, float | None] = {}
 
     def register_listener(self, cb: Callable[[str, dict[str, Any]], None]) -> None:
         """Register ``cb(underlying, snapshot)`` run on each broadcast."""
         self._listeners.append(cb)
+
+    def get_pcr(self, underlying: str) -> float | None:
+        """Return the most recently broadcast PCR for *underlying*, or None."""
+        return self._pcr.get(underlying.upper())
 
     def add(self, client: _OptionsClient) -> None:
         self._clients.add(client)
@@ -56,6 +62,12 @@ class OptionsHub:
         log.info("ws_options_client_disconnected", addr=client.addr, total=len(self._clients))
 
     def broadcast(self, underlying: str, expiry: str, snapshot: dict) -> None:
+        pcr = snapshot.get("pcr")
+        if pcr is not None:
+            try:
+                self._pcr[underlying.upper()] = float(pcr)
+            except (TypeError, ValueError):
+                pass
         for cb in self._listeners:
             try:
                 cb(underlying, snapshot)

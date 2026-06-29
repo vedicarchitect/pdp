@@ -300,3 +300,152 @@ class TestCancelOpenEntryOrders:
 
         assert cancelled == []
         session.commit.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+# R2 — zero-avg guard + immediate-fill from Redis cache (hardening)   #
+# ------------------------------------------------------------------ #
+
+class TestZeroAvgGuard:
+    """upsert_position must not compute realized P&L when old_avg == 0."""
+
+    @pytest.mark.asyncio
+    async def test_close_short_with_zero_avg_yields_zero_realized(self) -> None:
+        """Closing a short position whose avg_price=0 must leave realized_pnl untouched."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-50,
+            avg_price=Decimal("0"),   # race condition: fill recorded zero
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.BUY, qty=50)  # closing buy
+        await broker._upsert_position(session, order, Decimal("100"), datetime.now(UTC))
+
+        # P&L must be 0, not (0 - 100) * (-50) = +5000 or (100 - 0) * 50 = +5000
+        assert pos.realized_pnl == Decimal("0"), (
+            f"expected 0 realized P&L for zero-avg position, got {pos.realized_pnl}"
+        )
+        assert pos.net_qty == 0
+
+    @pytest.mark.asyncio
+    async def test_reduce_long_with_zero_avg_yields_zero_realized(self) -> None:
+        """Partial close of a long position with avg=0 must not compute realized P&L."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=100,
+            avg_price=Decimal("0"),
+            realized_pnl=Decimal("50"),   # pre-existing realized from earlier
+            unrealized_pnl=Decimal("0"),
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.SELL, qty=50)
+        await broker._upsert_position(session, order, Decimal("120"), datetime.now(UTC))
+
+        # realized should remain at 50, not 50 + (120 - 0) * 50
+        assert pos.realized_pnl == Decimal("50"), (
+            f"expected realized_pnl unchanged at 50, got {pos.realized_pnl}"
+        )
+        assert pos.net_qty == 50
+
+    @pytest.mark.asyncio
+    async def test_normal_close_short_still_works(self) -> None:
+        """Guard must not break the normal non-zero avg_price path."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-50,
+            avg_price=Decimal("85.30"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.BUY, qty=50)
+        await broker._upsert_position(session, order, Decimal("96.52"), datetime.now(UTC))
+
+        # realized = (85.30 - 96.52) * 50 = -561.0
+        assert pos.realized_pnl == Decimal("-561.0000")
+        assert pos.net_qty == 0
+
+
+class TestImmediateFillFromCache:
+    """MARKET orders should fill immediately from Redis LTP cache when available."""
+
+    @pytest.mark.asyncio
+    async def test_market_order_fills_from_cached_ltp(self) -> None:
+        """When Redis has a cached LTP for the SID, add_order() must fill immediately."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("2")
+        broker._costs = {}
+        broker._hub = None
+        broker._open_orders = {}
+
+        # Mock Redis: returns a valid LTP (decode_responses=True means string, not bytes)
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value="150.50")
+        broker._redis = redis
+
+        # Mock _fill to capture calls
+        broker._fill = AsyncMock()
+
+        order = _open_order(order_id=5, security_id="OPT_1234", order_type=OrderType.MARKET)
+        await broker.add_order(order)
+
+        broker._fill.assert_called_once()
+        call_args = broker._fill.call_args
+        assert call_args[0][0] is order
+        assert call_args[0][1] == Decimal("150.50")
+
+    @pytest.mark.asyncio
+    async def test_market_order_no_fill_when_no_cached_ltp(self) -> None:
+        """When Redis has no cached LTP, add_order() leaves the order OPEN for pub/sub fill."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("2")
+        broker._costs = {}
+        broker._hub = None
+        broker._open_orders = {}
+
+        redis = AsyncMock()
+        redis.get = AsyncMock(return_value=None)
+        broker._redis = redis
+        broker._fill = AsyncMock()
+
+        order = _open_order(order_id=6, security_id="OPT_5678", order_type=OrderType.MARKET)
+        await broker.add_order(order)
+
+        broker._fill.assert_not_called()
+        # Order remains in the watch list for pub/sub fill
+        assert order in broker._open_orders.get("OPT_5678", [])
