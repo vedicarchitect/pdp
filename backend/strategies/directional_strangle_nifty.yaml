@@ -77,7 +77,7 @@ params:
   squareoff_ist: "15:10"
 
   # ---- Day loss cap ----
-  day_loss_limit: 15000
+  day_loss_limit: 50000
   neutral_no_trade: false
 
   # ---- Bias weights (trend-weighted / conservative thresholds) ----
@@ -96,4 +96,4 @@ params:
 
 risk:
   max_open_orders: 30
-  max_daily_loss_inr: 15000
+  max_daily_loss_inr: 50000

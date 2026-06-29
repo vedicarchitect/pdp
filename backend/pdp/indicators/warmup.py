@@ -36,6 +36,7 @@ _TF_SESSION_BARS: dict[str, int] = {
     "15m": 25,
     "25m": 15,
     "1H": 7,
+    "1h": 7,
 }
 _DEFAULT_SESSION_BARS = 75
 
@@ -46,6 +47,7 @@ _TF_TO_DHAN_INTERVAL: dict[str, int] = {
     "15m": 15,
     "25m": 25,
     "1H": 60,
+    "1h": 60,
 }
 
 # Segment string → Dhan instrument type string for the REST API

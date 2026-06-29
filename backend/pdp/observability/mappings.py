@@ -37,7 +37,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "build": _KW,
         "device": _KW,
         "exc": _TXT,
-        "context": {"type": "flattened"},
+        "context": {"type": "flat_object"},
     },
     "strangle-events": {
         "@timestamp": _DATE,
@@ -112,7 +112,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "promotion_state": _KW,
         "git_sha": _KW,
         "created_at": _DATE,
-        "config": {"type": "flattened"},
+        "config": {"type": "flat_object"},
     },
     "backtest-days": {
         "@timestamp": _DATE,

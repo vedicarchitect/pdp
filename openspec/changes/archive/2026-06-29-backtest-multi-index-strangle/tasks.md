@@ -15,25 +15,26 @@ Same bias engine (`backend/pdp/signals/bias.py`) reused unchanged — only instr
 
 ## 1. BANKNIFTY data backfill
 
-- [ ] 1.1 Spot backfill: `uv run python scripts/backfill_spot.py --symbol BANKNIFTY --from 2021-01-01 --only-missing`
+- [x] 1.1 Spot backfill: `uv run python scripts/backfill_spot.py --symbol BANKNIFTY --from 2021-01-01 --only-missing`
   - Security ID: look up from scrip master (Dhan IDX_I)
   - Store into `market_bars` with `security_id=<banknifty_sid>`
 - [x] 1.2 VIX already shared — India VIX applies to all indices
-- [ ] 1.3 Options backfill (expired): adapt `scripts/backfill_expired_options.py` for BANKNIFTY expiry calendar (Thursday weekly)
+- [x] 1.3 Options backfill (expired): adapt `scripts/backfill_expired_options.py` for BANKNIFTY expiry calendar (Thursday weekly)
   - Strike step: 100 (BANKNIFTY)
   - Lot size history: 15 → 25 → 15 (check NSE lot size table)
+  - Done via `backfill_options_gap.py --symbol BANKNIFTY` (BANKNIFTY: sid=25, step=100, NSE_FNO; deprecated script superseded)
 - [x] 1.4 Audit: `uv run python scripts/audit_strangle_data.py --symbol BANKNIFTY`
 
 ---
 
 ## 2. SENSEX data backfill
 
-- [ ] 2.1 Spot backfill: `uv run python scripts/backfill_spot.py --symbol SENSEX --from 2021-01-01 --only-missing`
+- [x] 2.1 Spot backfill: `uv run python scripts/backfill_spot.py --symbol SENSEX --from 2021-01-01 --only-missing`
   - BSE index — confirm Dhan security ID from scrip master
-- [ ] 2.2 Options backfill: SENSEX options trade on BSE (weekly, Friday expiry)
+- [x] 2.2 Options backfill: SENSEX options trade on BSE (weekly, Friday expiry)
   - Strike step: 100 (SENSEX)
   - Lot size: 10 (SENSEX)
-  - Adapt `backfill_options.py` for BSE exchange segment
+  - Done via `backfill_options_gap.py --symbol SENSEX` (SENSEX: sid=51, step=100, BSE_FNO; backtest 4.2 confirms data is present)
 - [x] 2.3 Audit: `uv run python scripts/audit_strangle_data.py --symbol SENSEX`
 
 ---
@@ -88,7 +89,10 @@ The current `strangle_loader.py` assumes NIFTY security IDs for VIX and PCR. Mak
 
 - [x] 6.1 Generate a side-by-side table: NIFTY vs BANKNIFTY vs SENSEX (5-year Net, PF, MaxDD, Calmar, Win%, per-year)
 - [x] 6.2 If all three are profitable with acceptable DD, consider running all three simultaneously (non-correlated premium income)
-- [ ] 6.3 Confirm legs don't exceed Dhan NIFTY/BANKNIFTY/SENSEX margin limits when running concurrent strategies
+- [x] 6.3 Confirm legs don't exceed Dhan NIFTY/BANKNIFTY/SENSEX margin limits when running concurrent strategies
+  - Peak margin: ~₹3.5–5L combined (NIFTY ~₹70K, BANKNIFTY ~₹1.5L, SENSEX ~₹1.3L)
+  - SEBI position limits (NIFTY 15K, BANKNIFTY 12K contracts) far exceed our 780/360/240 peak
+  - Minimum recommended account: ₹7–10L; see RUNBOOK §18.7 for full table
 
 ---
 

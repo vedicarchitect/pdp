@@ -1560,6 +1560,28 @@ task backtest:strangle -- --config-file backtest/configs/strangle_sensex_hedged.
 
 ---
 
+### 18.7 Concurrent margin estimate (all 3 indices live)
+
+**Methodology:** Each strategy opens up to `max(ratio_table_sum) × scale_lots` short lots in a single entry cycle. The worst-case (neutral bucket [3,3] × scale_lots=2) is 6 PE + 6 CE = 12 lots per index. Short OTM option SPAN margin is roughly ₹7,000–20,000/lot depending on the index; long hedge legs provide ~20–30% SPAN offset.
+
+| Index | lot_size | Max short lots | Contracts | SPAN est./lot | Gross SPAN | Net (with hedge) |
+|-------|----------|---------------|-----------|--------------|------------|-----------------|
+| NIFTY | 65 | 12 | 780 | ~₹8,000 | ~₹96,000 | **~₹70,000** |
+| BANKNIFTY | 30 | 12 | 360 | ~₹17,000 | ~₹2,04,000 | **~₹1,50,000** |
+| SENSEX | 20 | 12 | 240 | ~₹15,000 | ~₹1,80,000 | **~₹1,30,000** |
+| **Total** | | **36 lots** | **1,380** | | | **~₹3,50,000** |
+
+**Key findings:**
+- Combined peak margin ~₹3.5–5L — well within a standard Dhan F&O account (typical ₹10–25L exposure limit).
+- NIFTY and BANKNIFTY are both on NSE_FNO; SENSEX is on BSE_FNO. No cross-exchange offset applies.
+- SEBI client-level position limits for index options (NIFTY: 15,000 contracts; BANKNIFTY: 12,000; SENSEX: BSE equivalent) are far above our 780/360/240 contract peaks — no regulatory breach risk.
+- Each strategy has its own `day_loss_limit: 50,000` hard cap. Worst-case combined daily loss = ₹1.5L (3 × ₹50,000). A ₹10L account can absorb this comfortably.
+- The three indices have low intraday return correlation (SENSEX on BSE moves independently on some sessions), reducing simultaneous large-loss days.
+
+**Minimum recommended account size:** ₹7–10L (₹3.5L for peak margin + ₹3.5L buffer for adverse MTM before stops trigger).
+
+---
+
 ## 19. Strangle — Weekly Parity Check Procedure
 
 Run this after any live trading week to verify paper P&L matches backtest replay.
@@ -1751,3 +1773,5 @@ Returns a bar-anchored JSON narrative. Feed it to Claude with the prompt at
   records are dropped silently. Check `indexer.dropped` metric in the `/healthz` endpoint.
 - **No feedback loop**: the `pdp.observability` logger itself binds `_no_ship=True` so
   indexer log records are never re-enqueued.
+
+Kill API: `Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process -Force`

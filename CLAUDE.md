@@ -48,7 +48,7 @@ Foundation **1** `repo-restructure-and-claude-arch` (✓ done). Then:
 **8** `flutter-backtest-console` · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
 **11** `flutter-portfolio-advisory` · **12** `flutter-market-intel` · **13** `flutter-event-feed` ·
 **14** `flutter-management-hub` · **15** `multi-broker-kite` · **16** `cloud-deploy-aws`.
-In-flight strangle work: `live-directional-strangle-paper`, `backtest-multi-index-strangle`.
+In-flight strangle work: `live-directional-strangle-paper`. `backtest-multi-index-strangle` ✓ done — BANKNIFTY +₹35.1L PF 4.89, SENSEX +₹24.7L PF 6.21 (3yr), archived 2026-06-29.
 
 ## Key Commands (run from repo root)
 

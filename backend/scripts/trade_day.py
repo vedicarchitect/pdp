@@ -12,6 +12,8 @@ Endpoints used:
     GET /api/v1/strategies                    strategy list + status
     GET /api/v1/strangle/status?strategy_id=  per-strategy state
     GET /api/v1/instruments?underlying=X&limit=1  instruments check
+    http://localhost:9200/                    OpenSearch health
+    http://localhost:5601/                    OpenSearch Dashboards
 """
 from __future__ import annotations
 
@@ -29,6 +31,8 @@ except ImportError:
     sys.exit(1)
 
 API = "http://localhost:8000"
+_OS_URL = "http://localhost:9200"
+_KB_URL = "http://localhost:5601"
 _IST = ZoneInfo("Asia/Kolkata")
 _STRATEGIES = [
     "directional_strangle_nifty",
@@ -164,6 +168,25 @@ def pre_checks() -> bool:
         all_green = False
     else:
         _ok("LIVE              0 (paper mode)")
+
+    # 6. OpenSearch observability (optional but recommended)
+    _hdr("6. Observability (OpenSearch)")
+    try:
+        os_resp = httpx.get(f"{_OS_URL}/", timeout=2)
+        os_data = os_resp.json() if os_resp.status_code == 200 else {}
+        version = os_data.get("version", {}).get("number", "?")
+        _ok(f"OpenSearch {version} reachable at {_OS_URL}")
+    except Exception:
+        _warn(f"OpenSearch not reachable — run:  task search:up && task search:init")
+        _warn(f"  (Logs still captured to stdout/JSONL; dashboards won't work)")
+    try:
+        kb_resp = httpx.get(f"{_KB_URL}/", timeout=2)
+        if kb_resp.status_code in (200, 302):
+            _ok(f"Dashboards at {C}{_KB_URL}{Z}  (login: admin / admin)")
+        else:
+            _warn(f"Dashboards returned HTTP {kb_resp.status_code}")
+    except Exception:
+        _warn(f"Dashboards not reachable — start with:  task search:up")
 
     # Summary
     print(f"\n{BD}{'═'*56}{Z}")

@@ -76,7 +76,7 @@ params:
   squareoff_ist: "15:10"
 
   # ---- Day loss cap ----
-  day_loss_limit: 20000
+  day_loss_limit: 50000
   neutral_no_trade: false
 
   # ---- Bias weights (same trend-weighted config as NIFTY) ----
@@ -95,4 +95,4 @@ params:
 
 risk:
   max_open_orders: 30
-  max_daily_loss_inr: 20000
+  max_daily_loss_inr: 50000
