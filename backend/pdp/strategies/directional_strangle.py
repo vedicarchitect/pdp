@@ -32,6 +32,7 @@ Parity additions (chunk 4 strangle-execution-console):
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -597,6 +598,20 @@ class DirectionalStrangle(Strategy):
         if ce_lots > 0:
             await self._open_short(spot, "CE", ce_lots)
 
+    async def _await_fill_avg_px(self, sid: str) -> Decimal:
+        """Poll get_position until paper broker fills the MARKET order (avg_px > 0).
+
+        Paper broker fills on the first Redis LTP tick for the SID, which arrives
+        asynchronously.  Yielding to the event loop a few times is enough.
+        """
+        for _ in range(8):
+            _, avg_px = await self.ctx.orders.get_position(sid)
+            if avg_px and avg_px > 0:
+                return avg_px
+            await asyncio.sleep(0.15)
+        _, avg_px = await self.ctx.orders.get_position(sid)
+        return avg_px
+
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
         # Stop-gate check: block re-entry for 3 bars after a stop on this side
         if opt_type in self._stop_gate:
@@ -631,7 +646,7 @@ class DirectionalStrangle(Strategy):
         if order is None or order.status in ("CANCELLED", "REJECTED"):
             return
 
-        _, avg_px = await self.ctx.orders.get_position(sid)
+        avg_px = await self._await_fill_avg_px(sid)
         self._short_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px,
@@ -691,7 +706,7 @@ class DirectionalStrangle(Strategy):
         if order is None or order.status in ("CANCELLED", "REJECTED"):
             return
 
-        _, avg_px = await self.ctx.orders.get_position(h_sid)
+        avg_px = await self._await_fill_avg_px(h_sid)
         h_strike = float(target.strike) if target.strike is not None else 0.0
         self._hedge_legs.append(OpenLeg(
             security_id=h_sid, segment=segment, opt_type=opt_type,
@@ -747,7 +762,7 @@ class DirectionalStrangle(Strategy):
         if order is None or order.status in ("CANCELLED", "REJECTED"):
             return
 
-        _, avg_px = await self.ctx.orders.get_position(sid)
+        avg_px = await self._await_fill_avg_px(sid)
         self._momentum_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,

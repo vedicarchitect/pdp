@@ -233,9 +233,34 @@ def _fmt_score(score: float | None) -> str:
     return f"{c}{score:+.3f}{Z}"
 
 
+def _fmt_price(val: float | None) -> str:
+    if val is None or val == 0.0:
+        return f"{DM}—{Z}"
+    return f"{val:,.2f}"
+
+
+def _fmt_mtm(val: float | None) -> str:
+    if val is None:
+        return f"{DM}—{Z}"
+    c = G if val >= 0 else R
+    return f"{c}{val:+,.0f}{Z}"
+
+
+def _leg_type(leg: dict) -> str:
+    if leg.get("is_hedge"):
+        return f"{DM}HEDGE{Z}"
+    if leg.get("is_momentum"):
+        return f"{Y}MOMTM{Z}"
+    return f"{BD}SHORT{Z}"
+
+
+def _leg_opt(leg: dict) -> str:
+    ot = leg.get("opt_type", "?")
+    return f"{R}{ot}{Z}" if ot == "PE" else f"{B}{ot}{Z}"
+
+
 def monitor_loop() -> None:
     print(f"\n{BD}Live monitor started — Ctrl+C to exit{Z}\n")
-    prev_lines = 0
     refresh = 5  # seconds
 
     try:
@@ -245,37 +270,76 @@ def monitor_loop() -> None:
 
             out.append(f"{CLS}{BD}{C}PDP Multi-Index Paper Trade Monitor{Z}  "
                        f"{DM}{datetime.now(_IST).strftime('%Y-%m-%d')}  {now_ist} IST{Z}")
-            out.append("")
-
-            # Header row
-            out.append(
-                f"  {BD}{'Index':<12}  {'Bucket':<17}  {'Score':>7}  "
-                f"{'Shorts':>6}  {'Hedges':>6}  {'Day P&L':>12}  {'Done':<5}  {'Status'}{Z}"
-            )
-            out.append("  " + "─" * 82)
 
             any_data = False
+            total_pnl: float = 0.0
+            all_pnl_known = True
+
             for sid in _STRATEGIES:
                 label = sid.replace("directional_strangle_", "").upper()
                 st = _get("/api/v1/strangle/status", strategy_id=sid)
-                if st:
-                    any_data = True
-                    done_val = st.get("done_for_day", False)
-                    done_str = f"{R}DONE{Z}" if done_val else f"{G}live{Z}"
-                    mode = st.get("mode", "paper")
-                    out.append(
-                        f"  {BD}{label:<12}{Z}  {_fmt_bucket(st.get('bucket')):<26}  "
-                        f"{_fmt_score(st.get('score')):>16}  "
-                        f"{st.get('n_open_shorts', 0):>6}  "
-                        f"{st.get('n_open_hedges', 0):>6}  "
-                        f"{_fmt_pnl(st.get('day_pnl')):>21}  "
-                        f"{done_str}  [{DM}{mode}{Z}]"
-                    )
+                out.append("")
+
+                if not st:
+                    out.append(f"  {BD}{R}{label}{Z}  {R}not responding{Z}")
+                    all_pnl_known = False
+                    continue
+
+                any_data = True
+                done_val = st.get("done_for_day", False)
+                done_str = f"  {R}DONE{Z}" if done_val else f"  {G}live{Z}"
+                mode = st.get("mode", "paper")
+                day_pnl = st.get("day_pnl")
+                if day_pnl is not None:
+                    total_pnl += day_pnl
                 else:
-                    out.append(f"  {BD}{label:<12}{Z}  {R}not responding{Z}")
+                    all_pnl_known = False
+
+                # ── Index section header ──────────────────────────────────
+                bucket_disp = _fmt_bucket(st.get("bucket"))
+                score_disp = _fmt_score(st.get("score"))
+                pnl_disp = _fmt_pnl(day_pnl)
+                out.append(
+                    f"  {BD}{W}{label:<10}{Z}  {bucket_disp}  {score_disp}"
+                    f"  │  Day P&L {pnl_disp}{done_str}  {DM}[{mode}]{Z}"
+                )
+                out.append("  " + "─" * 74)
+
+                legs: list[dict] = st.get("legs", [])
+                if not legs:
+                    out.append(f"    {DM}no open legs{Z}")
+                else:
+                    # Sort: shorts first, then hedges, then momentum
+                    def _leg_order(lg: dict) -> int:
+                        if lg.get("is_momentum"):
+                            return 2
+                        if lg.get("is_hedge"):
+                            return 1
+                        return 0
+
+                    for lg in sorted(legs, key=_leg_order):
+                        ltype = _leg_type(lg)
+                        lopt = _leg_opt(lg)
+                        strike = lg.get("strike") or 0
+                        lots = lg.get("lots", 0)
+                        entry = lg.get("entry_price")
+                        ltp = lg.get("ltp")
+                        mtm = lg.get("mtm")
+                        out.append(
+                            f"    {ltype}  {lopt}  {BD}{strike:>8,.0f}{Z}"
+                            f"  ×{lots} lots"
+                            f"    entry {_fmt_price(entry):>10}"
+                            f"    ltp {_fmt_price(ltp):>10}"
+                            f"    mtm {_fmt_mtm(mtm):>14}"
+                        )
 
             if not any_data:
                 out.append(f"\n  {R}No strategies responding — is `task dev` running?{Z}")
+            else:
+                out.append("")
+                out.append("  " + "━" * 74)
+                total_disp = _fmt_pnl(total_pnl) if all_pnl_known else f"{DM}—{Z}"
+                out.append(f"  {BD}TOTAL Day P&L{Z}  {total_disp}")
 
             out.append("")
             out.append(f"  {DM}Refreshes every {refresh}s  ·  Ctrl+C to exit{Z}")

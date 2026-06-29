@@ -32,6 +32,8 @@ def _now_ist() -> datetime:
 
 def _ship_event(record: dict) -> None:
     """Dual-sink the canonical event to OpenSearch (no-op when the indexer is inactive)."""
+    if "event_type" not in record:
+        return  # heartbeats and other non-canonical records go to pdp-logs-* via structlog only
     from pdp.observability.indexer import get_active_indexer
 
     indexer = get_active_indexer()

@@ -442,10 +442,22 @@ async def lifespan(app: FastAPI):
     else:
         log.info("scrip_refresh_disabled")
 
+    # Auto-start all registered strategies (all wiring is complete at this point)
+    for _auto_sid in list(strategy_host._configs):
+        try:
+            await strategy_host.start(_auto_sid)
+        except Exception as _exc:
+            log.error("strategy_autostart_failed", strategy_id=_auto_sid, exc=str(_exc))
+
     try:
         yield
     finally:
         log.info("app_shutting_down")
+        for _auto_sid in list(strategy_host._running):
+            try:
+                await strategy_host.stop(_auto_sid)
+            except Exception:
+                pass
         if scrip_refresh_scheduler is not None:
             await scrip_refresh_scheduler.stop()
         if broker_sync_scheduler is not None:
