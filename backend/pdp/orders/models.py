@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -9,6 +10,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from pdp.db.base import Base
+
+
+@dataclass
+class PreflightResult:
+    ok: bool = True
+    margin_required: Decimal = Decimal("0")
+    margin_available: Decimal = Decimal("0")
+    charge_estimate: Decimal = Decimal("0")
+    violations: list[str] = field(default_factory=list)
 
 
 class Side(StrEnum):

@@ -140,7 +140,13 @@ async def lifespan(app: FastAPI):
             has_credentials=bool(settings.DHAN_CLIENT_ID),
         )
 
-    order_router = OrderRouter(settings, paper_broker, dhan_broker)
+    from pdp.orders.margin import MarginService
+
+    margin_service = MarginService.from_settings(settings) if settings.MARGIN_CHECK_ENABLED else None
+    if settings.MARGIN_CHECK_ENABLED and margin_service is None:
+        log.warning("margin_service_disabled", reason="no Dhan credentials")
+
+    order_router = OrderRouter(settings, paper_broker, dhan_broker, margin_service)
     app.state.order_router = order_router
 
     # Strategy host — always started; loads YAML configs from ./strategies/

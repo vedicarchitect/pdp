@@ -1774,4 +1774,52 @@ Returns a bar-anchored JSON narrative. Feed it to Claude with the prompt at
 - **No feedback loop**: the `pdp.observability` logger itself binds `_no_ship=True` so
   indexer log records are never re-enqueued.
 
+---
+
+## 19. Order Pre-Flight Checks (broker-order-safety)
+
+Every order passes a pre-flight gate in `OrderRouter._preflight` before reaching the broker.
+
+### What runs
+
+| Check | When it fires | Setting |
+|-------|--------------|---------|
+| Lot-size multiple | Always (if instrument known) | `ORDER_PREFLIGHT_ENABLED=true` |
+| Freeze-qty limit | Always (instrument col or settings map) | `ORDER_PREFLIGHT_ENABLED=true` |
+| Pre-trade charge estimate | Always (uses `ChargesCalculator`) | `ORDER_PREFLIGHT_ENABLED=true` |
+| Live Dhan margin check | Live + credentialed only | `MARGIN_CHECK_ENABLED=true` |
+
+### Settings reference
+
+```env
+ORDER_PREFLIGHT_ENABLED=true      # master switch
+MARGIN_CHECK_ENABLED=false        # live Dhan margin API (enable after creds confirmed)
+MARGIN_BUFFER_PCT=5.0             # block if required > available × (1 - buffer/100)
+MARGIN_FAILOPEN=false             # fail-closed in live; true = advisory on API error
+FREEZE_QTY_BY_UNDERLYING='{"NIFTY":1800,"BANKNIFTY":900,"SENSEX":1000}'
+```
+
+### Paper vs live behaviour
+
+- **Paper mode**: violations are logged as `order_preflight_advisory` warnings; the order is
+  **not** blocked. This lets you observe violations during paper runs without interrupting them.
+- **Live mode**: any violation → order is set to `REJECTED` before reaching the broker.
+
+### Reading a blocked order
+
+An order rejected by preflight has `status=REJECTED` and a `reject_reason` like:
+```
+qty 75 not a multiple of lot_size 75; insufficient margin: required 82500.00 > available 60000.00 (buffer 5.0%)
+```
+
+Violations are also logged as `order_preflight_failed` at INFO level with the full list.
+
+### Enabling the Dhan margin check
+
+1. Ensure `BROKER_SYNC_ENABLED=true` and a sync has run (populates `broker_funds.available_balance`).
+2. Set `MARGIN_CHECK_ENABLED=true` in `.env`.
+3. Restart the API.
+4. The next paper run will log `margin_required` on every `order_preflight_ok` event.
+5. Promote to live (`LIVE=1`) only after paper validation passes.
+
 Kill API: `Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process -Force`

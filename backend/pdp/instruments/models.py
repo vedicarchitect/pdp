@@ -28,6 +28,7 @@ class Instrument(Base):
     strike: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     option_type: Mapped[str | None] = mapped_column(String, nullable=True)
     lot_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    freeze_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tick_size: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, default=Decimal("0.05"))
     isin: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(

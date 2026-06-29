@@ -130,6 +130,7 @@ def parse_dhan_csv(source: bytes | str | Path) -> list[dict[str, Any]]:
                 "strike": _parse_decimal(_g(row, "STRIKE_PRICE", "SEM_STRIKE_PRICE")),
                 "option_type": option_type,
                 "lot_size": int(float(_g(row, "LOT_SIZE", "SEM_LOT_UNITS") or 1)),
+                "freeze_qty": int(float(fq)) if (fq := _g(row, "FREEZE_QTY", "SEM_FREEZE_QTY")) is not None else None,
                 "tick_size": _parse_decimal(_g(row, "TICK_SIZE", "SEM_TICK_SIZE")) or Decimal("0.05"),
                 "isin": _g(row, "ISIN", "SM_ISIN"),
             }

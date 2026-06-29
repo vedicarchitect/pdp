@@ -173,6 +173,17 @@ class Settings(BaseSettings):
     OPENSEARCH_QUEUE_MAX: int = 10000       # drop-on-full beyond this (never blocks callers)
     OPENSEARCH_LOG_LEVEL: str = "INFO"      # min structlog level shipped to pdp-logs-*
 
+    # ── Order pre-flight safety net (broker-order-safety capability) ───────
+    ORDER_PREFLIGHT_ENABLED: bool = True
+    MARGIN_CHECK_ENABLED: bool = False      # live Dhan margin API; off until creds confirmed
+    MARGIN_BUFFER_PCT: float = 5.0          # block if required > available × (1 - buffer/100)
+    MARGIN_FAILOPEN: bool = False           # fail-closed in live by default; True = advisory
+    FREEZE_QTY_BY_UNDERLYING: dict[str, int] = {
+        "NIFTY": 1800,
+        "BANKNIFTY": 900,
+        "SENSEX": 1000,
+    }
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
