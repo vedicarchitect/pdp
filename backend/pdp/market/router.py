@@ -85,11 +85,7 @@ class TickRouter:
         ltp_str = str(tick.ltp)
         sid = tick.security_id
 
-        # 1 — hot LTP cache + timestamp (TTL=5s so stale data auto-expires)
-        await redis.set(f"ltp:{sid}", ltp_str, ex=5)
-        await redis.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
-
-        # 2 — pub/sub fan-out for downstream consumers
+        # 1 & 2 — batch hot LTP cache + timestamp + pub/sub fan-out to reduce network IO
         tick_payload = json.dumps(
             {
                 "type": "tick",
@@ -101,7 +97,12 @@ class TickRouter:
                 "ltt": tick.ltt.isoformat(),
             }
         )
-        await redis.publish(f"tick.{sid}", tick_payload)
+
+        async with redis.pipeline(transaction=False) as pipe:
+            pipe.set(f"ltp:{sid}", ltp_str, ex=5)
+            pipe.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
+            pipe.publish(f"tick.{sid}", tick_payload)
+            await pipe.execute()
 
         # 2.5 — alert evaluator (evaluate price conditions on new tick)
         if self._alert_evaluator is not None:
@@ -127,29 +128,34 @@ class TickRouter:
                 # 6b — universal indicators (computed once, before strategy dispatch)
                 if self._indicator_engine is not None:
                     state = self._indicator_engine.on_bar(bar)
-                    if state is not None and state.direction is not None:
-                        await redis.set(
-                            f"st:{bar.security_id}:{bar.timeframe}",
-                            json.dumps(
-                                {
-                                    "direction": state.direction,
-                                    "value": str(state.value),
-                                    "flipped": state.flipped,
-                                    "bar_time": bar.bar_time.isoformat(),
-                                }
-                            ),
-                            ex=900,
-                        )
-                    # Publish suite snapshot (non-blocking; only when suite is configured)
                     _snap = self._indicator_engine.get_snapshot(bar.security_id, bar.timeframe)
-                    if _snap is not None:
-                        _snap_d = _snap.to_dict()
-                        if _snap_d:
-                            await redis.set(
-                                f"ind:{bar.security_id}:{bar.timeframe}",
-                                json.dumps(_snap_d),
-                                ex=900,
-                            )
+
+                    has_state = state is not None and state.direction is not None
+                    has_snap = _snap is not None
+                    _snap_d = _snap.to_dict() if has_snap else None
+
+                    if has_state or (has_snap and _snap_d):
+                        async with redis.pipeline(transaction=False) as pipe:
+                            if has_state:
+                                pipe.set(
+                                    f"st:{bar.security_id}:{bar.timeframe}",
+                                    json.dumps(
+                                        {
+                                            "direction": state.direction,
+                                            "value": str(state.value),
+                                            "flipped": state.flipped,
+                                            "bar_time": bar.bar_time.isoformat(),
+                                        }
+                                    ),
+                                    ex=900,
+                                )
+                            if has_snap and _snap_d:
+                                pipe.set(
+                                    f"ind:{bar.security_id}:{bar.timeframe}",
+                                    json.dumps(_snap_d),
+                                    ex=900,
+                                )
+                            await pipe.execute()
 
                 # 6c — ML inference (after on_bar caching; reuses computed snapshot; non-blocking)
                 if self._indicator_engine is not None:
@@ -166,17 +172,19 @@ class TickRouter:
                         )
                         if ml_results:
                             import json as _json
-                            for head, ml_state in ml_results.items():
-                                await redis.set(
-                                    f"ml:{bar.security_id}:{bar.timeframe}:{head}",
-                                    _json.dumps({
-                                        "argmax": ml_state.argmax,
-                                        "probs": ml_state.probs,
-                                        "version": ml_state.version,
-                                        "bar_time": bar.bar_time.isoformat(),
-                                    }),
-                                    ex=900,
-                                )
+                            async with redis.pipeline(transaction=False) as pipe:
+                                for head, ml_state in ml_results.items():
+                                    pipe.set(
+                                        f"ml:{bar.security_id}:{bar.timeframe}:{head}",
+                                        _json.dumps({
+                                            "argmax": ml_state.argmax,
+                                            "probs": ml_state.probs,
+                                            "version": ml_state.version,
+                                            "bar_time": bar.bar_time.isoformat(),
+                                        }),
+                                        ex=900,
+                                    )
+                                await pipe.execute()
                             # Store the primary directional signal in the engine for strategy access
                             primary = ml_results.get("directional")
                             if primary is not None:
