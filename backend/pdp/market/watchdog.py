@@ -18,6 +18,7 @@ import structlog
 if TYPE_CHECKING:
     from pdp.market.dhan_ws import DhanTickerAdapter
     from pdp.market.router import TickRouter
+    from pdp.risk.feed_halt import FeedStaleHalt
 
 log = structlog.get_logger()
 
@@ -43,12 +44,15 @@ class FeedWatchdog:
         tick_router: TickRouter,
         adapter: DhanTickerAdapter,
         stale_seconds: int = 60,
+        feed_halt: FeedStaleHalt | None = None,
     ) -> None:
         self._tick_router = tick_router
         self._adapter = adapter
         self._stale_seconds = stale_seconds
+        self._feed_halt = feed_halt
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._was_stale = False
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="feed-watchdog")
@@ -80,7 +84,15 @@ class FeedWatchdog:
                     stale_seconds=age,
                     threshold=self._stale_seconds,
                 )
-                await self._reconnect()
+                if self._feed_halt is not None:
+                    self._feed_halt.on_feed_stale()
+                if not self._was_stale:
+                    await self._reconnect()
+                self._was_stale = True
+            else:
+                if self._was_stale and self._feed_halt is not None:
+                    self._feed_halt.on_feed_recovered()
+                self._was_stale = False
 
     async def _reconnect(self) -> None:
         """Signal the adapter to reconnect by stopping and restarting its feed task."""

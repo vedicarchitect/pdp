@@ -173,6 +173,12 @@ class Settings(BaseSettings):
     OPENSEARCH_QUEUE_MAX: int = 10000       # drop-on-full beyond this (never blocks callers)
     OPENSEARCH_LOG_LEVEL: str = "INFO"      # min structlog level shipped to pdp-logs-*
 
+    # ── Ops safety net (ops-safety-net capability) ────────────────────────
+    ERRORS_JSONL_PATH: str = "logs/errors.jsonl"  # ERROR-only structured log sink
+    ERRORS_JSONL_MAX_LINES: int = 1000            # truncate on startup if file exceeds this
+    LOG_REDACTION_ENABLED: bool = True            # redact secrets from all log sinks
+    FEED_STALE_HALT_SECONDS: int = 180            # sustained stale seconds → kill-switch engage
+
     # ── Market feed resilience (market-feed-resilience capability) ────────
     FEED_STALE_SECONDS: int = 60            # seconds without a tick before feed_stale fires
     FEED_RECONNECT_BASE_DELAY: float = 1.0  # initial reconnect back-off (seconds)

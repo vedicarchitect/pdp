@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from pdp.db.session import dispose_engine, get_engine, get_session_maker
-from pdp.logging import RequestIdMiddleware, configure_logging
+from pdp.logging import RequestIdMiddleware, configure_logging, truncate_errors_jsonl
 from pdp.mongo.client import connect as mongo_connect
 from pdp.mongo.client import disconnect as mongo_disconnect
 from pdp.mongo.collections import init_collections
@@ -22,7 +22,13 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = get_settings()
-    configure_logging(settings.LOG_LEVEL)
+    configure_logging(
+        settings.LOG_LEVEL,
+        redaction_enabled=settings.LOG_REDACTION_ENABLED,
+        errors_jsonl_path=settings.ERRORS_JSONL_PATH,
+        errors_jsonl_max_lines=settings.ERRORS_JSONL_MAX_LINES,
+    )
+    truncate_errors_jsonl()
     started_at = datetime.now(UTC)
     app.state.started_at = started_at
     app.state.settings = settings
@@ -276,8 +282,16 @@ async def lifespan(app: FastAPI):
         )
 
         from pdp.market.watchdog import FeedWatchdog
+        from pdp.risk.feed_halt import FeedStaleHalt
 
-        feed_watchdog = FeedWatchdog(tick_router, adapter, settings.FEED_STALE_SECONDS)
+        feed_halt = FeedStaleHalt(halt_after_seconds=settings.FEED_STALE_HALT_SECONDS)
+        app.state.feed_halt = feed_halt
+        # Inject into order router so live orders can be blocked during sustained stall
+        order_router._feed_halt = feed_halt
+
+        feed_watchdog = FeedWatchdog(
+            tick_router, adapter, settings.FEED_STALE_SECONDS, feed_halt=feed_halt
+        )
         await feed_watchdog.start()
         app.state.feed_watchdog = feed_watchdog
 
@@ -285,6 +299,7 @@ async def lifespan(app: FastAPI):
     else:
         app.state.dhan_adapter = None
         app.state.feed_watchdog = None
+        app.state.feed_halt = None
         log.info("market_feed_skipped", reason="DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN not set")
 
     # Portfolio service — always started (works in paper and live mode)
@@ -471,8 +486,39 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    import structlog as _sl
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    _exc_log = _sl.get_logger()
+
     app = FastAPI(title="PDP", version="0.1.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
+
+    @app.exception_handler(Exception)
+    async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        import structlog as _sl2
+        import traceback
+
+        request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID", "")
+        _exc_log.error(
+            "unhandled_exception",
+            exc_type=type(exc).__name__,
+            exc_message=str(exc),
+            request_id=request_id,
+            path=str(request.url.path),
+            traceback=traceback.format_exc(),
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "request_id": request_id,
+                }
+            },
+        )
 
     from pdp.alerts.routes import router as alerts_router
     from pdp.alerts.ws import alerts_ws_router

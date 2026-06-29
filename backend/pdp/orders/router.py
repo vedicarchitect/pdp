@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pdp.orders.dhan_broker import DhanBroker
     from pdp.orders.margin import MarginService, OrderSpec
     from pdp.orders.paper import PaperBroker
+    from pdp.risk.feed_halt import FeedStaleHalt
     from pdp.settings import Settings
 
 log = structlog.get_logger()
@@ -49,11 +50,13 @@ class OrderRouter:
         paper: PaperBroker,
         dhan_broker: DhanBroker | None = None,
         margin_service: MarginService | None = None,
+        feed_halt: FeedStaleHalt | None = None,
     ) -> None:
         self._settings = settings
         self._paper = paper
         self._dhan = dhan_broker
         self._margin = margin_service
+        self._feed_halt = feed_halt
 
     def _broker_for(self, broker: str) -> PaperBroker | DhanBroker:
         """Select the engine that owns orders for the given broker name."""
@@ -77,6 +80,41 @@ class OrderRouter:
         strategy_id: str | None,
     ) -> Order:
         broker, mode = select_broker(self._settings)
+
+        # Feed-stale safe-halt: block new live entries if sustained staleness engaged.
+        # Paper orders are unaffected (no real money at risk).
+        if mode == TradeMode.LIVE and self._feed_halt is not None and self._feed_halt.live_blocked:
+            log.warning(
+                "order_blocked_feed_stale_halt",
+                security_id=security_id,
+                mode=mode,
+            )
+            if client_order_id:
+                existing = await self._find_by_client_id(session, client_order_id)
+                if existing is not None:
+                    return existing
+            order = Order(
+                client_order_id=client_order_id,
+                broker=broker,
+                mode=mode,
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                side=side,
+                qty=qty,
+                order_type=order_type,
+                price=price,
+                trigger_price=trigger_price,
+                product=product,
+                status=OrderStatus.REJECTED,
+                placed_at=datetime.now(UTC),
+                reject_reason="feed_stale_halt: live entries blocked until operator clears",
+                strategy_id=strategy_id,
+            )
+            session.add(order)
+            await session.flush()
+            await session.commit()
+            await session.refresh(order)
+            return order
 
         # Idempotency: return existing order if client_order_id already exists
         if client_order_id:

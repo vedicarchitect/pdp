@@ -1818,7 +1818,58 @@ Failures log `scrip_refresh_failed` and retry the next day without blocking star
 
 ---
 
-## 20. Order Pre-Flight Checks (broker-order-safety)
+## 20. Ops Safety Net (ops-safety-net)
+
+### Global exception handler
+
+All unhandled exceptions in FastAPI routes are caught by a single `@app.exception_handler` and
+returned as:
+```json
+{"error": {"type": "ExceptionClassName", "message": "...", "request_id": "..."}}
+```
+HTTP status is always 500 for unhandled exceptions; `HTTPException` keeps its own status code.
+The traceback is logged once at ERROR level (also lands in `errors.jsonl`).
+
+### errors.jsonl ERROR sink
+
+Every ERROR-level log record is appended as one JSON line to `ERRORS_JSONL_PATH` (default
+`logs/errors.jsonl`).  This file is the fast local incident view — open it first during an
+incident before querying OpenSearch.  On startup the file is truncated to `ERRORS_JSONL_MAX_LINES`
+most-recent lines.  Write failures are swallowed (never break request handling).
+
+```env
+ERRORS_JSONL_PATH=logs/errors.jsonl
+ERRORS_JSONL_MAX_LINES=1000
+```
+
+### Sensitive-data redaction
+
+`LOG_REDACTION_ENABLED=true` (default) enables a `SensitiveDataFilter` structlog processor that
+runs before OpenSearch + JSONRenderer.  It redacts:
+- Keys matching `access_token`, `api_key`, `password`, `bearer` (case-insensitive) → `***`
+- Values matching JWT pattern `eyJ...` → `***`
+
+The `app_starting` banner no longer leaks `DHAN_ACCESS_TOKEN` in logs.
+
+```env
+LOG_REDACTION_ENABLED=true
+```
+
+### Feed-stale safe-halt
+
+When `feed_stale` persists longer than `FEED_STALE_HALT_SECONDS` (default 180s):
+- `FeedStaleHalt.live_blocked = True`
+- All new **live** orders are rejected with reason `feed_stale_halt: live entries blocked until operator clears`
+- **Paper orders are unaffected** (no real money at risk)
+- Recovery does **not** auto-resume — operator must call `POST /risk/kill-switch/clear-feed-halt` (or restart the service)
+
+```env
+FEED_STALE_HALT_SECONDS=180
+```
+
+---
+
+## 21. Order Pre-Flight Checks (broker-order-safety)
 
 Every order passes a pre-flight gate in `OrderRouter._preflight` before reaching the broker.
 
