@@ -20,8 +20,7 @@ def _host(request: Request) -> StrategyHost:
 async def list_strategies(request: Request) -> JSONResponse:
     host = _host(request)
     items = [strategy_info_from_dict(d) for d in host.list_all()]
-    import msgspec
-    return JSONResponse(content=msgspec.to_builtins(items))
+    return JSONResponse(content={"strategies": msgspec.to_builtins(items)})
 
 
 @router.post("/{strategy_id}/start")

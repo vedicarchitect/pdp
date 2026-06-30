@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../shared/widgets/connection_badge.dart';
 import '../../shared/widgets/mode_badge.dart';
+import '../events/presentation/event_feed_sidebar.dart';
 import '../portfolio/application/portfolio_providers.dart';
 
 /// Responsive app shell: a side [NavigationRail] on wide layouts (desktop /
@@ -17,13 +18,49 @@ class AppShell extends ConsumerWidget {
 
   static const List<_Destination> _destinations = [
     _Destination(
+      route: '/dashboard',
+      label: 'Dashboard',
+      icon: Icons.dashboard_outlined,
+      selectedIcon: Icons.dashboard,
+    ),
+    _Destination(
       route: '/portfolio',
       label: 'Portfolio',
       icon: Icons.account_balance_wallet_outlined,
       selectedIcon: Icons.account_balance_wallet,
     ),
     _Destination(
-      route: '/more',
+      route: '/backtests',
+      label: 'Backtests',
+      icon: Icons.science_outlined,
+      selectedIcon: Icons.science,
+    ),
+    _Destination(
+      route: '/intel',
+      label: 'Intel',
+      icon: Icons.public_outlined,
+      selectedIcon: Icons.public,
+    ),
+    _Destination(
+      route: '/journal',
+      label: 'Journal',
+      icon: Icons.book_outlined,
+      selectedIcon: Icons.book,
+    ),
+    _Destination(
+      route: '/screener',
+      label: 'Screener',
+      icon: Icons.filter_alt_outlined,
+      selectedIcon: Icons.filter_alt,
+    ),
+    _Destination(
+      route: '/risk',
+      label: 'Risk',
+      icon: Icons.gpp_maybe_outlined,
+      selectedIcon: Icons.gpp_maybe,
+    ),
+    _Destination(
+      route: '/manage',
       label: 'More',
       icon: Icons.grid_view_outlined,
       selectedIcon: Icons.grid_view,
@@ -55,6 +92,15 @@ class AppShell extends ConsumerWidget {
         ModeBadge(mode: mode),
         const SizedBox(width: 12),
         const ConnectionBadge(),
+        if (!isWide) ...[
+          const SizedBox(width: 8),
+          Builder(
+            builder: (context) => IconButton(
+              icon: const Icon(Icons.notifications_outlined),
+              onPressed: () => Scaffold.of(context).openEndDrawer(),
+            ),
+          ),
+        ],
         const SizedBox(width: 16),
       ],
     );
@@ -80,6 +126,8 @@ class AppShell extends ConsumerWidget {
             ),
             const VerticalDivider(width: 1),
             Expanded(child: child),
+            const VerticalDivider(width: 1),
+            const EventFeedSidebar(),
           ],
         ),
       );
@@ -88,6 +136,9 @@ class AppShell extends ConsumerWidget {
     return Scaffold(
       appBar: appBar,
       body: child,
+      endDrawer: const Drawer(
+        child: EventFeedSidebar(),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (i) => _onSelect(context, i),

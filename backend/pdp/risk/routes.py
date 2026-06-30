@@ -57,3 +57,12 @@ async def get_risk_settings() -> JSONResponse:
         "hard_cap_pct": 100.0,
         "strategy_hard_cap_pct": 150.0,
     })
+
+@risk_router.post("/positions/{security_id}/modify")
+async def modify_position_risk(security_id: str) -> JSONResponse:
+    """SL/Target/Trailing SL modification — not yet implemented."""
+    from fastapi import HTTPException
+    raise HTTPException(
+        status_code=501,
+        detail="Position risk modification not yet implemented. Configure static risk caps in settings.",
+    )

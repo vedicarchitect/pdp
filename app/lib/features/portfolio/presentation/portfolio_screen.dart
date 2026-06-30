@@ -9,10 +9,38 @@ import '../domain/portfolio_snapshot.dart';
 import '../domain/position.dart';
 import 'pnl_chart.dart';
 
+import 'advisory_tab.dart';
+
 /// Live portfolio: header totals + P&L sparkline + positions list.
 class PortfolioScreen extends ConsumerWidget {
   const PortfolioScreen({super.key});
 
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Portfolio'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.show_chart), text: 'Live Tracker'),
+              Tab(icon: Icon(Icons.lightbulb_outline), text: 'Advisory & History'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _LiveTrackerTab(),
+            const AdvisoryTab(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveTrackerTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(portfolioProvider);

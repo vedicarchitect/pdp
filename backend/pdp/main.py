@@ -558,8 +558,10 @@ def create_app() -> FastAPI:
     from pdp.ml.routes import router as ml_router
     from pdp.housekeeping.routes import router as housekeeping_router
     from pdp.broker_sync.routes import router as broker_sync_router
+    from pdp.intel.routes import router as intel_router
     from pdp.observability.ingest import router as logs_ingest_router
     from pdp.observability.routes import router as observability_router
+    from pdp.screener.routes import screener_router
 
     app.include_router(alerts_router)
     app.include_router(alerts_ws_router)
@@ -587,8 +589,10 @@ def create_app() -> FastAPI:
     app.include_router(ml_router, prefix="/api/v1/ml", tags=["ML"])
     app.include_router(housekeeping_router, prefix="/api/v1/housekeeping", tags=["Housekeeping"])
     app.include_router(broker_sync_router)
+    app.include_router(intel_router, prefix="/api/v1/intel", tags=["Intel"])
     app.include_router(logs_ingest_router)
     app.include_router(observability_router)
+    app.include_router(screener_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

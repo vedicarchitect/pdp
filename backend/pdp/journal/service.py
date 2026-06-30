@@ -51,6 +51,9 @@ class JournalService:
         self._dirty_days: set[str] = set()
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._notes_by_day: dict[str, str] = {}
+        self._tags_by_day: dict[str, list[str]] = {}
+        self._screenshots_by_day: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                           #
@@ -89,17 +92,30 @@ class JournalService:
         self._dirty_days.add(day)
 
     # ------------------------------------------------------------------ #
-    # Reads                                                               #
+    # Reads & Writes                                                      #
     # ------------------------------------------------------------------ #
 
     def get_day(self, day: str | None = None) -> dict[str, Any]:
         day = day or _ist_today()
         trades = self._trades_by_day.get(day, [])
-        return {"date": day, "trades": trades, "stats": compute_daily_stats(trades)}
+        return {
+            "date": day,
+            "trades": trades,
+            "stats": compute_daily_stats(trades),
+            "notes": getattr(self, "_notes_by_day", {}).get(day, ""),
+            "tags": getattr(self, "_tags_by_day", {}).get(day, []),
+            "screenshots": getattr(self, "_screenshots_by_day", {}).get(day, []),
+        }
 
     def get_stats(self, day: str | None = None) -> dict[str, Any]:
         day = day or _ist_today()
         return {"date": day, "stats": compute_daily_stats(self._trades_by_day.get(day, []))}
+        
+    async def update_metadata(self, day: str, notes: str, tags: list[str], screenshots: list[str]) -> None:
+        self._notes_by_day[day] = notes
+        self._tags_by_day[day] = tags
+        self._screenshots_by_day[day] = screenshots
+        self._dirty_days.add(day)
 
     # ------------------------------------------------------------------ #
     # Mongo persistence                                                   #
@@ -108,10 +124,15 @@ class JournalService:
     async def _load_today(self) -> None:
         if self._mongo is None:
             return
+        
         try:
             doc = await self._mongo["paper_journal"].find_one({"date": _ist_today()})
-            if doc and isinstance(doc.get("trades"), list):
-                self._trades_by_day[_ist_today()] = doc["trades"]
+            if doc:
+                if isinstance(doc.get("trades"), list):
+                    self._trades_by_day[_ist_today()] = doc["trades"]
+                self._notes_by_day[_ist_today()] = doc.get("notes", "")
+                self._tags_by_day[_ist_today()] = doc.get("tags", [])
+                self._screenshots_by_day[_ist_today()] = doc.get("screenshots", [])
         except Exception as exc:
             log.warning("journal_load_failed", exc=str(exc))
 
@@ -126,6 +147,7 @@ class JournalService:
     async def _flush(self) -> None:
         if self._mongo is None or not self._dirty_days:
             return
+            
         days = list(self._dirty_days)
         self._dirty_days.clear()
         for day in days:
@@ -136,6 +158,9 @@ class JournalService:
                 "mode": "paper",
                 "trades": trades,
                 "stats": stats,
+                "notes": self._notes_by_day.get(day, ""),
+                "tags": self._tags_by_day.get(day, []),
+                "screenshots": self._screenshots_by_day.get(day, []),
                 "updated_at": datetime.now(UTC),
             }
             try:

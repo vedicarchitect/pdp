@@ -1,6 +1,8 @@
 """Portfolio REST endpoints."""
 from __future__ import annotations
 
+import datetime
+import random
 from typing import Annotated
 
 import structlog
@@ -67,3 +69,53 @@ async def get_summary(
             "mode": mode,
         }
     )
+
+
+@router.get("/advisory")
+async def get_advisory() -> JSONResponse:
+    data = {
+        "is_mock": True,
+        "holdings": [
+            {"sector": "Technology", "percentage": 45.0, "value": 45000.0},
+            {"sector": "Financials", "percentage": 25.0, "value": 25000.0},
+            {"sector": "Healthcare", "percentage": 15.0, "value": 15000.0},
+            {"sector": "Cash", "percentage": 15.0, "value": 15000.0},
+        ],
+        "advice": [
+            {
+                "id": "a1",
+                "title": "Reduce Tech Exposure",
+                "description": "Technology sector exceeds 40% of portfolio. Consider rebalancing.",
+                "action": "Sell Tech",
+                "severity": "high",
+            },
+            {
+                "id": "a2",
+                "title": "Deploy Cash",
+                "description": "Cash drag is present. Consider investing in undervalued Healthcare equities.",
+                "action": "Buy Healthcare",
+                "severity": "medium",
+            },
+        ]
+    }
+    return JSONResponse(content=data)
+
+
+@router.get("/history")
+async def get_history() -> JSONResponse:
+    # Mock 30-day historical PnL
+    history = []
+    base_value = 100000.0
+    current_date = datetime.date.today() - datetime.timedelta(days=30)
+
+    for i in range(30):
+        change = random.uniform(-1500, 2000)
+        base_value += change
+        history.append({
+            "date": current_date.isoformat(),
+            "pnl": round(base_value - 100000.0, 2),
+            "value": round(base_value, 2),
+        })
+        current_date += datetime.timedelta(days=1)
+
+    return JSONResponse(content={"history": history, "is_mock": True})
