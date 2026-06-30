@@ -338,9 +338,10 @@ async def lifespan(app: FastAPI):
 
     portfolio_service.set_hard_cap_callback(_auto_kill, settings.RISK_DAILY_LOSS_CAP_INR)
 
-    # Options chain poller — only when live and credentialed
+    # Options chain poller — starts on Dhan credentials alone (paper-safe; read-only).
+    # Gate matches the market-feed gate at L230. Disable with OPTIONS_POLLER_ENABLED=false.
     options_poller = None
-    if settings.LIVE and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+    if settings.OPTIONS_POLLER_ENABLED and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         from pdp.options.poller import OptionsChainPoller
 
         options_poller = OptionsChainPoller(
@@ -350,10 +351,14 @@ async def lifespan(app: FastAPI):
         )
         app.state.options_poller = options_poller
         await options_poller.start()
-        log.info("options_poller_enabled")
+        log.info("options_poller_enabled", live=settings.LIVE)
     else:
         app.state.options_poller = None
-        log.info("options_poller_disabled", live=settings.LIVE, has_credentials=bool(settings.DHAN_CLIENT_ID))
+        log.info(
+            "options_poller_disabled",
+            enabled=settings.OPTIONS_POLLER_ENABLED,
+            has_credentials=bool(settings.DHAN_CLIENT_ID),
+        )
 
     # Live event publisher — monitors manual positions + market, emits realtime events.
     event_service = None
@@ -551,6 +556,7 @@ def create_app() -> FastAPI:
     from pdp.risk.routes import risk_router, settings_router
     from pdp.strategy.routes import router as strategy_router
     from pdp.strategy.routes import strangle_router
+    from pdp.strategy.routes import levels_router
     from pdp.backtest.routes import router as backtest_router
     from pdp.backtest.warehouse_routes import router as strangle_bt_router
     from pdp.jobs.routes import router as jobs_router
@@ -582,6 +588,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(strategy_router)
     app.include_router(strangle_router)
+    app.include_router(levels_router)
     app.include_router(backtest_router)
     app.include_router(strangle_bt_router)
     app.include_router(jobs_router, prefix="/api/v1/jobs", tags=["Jobs"])

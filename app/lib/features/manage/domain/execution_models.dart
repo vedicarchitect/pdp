@@ -1,0 +1,275 @@
+/// Domain models for the Strategy Execution Monitor tab.
+library;
+
+// ─── Index price row ─────────────────────────────────────────────────────────
+
+class IndexPrice {
+  final String name;
+  final double spot;
+  final double? future;
+
+  const IndexPrice({
+    required this.name,
+    required this.spot,
+    this.future,
+  });
+
+  factory IndexPrice.fromJson(String name, Map<String, dynamic> json) {
+    return IndexPrice(
+      name: name,
+      spot: (json['spot'] as num?)?.toDouble() ?? 0.0,
+      future: (json['future'] as num?)?.toDouble(),
+    );
+  }
+}
+
+// ─── Leg row ─────────────────────────────────────────────────────────────────
+
+class LegRow {
+  final String securityId;
+  final String optType; // "CE" or "PE"
+  final double strike;
+  final int lots;
+  final double entryPrice;
+  final String? entryTime;
+  final String? entryReason;
+  final double? ltp;
+  final double? mtm;
+  final bool isHedge;
+  final bool isMomentum;
+  // Greeks
+  final double? delta;
+  final double? vega;
+  final double? gamma;
+  final double? theta;
+  final int? oi;
+  final double? pcr;
+  final int? oiChangeDay;
+
+  const LegRow({
+    required this.securityId,
+    required this.optType,
+    required this.strike,
+    required this.lots,
+    required this.entryPrice,
+    this.entryTime,
+    this.entryReason,
+    this.ltp,
+    this.mtm,
+    required this.isHedge,
+    required this.isMomentum,
+    this.delta,
+    this.vega,
+    this.gamma,
+    this.theta,
+    this.oi,
+    this.pcr,
+    this.oiChangeDay,
+  });
+
+  factory LegRow.fromJson(Map<String, dynamic> json) {
+    return LegRow(
+      securityId: json['security_id'] as String? ?? '',
+      optType: json['opt_type'] as String? ?? '',
+      strike: (json['strike'] as num?)?.toDouble() ?? 0.0,
+      lots: (json['lots'] as num?)?.toInt() ?? 0,
+      entryPrice: (json['entry_price'] as num?)?.toDouble() ?? 0.0,
+      entryTime: json['entry_time'] as String?,
+      entryReason: json['entry_reason'] as String?,
+      ltp: (json['ltp'] as num?)?.toDouble(),
+      mtm: (json['mtm'] as num?)?.toDouble(),
+      isHedge: json['is_hedge'] as bool? ?? false,
+      isMomentum: json['is_momentum'] as bool? ?? false,
+      delta: (json['delta'] as num?)?.toDouble(),
+      vega: (json['vega'] as num?)?.toDouble(),
+      gamma: (json['gamma'] as num?)?.toDouble(),
+      theta: (json['theta'] as num?)?.toDouble(),
+      oi: (json['oi'] as num?)?.toInt(),
+      pcr: (json['pcr'] as num?)?.toDouble(),
+      oiChangeDay: (json['oi_change_day'] as num?)?.toInt(),
+    );
+  }
+}
+
+// ─── Indicator cell ───────────────────────────────────────────────────────────
+
+class IndicatorCell {
+  final double? ema9;
+  final double? ema20;
+  final double? ema50;
+  final double? ema100;
+  final double? stVal;
+  final String? stDir; // "up" | "down"
+  final double? psar;
+
+  const IndicatorCell({
+    this.ema9,
+    this.ema20,
+    this.ema50,
+    this.ema100,
+    this.stVal,
+    this.stDir,
+    this.psar,
+  });
+
+  factory IndicatorCell.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return const IndicatorCell();
+    return IndicatorCell(
+      ema9: (json['ema9'] as num?)?.toDouble(),
+      ema20: (json['ema20'] as num?)?.toDouble(),
+      ema50: (json['ema50'] as num?)?.toDouble(),
+      ema100: (json['ema100'] as num?)?.toDouble(),
+      stVal: (json['st_val'] as num?)?.toDouble(),
+      stDir: json['st_dir'] as String?,
+      psar: (json['psar'] as num?)?.toDouble(),
+    );
+  }
+}
+
+// ─── Camarilla levels ─────────────────────────────────────────────────────────
+
+class CamarillaLevels {
+  final double? pp, r3, r4, s3, s4;
+
+  const CamarillaLevels({this.pp, this.r3, this.r4, this.s3, this.s4});
+
+  factory CamarillaLevels.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return const CamarillaLevels();
+    return CamarillaLevels(
+      pp: (json['pp'] as num?)?.toDouble(),
+      r3: (json['r3'] as num?)?.toDouble(),
+      r4: (json['r4'] as num?)?.toDouble(),
+      s3: (json['s3'] as num?)?.toDouble(),
+      s4: (json['s4'] as num?)?.toDouble(),
+    );
+  }
+}
+
+// ─── Per-SID indicator data ───────────────────────────────────────────────────
+
+class SidIndicators {
+  final String sid;
+  final Map<String, IndicatorCell> tf; // timeframe → cell
+  final CamarillaLevels? camarillaDaily;
+  final CamarillaLevels? camarillaWeekly;
+  final double? pdh, pdl, pwh, pwl;
+
+  const SidIndicators({
+    required this.sid,
+    required this.tf,
+    this.camarillaDaily,
+    this.camarillaWeekly,
+    this.pdh,
+    this.pdl,
+    this.pwh,
+    this.pwl,
+  });
+
+  factory SidIndicators.fromJson(String sid, Map<String, dynamic> json) {
+    final tfRaw = json['tf'] as Map<String, dynamic>? ?? {};
+    final tf = tfRaw.map(
+      (k, v) => MapEntry(k, IndicatorCell.fromJson(v as Map<String, dynamic>?)),
+    );
+    final period = json['period'] as Map<String, dynamic>?;
+    return SidIndicators(
+      sid: sid,
+      tf: tf,
+      camarillaDaily: CamarillaLevels.fromJson(
+        json['camarilla_daily'] as Map<String, dynamic>?,
+      ),
+      camarillaWeekly: CamarillaLevels.fromJson(
+        json['camarilla_weekly'] as Map<String, dynamic>?,
+      ),
+      pdh: (period?['pdh'] as num?)?.toDouble(),
+      pdl: (period?['pdl'] as num?)?.toDouble(),
+      pwh: (period?['pwh'] as num?)?.toDouble(),
+      pwl: (period?['pwl'] as num?)?.toDouble(),
+    );
+  }
+}
+
+// ─── Monitor snapshot ─────────────────────────────────────────────────────────
+
+class MonitorSnapshot {
+  final List<IndexPrice> indices;
+  final List<LegRow> legs;
+  final double dayRealized;
+  final double dayUnrealized;
+  final double dayPnl;
+  final String bucket;
+  final double? score;
+  final bool doneForDay;
+  final int nOpenShorts;
+  final int nOpenHedges;
+  final int nOpenMomentum;
+  final List<Map<String, dynamic>> recentEvents;
+  final Map<String, SidIndicators> indicators;
+
+  const MonitorSnapshot({
+    required this.indices,
+    required this.legs,
+    required this.dayRealized,
+    required this.dayUnrealized,
+    required this.dayPnl,
+    required this.bucket,
+    this.score,
+    required this.doneForDay,
+    required this.nOpenShorts,
+    required this.nOpenHedges,
+    required this.nOpenMomentum,
+    required this.recentEvents,
+    required this.indicators,
+  });
+
+  factory MonitorSnapshot.fromJson(Map<String, dynamic> json) {
+    // Indices
+    final indicesRaw = json['indices'] as Map<String, dynamic>? ?? {};
+    final indices = indicesRaw.entries
+        .map((e) => IndexPrice.fromJson(e.key, e.value as Map<String, dynamic>))
+        .toList();
+
+    // Legs from groups
+    final groupsRaw = json['groups'] as List<dynamic>? ?? [];
+    final legs = <LegRow>[];
+    for (final grp in groupsRaw) {
+      final grpMap = grp as Map<String, dynamic>;
+      final grpLegs = grpMap['legs'] as List<dynamic>? ?? [];
+      for (final l in grpLegs) {
+        legs.add(LegRow.fromJson(l as Map<String, dynamic>));
+      }
+    }
+
+    // Totals
+    final totals = json['totals'] as Map<String, dynamic>? ?? {};
+
+    // Status
+    final status = json['status'] as Map<String, dynamic>? ?? {};
+
+    // Indicators
+    final indicatorsRaw = json['indicators'] as Map<String, dynamic>? ?? {};
+    final indicators = indicatorsRaw.map(
+      (sid, v) => MapEntry(sid, SidIndicators.fromJson(sid, v as Map<String, dynamic>)),
+    );
+
+    // Events
+    final eventsRaw = json['recent_events'] as List<dynamic>? ?? [];
+    final recentEvents =
+        eventsRaw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+
+    return MonitorSnapshot(
+      indices: indices,
+      legs: legs,
+      dayRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
+      dayUnrealized: (totals['day_unrealized'] as num?)?.toDouble() ?? 0.0,
+      dayPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
+      bucket: status['bucket'] as String? ?? '--',
+      score: (status['score'] as num?)?.toDouble(),
+      doneForDay: status['done_for_day'] as bool? ?? false,
+      nOpenShorts: (status['n_open_shorts'] as num?)?.toInt() ?? 0,
+      nOpenHedges: (status['n_open_hedges'] as num?)?.toInt() ?? 0,
+      nOpenMomentum: (status['n_open_momentum'] as num?)?.toInt() ?? 0,
+      recentEvents: recentEvents,
+      indicators: indicators,
+    );
+  }
+}

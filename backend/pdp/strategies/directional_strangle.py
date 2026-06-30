@@ -26,7 +26,7 @@ Parity additions (chunk 4 strangle-execution-console):
   - leg_status heartbeat after every bias_evaluated
   - Rollup: close short when LTP < roll_trigger_prem (20), reopen at next OTM with prem >= 50
   - Stop-gate: 3-bar cooldown (15 min) before re-entry after a stop
-  - Weekly Camarilla: ind.pivots(sid, "1w") — returns None until 1w bar support added
+  - Weekly Camarilla: ind.pivots(sid, "1w") — seeded from 1w bar aggregation
   - Live PCR: not yet wired (no ind.pcr or accessible poller.latest_pcr)
   - Indicator timeframe audit on startup
 """
@@ -101,6 +101,8 @@ class OpenLeg:
     is_hedge: bool = False      # True = far-OTM protective long
     is_momentum: bool = False   # True = ITM directional long (COMPLETE_* only)
     half_stopped: bool = False  # True after pct_stop_half partial close (shorts only)
+    entry_time: datetime | None = None   # IST-aware open timestamp
+    entry_reason: str = ""               # bucket@score at entry (e.g. "NEUTRAL@0.10")
 
 
 class DirectionalStrangle(Strategy):
@@ -586,12 +588,9 @@ class DirectionalStrangle(Strategy):
         pivot = ind.pivots(self.sid, "5m") if ind else None
         cam_daily = _to_cam(pivot)
 
-        # Weekly Camarilla: read from "1w" pivot snapshot; returns None until 1w bar support added
+        # Weekly Camarilla: read from "1w" pivot snapshot (seeded by 1w BarAggregator)
         weekly_pivot = ind.pivots(self.sid, "1w") if ind else None
         cam_weekly = _to_cam(weekly_pivot)
-        if cam_weekly is None and not self._cam_weekly_warned:
-            self._cam_weekly_warned = True
-            self.ctx.log.debug("cam_weekly_missing", reason="1w_bar_not_supported_yet")
 
         pl = ind.period_levels(self.sid, "5m") if ind else None
         # VWAP: prefer futures SID (has real volume); fall back to spot (returns None for index)
@@ -686,9 +685,11 @@ class DirectionalStrangle(Strategy):
             return
 
         avg_px = await self._await_fill_avg_px(sid)
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._short_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
@@ -748,9 +749,11 @@ class DirectionalStrangle(Strategy):
 
         avg_px = await self._await_fill_avg_px(h_sid)
         h_strike = float(target.strike) if target.strike is not None else 0.0
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._hedge_legs.append(OpenLeg(
             security_id=h_sid, segment=segment, opt_type=opt_type,
             strike=h_strike, lots=lots, entry_price=avg_px, is_hedge=True,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=h_sid, opt_type=opt_type, strike=h_strike,
@@ -803,9 +806,11 @@ class DirectionalStrangle(Strategy):
             return
 
         avg_px = await self._await_fill_avg_px(sid)
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._momentum_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
@@ -981,6 +986,8 @@ class DirectionalStrangle(Strategy):
                 "strike": lg.strike,
                 "lots": lg.lots,
                 "entry_price": float(lg.entry_price),
+                "entry_time": lg.entry_time.isoformat() if lg.entry_time else None,
+                "entry_reason": lg.entry_reason,
                 "ltp": ltp,
                 "mtm": mtm,
                 "is_hedge": lg.is_hedge,

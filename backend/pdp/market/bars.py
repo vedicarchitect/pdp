@@ -15,6 +15,7 @@ log = structlog.get_logger()
 
 # Supported timeframes: label → window in minutes (60 = 1H).
 # "1D" uses IST calendar-day boundaries, not minute intervals.
+# "1w" uses ISO-week boundaries (Monday 00:00 IST = Sunday 18:30 UTC).
 _TIMEFRAMES: dict[str, int] = {
     "1m": 1,
     "5m": 5,
@@ -22,6 +23,7 @@ _TIMEFRAMES: dict[str, int] = {
     "30m": 30,
     "1H": 60,
     "1D": -1,  # sentinel: handled by _bar_boundary_1d
+    "1w": -2,  # sentinel: handled by _bar_boundary_1w
 }
 
 # IST = UTC+5:30
@@ -67,6 +69,29 @@ def _bar_boundary_1d(dt: datetime) -> datetime:
     return epoch + timedelta(minutes=utc_day_start_min)
 
 
+def _bar_boundary_1w(dt: datetime) -> datetime:
+    """Return the ISO-week start (Monday 00:00 IST, expressed in UTC) for a UTC datetime.
+
+    Monday 00:00 IST = Sunday 18:30 UTC. All NSE session bars in the same ISO week
+    share the same 1w bucket. Rolling occurs on the first bar of each new ISO week.
+    """
+    # Convert to IST minutes-since-epoch
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    total_minutes_ist = int(dt.timestamp() // 60) + _IST_OFFSET_MINUTES
+    # IST day boundary and ISO weekday (0=Monday)
+    ist_day_start_min = (total_minutes_ist // (24 * 60)) * (24 * 60)
+    # Approximate IST date from minutes
+    ist_date = (epoch + timedelta(minutes=ist_day_start_min)).date()
+    # Monday of that ISO week
+    iso_monday = ist_date - timedelta(days=ist_date.weekday())
+    # Monday 00:00 IST → UTC (subtract IST offset)
+    monday_utc_min = (
+        int(datetime(iso_monday.year, iso_monday.month, iso_monday.day, tzinfo=UTC).timestamp() // 60)
+        - _IST_OFFSET_MINUTES
+    )
+    return epoch + timedelta(minutes=monday_utc_min)
+
+
 class BarBuilder:
     """Accumulates ticks for one (security_id, timeframe) into OHLCV bars."""
 
@@ -75,6 +100,7 @@ class BarBuilder:
         "_close",
         "_high",
         "_is_daily",
+        "_is_weekly",
         "_low",
         "_oi",
         "_open",
@@ -89,6 +115,7 @@ class BarBuilder:
         self.timeframe = timeframe
         self._tf_minutes = _TIMEFRAMES[timeframe]
         self._is_daily = timeframe == "1D"
+        self._is_weekly = timeframe == "1w"
         self._bar_time: datetime | None = None
         self._open = self._high = self._low = self._close = Decimal("0")
         self._volume = 0
@@ -111,7 +138,9 @@ class BarBuilder:
             effective_dt = tick.ltt if tick.ltt.tzinfo else tick.ltt.replace(tzinfo=UTC)
 
         boundary = (
-            _bar_boundary_1d(effective_dt)
+            _bar_boundary_1w(effective_dt)
+            if self._is_weekly
+            else _bar_boundary_1d(effective_dt)
             if self._is_daily
             else _bar_boundary(effective_dt, self._tf_minutes)
         )

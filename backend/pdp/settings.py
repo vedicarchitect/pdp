@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     OPTIONS_RISK_FREE_RATE: float = 0.065
     OPTIONS_UNDERLYINGS: str = '["NIFTY","BANKNIFTY"]'
     OPTIONS_CHAIN_TTL_DAYS: int = 7
+    # Options poller is read-only market data; safe to run in paper sessions.
+    # Set OPTIONS_POLLER_ENABLED=false to disable without removing credentials.
+    OPTIONS_POLLER_ENABLED: bool = True
 
     PORTFOLIO_MTM_INTERVAL_SECONDS: int = 5
     PORTFOLIO_EOD_SNAPSHOT: bool = True

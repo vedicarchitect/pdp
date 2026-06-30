@@ -37,6 +37,8 @@ _TF_SESSION_BARS: dict[str, int] = {
     "25m": 15,
     "1H": 7,
     "1h": 7,
+    "1D": 1,
+    "1w": 1,  # one weekly bar per ISO week
 }
 _DEFAULT_SESSION_BARS = 75
 
@@ -50,6 +52,8 @@ _TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
     "25m": 8,   # ceil(50/15)=4 sessions + 4 padding
     "1H": 14,   # ceil(50/7)=8 sessions + 6 padding
     "1h": 14,
+    "1D": 30,   # 1 bar/day; 30 days for EMA(20)
+    "1w": 30,   # 1 bar/week; 30 days covers ~4 weeks (enough for pivot seed)
 }
 _DEFAULT_WARMUP_CALENDAR_DAYS = 1
 
