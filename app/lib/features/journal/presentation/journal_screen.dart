@@ -17,6 +17,7 @@ class JournalScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.calendar_today),
+            tooltip: 'Select Date',
             onPressed: () async {
               final picked = await showDatePicker(
                 context: context,
@@ -31,6 +32,7 @@ class JournalScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.arrow_back_ios),
+            tooltip: 'Previous Day',
             onPressed: () {
               ref.read(journalDateProvider.notifier).update(
                     (state) => state.subtract(const Duration(days: 1)),
@@ -39,6 +41,7 @@ class JournalScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.arrow_forward_ios),
+            tooltip: 'Next Day',
             onPressed: () {
               ref.read(journalDateProvider.notifier).update(
                     (state) => state.add(const Duration(days: 1)),
