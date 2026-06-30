@@ -85,11 +85,8 @@ class TickRouter:
         ltp_str = str(tick.ltp)
         sid = tick.security_id
 
-        # 1 — hot LTP cache + timestamp (TTL=5s so stale data auto-expires)
-        await redis.set(f"ltp:{sid}", ltp_str, ex=5)
-        await redis.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
-
-        # 2 — pub/sub fan-out for downstream consumers
+        # 1 & 2 — hot LTP cache + pub/sub fan-out
+        # Batched via Redis pipeline to reduce network roundtrips on the hot path
         tick_payload = json.dumps(
             {
                 "type": "tick",
@@ -101,7 +98,11 @@ class TickRouter:
                 "ltt": tick.ltt.isoformat(),
             }
         )
-        await redis.publish(f"tick.{sid}", tick_payload)
+        async with redis.pipeline(transaction=False) as pipe:
+            pipe.set(f"ltp:{sid}", ltp_str, ex=5)
+            pipe.set(f"ltp_ts:{sid}", str(_time.time()), ex=5)
+            pipe.publish(f"tick.{sid}", tick_payload)
+            await pipe.execute()
 
         # 2.5 — alert evaluator (evaluate price conditions on new tick)
         if self._alert_evaluator is not None:
