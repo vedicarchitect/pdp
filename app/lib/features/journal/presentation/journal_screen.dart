@@ -17,6 +17,7 @@ class JournalScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.calendar_today),
+            tooltip: 'Select Date',
             onPressed: () async {
               final picked = await showDatePicker(
                 context: context,
@@ -31,6 +32,7 @@ class JournalScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.arrow_back_ios),
+            tooltip: 'Previous Day',
             onPressed: () {
               ref.read(journalDateProvider.notifier).update(
                     (state) => state.subtract(const Duration(days: 1)),
@@ -39,6 +41,7 @@ class JournalScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.arrow_forward_ios),
+            tooltip: 'Next Day',
             onPressed: () {
               ref.read(journalDateProvider.notifier).update(
                     (state) => state.add(const Duration(days: 1)),
@@ -147,9 +150,11 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 _StatText('Trades', '${s.totalTrades}'),
-                _StatText('Realized P&L', '\$${s.realizedPnl.toStringAsFixed(2)}',
+                _StatText(
+                    'Realized P&L', '\$${s.realizedPnl.toStringAsFixed(2)}',
                     color: s.realizedPnl >= 0 ? Colors.green : Colors.red),
-                _StatText('Win Rate', '${(s.winRate * 100).toStringAsFixed(1)}%'),
+                _StatText(
+                    'Win Rate', '${(s.winRate * 100).toStringAsFixed(1)}%'),
                 _StatText('Charges', '\$${s.totalCharges.toStringAsFixed(2)}'),
               ],
             ),
@@ -169,7 +174,8 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Notes & Tags', style: Theme.of(context).textTheme.titleLarge),
+                Text('Notes & Tags',
+                    style: Theme.of(context).textTheme.titleLarge),
                 FilledButton.icon(
                   onPressed: _saveMetadata,
                   icon: const Icon(Icons.save),
@@ -269,7 +275,8 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
                   return ListTile(
                     title: Text(t.securityId,
                         style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('Qty: ${t.qty} @ \$${t.fillPrice.toStringAsFixed(2)}'),
+                    subtitle: Text(
+                        'Qty: ${t.qty} @ \$${t.fillPrice.toStringAsFixed(2)}'),
                     trailing: Text(
                       t.side.toUpperCase(),
                       style: TextStyle(
