@@ -124,7 +124,9 @@ def pre_checks() -> bool:
     _hdr("3. Strategies")
     strats_raw = _get("/api/v1/strategies")
     strats: dict[str, dict] = {}
-    if isinstance(strats_raw, list):
+    if isinstance(strats_raw, dict) and "strategies" in strats_raw:
+        strats = {s["id"]: s for s in strats_raw["strategies"]}
+    elif isinstance(strats_raw, list):
         strats = {s["id"]: s for s in strats_raw}
     for sid in _STRATEGIES:
         label = sid.replace("directional_strangle_", "")

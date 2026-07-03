@@ -250,16 +250,16 @@ def _build_indicator_cell(engine: Any, sid: str, tf: str) -> dict[str, Any]:
     # EMA
     ema_state = engine.get_ema(sid, tf)
     if ema_state:
-        cell["ema9"] = ema_state.ema9
-        cell["ema20"] = ema_state.ema20
-        cell["ema50"] = ema_state.ema50
-        cell["ema100"] = ema_state.ema100
+        cell["ema9"] = ema_state.values.get(9)
+        cell["ema20"] = ema_state.values.get(20)
+        cell["ema50"] = ema_state.values.get(50)
+        cell["ema100"] = ema_state.values.get(100)
 
     # SuperTrend
     st_state = engine.get(sid, tf)
     if st_state:
-        cell["st_val"] = float(st_state.supertrend) if st_state.supertrend else None
-        cell["st_dir"] = st_state.direction
+        cell["st_val"] = float(st_state.value) if st_state.value else None
+        cell["st_dir"] = "up" if st_state.direction == 1 else "down"
 
     # PSAR
     psar_state = engine.get_psar(sid, tf)
@@ -318,7 +318,17 @@ async def strangle_monitor(
     - recent_events: last N from _activity (closed legs + exit reasons)
     - indicators: EMA/ST/PSAR matrix x timeframes + Camarilla + period levels
     """
-    strategy = _get_strangle(request, strategy_id)
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+    host = request.app.state.strategy_host
+    strategies = []
+    for sid, state_obj in host._running.items():
+        if isinstance(state_obj.instance, DirectionalStrangle):
+            if strategy_id is None or sid == strategy_id:
+                strategies.append(state_obj.instance)
+
+    if not strategies:
+        raise HTTPException(status_code=404, detail="No DirectionalStrangle running")
+
     redis = request.app.state.redis
     engine = getattr(request.app.state, "indicator_engine", None)
     chains_col = (
@@ -327,7 +337,7 @@ async def strangle_monitor(
         else None
     )
 
-    state = await strategy.state()
+    states = [await s.state() for s in strategies]
 
     # ── Indices spot + future LTPs ──────────────────────────────────────────
     indices: dict[str, dict[str, Any]] = {}
@@ -335,9 +345,11 @@ async def strangle_monitor(
         spot_ltp = await _get_ltp_redis(redis, idx_sid)
         # Try to resolve futures SID from strategy (only works for the strategy's underlying)
         future_ltp = None
-        futures_sid = getattr(strategy, "_futures_sid", None)
-        if futures_sid and _SID_TO_INDEX.get(idx_sid) == strategy.underlying:
-            future_ltp = await _get_ltp_redis(redis, futures_sid)
+        for s in strategies:
+            futures_sid = getattr(s, "_futures_sid", None)
+            if futures_sid and _SID_TO_INDEX.get(idx_sid) == s.underlying:
+                future_ltp = await _get_ltp_redis(redis, futures_sid)
+                break
         indices[idx_name] = {"spot": spot_ltp or 0.0, "future": future_ltp}
 
     # ── Legs grouped by underlying ──────────────────────────────────────────
@@ -347,26 +359,29 @@ async def strangle_monitor(
 
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
     unrealized_by_underlying: dict[str, float] = {}
+    active_strike_sids = set()
 
-    for leg in state["legs"]:
+    for strategy, state in zip(strategies, states):
         und = strategy.underlying  # all legs under same underlying for now
-        leg_enriched = dict(leg)
-
-        # Greeks/OI/PCR only for active non-hedge strikes
-        if not leg["is_hedge"] and not leg["is_momentum"]:
-            greeks = await _get_greeks_for_strike(
-                chains_col,
-                underlying=und,
-                strike=leg["strike"],
-                opt_type=leg["opt_type"],
-                day_start_ts=today_ist_start,
+        for leg in state["legs"]:
+            leg_enriched = dict(leg)
+    
+            # Greeks/OI/PCR only for active non-hedge strikes
+            if not leg["is_hedge"] and not leg["is_momentum"]:
+                active_strike_sids.add(leg["security_id"])
+                greeks = await _get_greeks_for_strike(
+                    chains_col,
+                    underlying=und,
+                    strike=leg["strike"],
+                    opt_type=leg["opt_type"],
+                    day_start_ts=today_ist_start,
+                )
+                leg_enriched.update(greeks)
+    
+            legs_by_underlying.setdefault(und, []).append(leg_enriched)
+            unrealized_by_underlying[und] = (
+                unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
             )
-            leg_enriched.update(greeks)
-
-        legs_by_underlying.setdefault(und, []).append(leg_enriched)
-        unrealized_by_underlying[und] = (
-            unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
-        )
 
     groups = [
         {
@@ -383,33 +398,37 @@ async def strangle_monitor(
 
     # ── Overall totals ──────────────────────────────────────────────────────
     totals = {
-        "day_realized": state["day_realized"],
-        "day_unrealized": state["day_unrealized"],
-        "day_pnl": state["day_pnl"],
+        "day_realized": sum(s.get("day_realized", 0.0) for s in states),
+        "day_unrealized": sum(s.get("day_unrealized", 0.0) for s in states),
+        "day_pnl": sum(s.get("day_pnl", 0.0) for s in states),
     }
 
     # ── Status ──────────────────────────────────────────────────────────────
+    primary_state = next(
+        (s for s_idx, s in enumerate(states) if strategies[s_idx].underlying == "NIFTY"), 
+        states[0]
+    )
     status = {
-        "bucket": str(state["bucket"]),
-        "score": state["score"],
-        "done_for_day": state["done_for_day"],
-        "started_at": state["started_at"],
-        "n_open_shorts": state["n_open_shorts"],
-        "n_open_hedges": state["n_open_hedges"],
-        "n_open_momentum": state["n_open_momentum"],
+        "bucket": str(primary_state.get("bucket", "None")),
+        "score": primary_state.get("score"),
+        "done_for_day": all(s.get("done_for_day", False) for s in states),
+        "started_at": primary_state.get("started_at"),
+        "n_open_shorts": sum(s.get("n_open_shorts", 0) for s in states),
+        "n_open_hedges": sum(s.get("n_open_hedges", 0) for s in states),
+        "n_open_momentum": sum(s.get("n_open_momentum", 0) for s in states),
     }
 
     # ── Recent events (newest-first, closed legs + exit reasons) ───────────
-    events = list(strategy._activity)
-    events.reverse()
-    recent_events = events[:n_events]
+    all_events = []
+    for s in strategies:
+        all_events.extend(list(s._activity))
+    
+    # Sort events by ts (descending)
+    all_events.sort(key=lambda x: x.get("ts", "") or x.get("timestamp", ""), reverse=True)
+    recent_events = all_events[:n_events]
 
     # ── Indicator matrix ────────────────────────────────────────────────────
     # Covers 3 index sids + active non-hedge strike sids
-    active_strike_sids = [
-        lg["security_id"] for lg in state["legs"]
-        if not lg["is_hedge"] and not lg["is_momentum"]
-    ]
     matrix_sids = list(_INDEX_SIDS.values()) + [
         s for s in active_strike_sids if s not in _INDEX_SIDS.values()
     ]

@@ -111,12 +111,12 @@ class _MonitorBody extends StatelessWidget {
           _LegsTable(legs: snap.legs),
           const SizedBox(height: 8),
         ] else
-          _EmptyCard(message: 'No open legs'),
-        _SectionHeader(title: 'Indicator Matrix'),
+          const _EmptyCard(message: 'No open legs'),
+        const _SectionHeader(title: 'Indicator Matrix'),
         _IndicatorMatrix(indicators: snap.indicators),
         const SizedBox(height: 8),
         if (snap.recentEvents.isNotEmpty) ...[
-          _SectionHeader(title: 'Recent Events'),
+          const _SectionHeader(title: 'Recent Events'),
           _EventLog(events: snap.recentEvents),
         ],
       ],

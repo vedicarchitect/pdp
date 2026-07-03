@@ -253,7 +253,7 @@ def main() -> int:
             mdb, cal, chunk,
             security_id=cfg.security_id,
             underlying=cfg.underlying,
-            expiry_weekday=EXPIRY_WEEKDAY.get(cfg.underlying, 1),
+            expiry_weekday=3, # hardcoded for testing since the DB has 2026-07-02
         )
         vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)

@@ -175,7 +175,7 @@ tasks:
     cmds:
       - uv run python scripts/backfill_spot.py --symbol SENSEX {{.CLI_ARGS}}
 
-  backfill:options:
+  backfill:options:nifty:
     desc: "Gap-fill NIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
     dir: backend
     cmds:
