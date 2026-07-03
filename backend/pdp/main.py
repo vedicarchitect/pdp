@@ -544,8 +544,8 @@ def create_app() -> FastAPI:
             status_code=500,
             content={
                 "error": {
-                    "type": type(exc).__name__,
-                    "message": str(exc),
+                    "type": "InternalServerError",
+                    "message": "An unexpected error occurred.",
                     "request_id": request_id,
                 }
             },
