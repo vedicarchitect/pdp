@@ -261,7 +261,7 @@ class DirectionalStrangle(Strategy):
         ind = ctx.indicators
         warmed: list[str] = []
         missing: list[str] = []
-        for tf in ("5m", "15m", "1h"):
+        for tf in ("5m", "15m", "1H"):
             if ind and ind.ema(self.sid, tf) is not None:
                 warmed.append(tf)
             else:
@@ -583,7 +583,7 @@ class DirectionalStrangle(Strategy):
 
         ema_5m = _to_tf_ema(ind.ema(self.sid, "5m"), spot) if ind else None
         ema_15m = _to_tf_ema(ind.ema(self.sid, "15m"), spot) if ind else None
-        ema_1h = _to_tf_ema(ind.ema(self.sid, "1h"), spot) if ind else None
+        ema_1h = _to_tf_ema(ind.ema(self.sid, "1H"), spot) if ind else None
 
         pivot = ind.pivots(self.sid, "5m") if ind else None
         cam_daily = _to_cam(pivot)
@@ -646,6 +646,12 @@ class DirectionalStrangle(Strategy):
             await asyncio.sleep(0.15)
         _, avg_px = await self.ctx.orders.get_position(sid)
         if avg_px is None or avg_px == Decimal("0"):
+            # Fallback: use last known LTP from on_tick cache so entry_price is
+            # never stored as 0 (which would make every MTM compute as -ltp).
+            ltp = self._ltp_cache.get(sid)
+            if ltp and ltp > 0:
+                self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, ltp=ltp)
+                return Decimal(str(ltp))
             self.ctx.log.warning("fill_avg_px_zero", sid=sid)
             return Decimal("0")
         return avg_px

@@ -99,17 +99,18 @@ class _MonitorBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final totalLegs = snap.legs.length;
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
         _IndexPriceRow(indices: snap.indices),
         const SizedBox(height: 8),
-        _StatusBar(snap: snap),
+        _OverallStatusBar(snap: snap),
         const SizedBox(height: 8),
-        if (snap.legs.isNotEmpty) ...[
-          _SectionHeader(title: 'Open Legs (${snap.legs.length})'),
-          _LegsTable(legs: snap.legs),
-          const SizedBox(height: 8),
+        if (snap.groups.isNotEmpty) ...[
+          _SectionHeader(title: 'Positions ($totalLegs legs)'),
+          ...snap.groups.map((g) => _UnderlyingSection(group: g)),
+          const SizedBox(height: 4),
         ] else
           const _EmptyCard(message: 'No open legs'),
         const _SectionHeader(title: 'Indicator Matrix'),
@@ -188,40 +189,34 @@ class _IndexCard extends StatelessWidget {
   String _fmt(double v) => v.toStringAsFixed(2);
 }
 
-// ─── Status bar ───────────────────────────────────────────────────────────────
+// ─── Overall status bar (total P&L + primary bucket) ─────────────────────────
 
-class _StatusBar extends StatelessWidget {
+class _OverallStatusBar extends StatelessWidget {
   final MonitorSnapshot snap;
 
-  const _StatusBar({required this.snap});
+  const _OverallStatusBar({required this.snap});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final pnlColor = snap.dayPnl >= 0 ? Colors.green : Colors.red;
+    final bkt = snap.bucket ?? '--';
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
-            // Bucket chip
             Chip(
-              label: Text(snap.bucket,
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
-              backgroundColor: _bucketColor(snap.bucket).withValues(alpha: 0.15),
-              side: BorderSide(color: _bucketColor(snap.bucket), width: 1.5),
+              label: Text(bkt, style: const TextStyle(fontWeight: FontWeight.bold)),
+              backgroundColor: _bucketColor(bkt).withValues(alpha: 0.15),
+              side: BorderSide(color: _bucketColor(bkt), width: 1.5),
             ),
             const SizedBox(width: 8),
             if (snap.score != null)
               Text('Score: ${snap.score!.toStringAsFixed(2)}',
                   style: Theme.of(context).textTheme.bodySmall),
             const Spacer(),
-            // P&L chips
-            _PnlChip(
-                label: 'P&L',
-                value: snap.dayPnl,
-                color: pnlColor,
-                context: context),
+            _PnlChip(label: 'Total P&L', value: snap.dayPnl, color: pnlColor, context: context),
             const SizedBox(width: 6),
             if (snap.doneForDay)
               Chip(
@@ -234,18 +229,99 @@ class _StatusBar extends StatelessWidget {
       ),
     );
   }
+}
 
-  Color _bucketColor(String bucket) {
-    switch (bucket.toUpperCase()) {
-      case 'COMPLETE_BULL':
-      case 'MILD_BULL':
-        return Colors.green;
-      case 'COMPLETE_BEAR':
-      case 'MILD_BEAR':
-        return Colors.red;
-      default:
-        return Colors.orange;
-    }
+// ─── Per-underlying section (header + legs table) ─────────────────────────────
+
+class _UnderlyingSection extends StatelessWidget {
+  final UnderlyingGroup group;
+
+  const _UnderlyingSection({required this.group});
+
+  @override
+  Widget build(BuildContext context) {
+    final bkt = group.bucket ?? '--';
+    final pnlColor = group.dayPnl >= 0 ? Colors.green : Colors.red;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Text(group.underlying,
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelLarge
+                      ?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _bucketColor(bkt).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: _bucketColor(bkt).withValues(alpha: 0.5)),
+                ),
+                child: Text(bkt,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: _bucketColor(bkt),
+                        fontWeight: FontWeight.w600)),
+              ),
+              if (group.score != null) ...[
+                const SizedBox(width: 6),
+                Text(group.score!.toStringAsFixed(2),
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodySmall
+                        ?.copyWith(color: _bucketColor(bkt))),
+              ],
+              const Spacer(),
+              Text(
+                '${group.dayPnl >= 0 ? '+' : ''}${group.dayPnl.toStringAsFixed(0)}',
+                style: TextStyle(
+                    color: pnlColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13),
+              ),
+              if (group.doneForDay) ...[
+                const SizedBox(width: 6),
+                const Text('DONE',
+                    style: TextStyle(fontSize: 10, color: Colors.orange)),
+              ],
+            ],
+          ),
+        ),
+        if (group.legs.isNotEmpty)
+          _LegsTable(legs: group.legs)
+        else
+          const Padding(
+            padding: EdgeInsets.only(left: 8, bottom: 4),
+            child: Text('no open legs',
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
+          ),
+        const SizedBox(height: 6),
+      ],
+    );
+  }
+}
+
+Color _bucketColor(String bucket) {
+  switch (bucket.toLowerCase()) {
+    case 'complete_bull':
+    case 'most_bull':
+      return Colors.green;
+    case 'more_bull':
+      return Colors.lightGreen;
+    case 'complete_bear':
+    case 'most_bear':
+      return Colors.red;
+    case 'more_bear':
+      return Colors.orange;
+    case 'neutral':
+      return Colors.blueGrey;
+    default:
+      return Colors.grey;
   }
 }
 
@@ -304,14 +380,14 @@ class _LegsTable extends StatelessWidget {
           DataColumn(label: Text('Type')),
           DataColumn(label: Text('Strike'), numeric: true),
           DataColumn(label: Text('Lots'), numeric: true),
-          DataColumn(label: Text('Entry ₹'), numeric: true),
-          DataColumn(label: Text('LTP ₹'), numeric: true),
-          DataColumn(label: Text('MtM ₹'), numeric: true),
+          DataColumn(label: Text('Entry'), numeric: true),
+          DataColumn(label: Text('LTP'), numeric: true),
+          DataColumn(label: Text('MtM'), numeric: true),
           DataColumn(label: Text('Δ'), numeric: true),
           DataColumn(label: Text('θ'), numeric: true),
           DataColumn(label: Text('OI'), numeric: true),
           DataColumn(label: Text('PCR'), numeric: true),
-          DataColumn(label: Text('Entry Reason')),
+          DataColumn(label: Text('Reason')),
         ],
         rows: legs.map((leg) => _legRow(context, leg)).toList(),
       ),
@@ -332,7 +408,7 @@ class _LegsTable extends StatelessWidget {
       DataCell(_Tag(tag: tag, color: typeColor)),
       DataCell(Text(leg.strike.toStringAsFixed(0))),
       DataCell(Text('${leg.lots}')),
-      DataCell(Text(leg.entryPrice.toStringAsFixed(1))),
+      DataCell(Text(leg.entryPrice > 0 ? leg.entryPrice.toStringAsFixed(1) : '—')),
       DataCell(Text(leg.ltp != null ? leg.ltp!.toStringAsFixed(1) : '--')),
       DataCell(Text(
         leg.mtm != null ? leg.mtm!.toStringAsFixed(0) : '--',
@@ -477,6 +553,7 @@ class _SidMatrix extends StatelessWidget {
                   DataColumn(label: Text('EMA9'), numeric: true),
                   DataColumn(label: Text('EMA20'), numeric: true),
                   DataColumn(label: Text('EMA50'), numeric: true),
+                  DataColumn(label: Text('EMA100'), numeric: true),
                   DataColumn(label: Text('PSAR'), numeric: true),
                 ],
                 rows: _matrixTfs
@@ -539,6 +616,7 @@ class _SidMatrix extends StatelessWidget {
       DataCell(Text(_fmtOpt(cell?.ema9))),
       DataCell(Text(_fmtOpt(cell?.ema20))),
       DataCell(Text(_fmtOpt(cell?.ema50))),
+      DataCell(Text(_fmtOpt(cell?.ema100))),
       DataCell(Text(_fmtOpt(cell?.psar))),
     ]);
   }

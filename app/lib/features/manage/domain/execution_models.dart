@@ -188,15 +188,49 @@ class SidIndicators {
   }
 }
 
+// ─── Per-underlying strategy group ───────────────────────────────────────────
+
+class UnderlyingGroup {
+  final String underlying;
+  final List<LegRow> legs;
+  final double dayPnl;
+  final String? bucket; // null when not yet evaluated
+  final double? score;
+  final bool doneForDay;
+
+  const UnderlyingGroup({
+    required this.underlying,
+    required this.legs,
+    required this.dayPnl,
+    this.bucket,
+    this.score,
+    required this.doneForDay,
+  });
+
+  factory UnderlyingGroup.fromJson(Map<String, dynamic> json) {
+    final legsRaw = json['legs'] as List<dynamic>? ?? [];
+    final totals = json['totals'] as Map<String, dynamic>? ?? {};
+    final status = json['status'] as Map<String, dynamic>? ?? {};
+    return UnderlyingGroup(
+      underlying: json['underlying'] as String? ?? '',
+      legs: legsRaw.map((l) => LegRow.fromJson(l as Map<String, dynamic>)).toList(),
+      dayPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
+      bucket: status['bucket'] as String?,
+      score: (status['score'] as num?)?.toDouble(),
+      doneForDay: status['done_for_day'] as bool? ?? false,
+    );
+  }
+}
+
 // ─── Monitor snapshot ─────────────────────────────────────────────────────────
 
 class MonitorSnapshot {
   final List<IndexPrice> indices;
-  final List<LegRow> legs;
+  final List<UnderlyingGroup> groups;
   final double dayRealized;
   final double dayUnrealized;
   final double dayPnl;
-  final String bucket;
+  final String? bucket; // NIFTY primary bucket; null before 10:15
   final double? score;
   final bool doneForDay;
   final int nOpenShorts;
@@ -207,11 +241,11 @@ class MonitorSnapshot {
 
   const MonitorSnapshot({
     required this.indices,
-    required this.legs,
+    required this.groups,
     required this.dayRealized,
     required this.dayUnrealized,
     required this.dayPnl,
-    required this.bucket,
+    this.bucket,
     this.score,
     required this.doneForDay,
     required this.nOpenShorts,
@@ -221,6 +255,8 @@ class MonitorSnapshot {
     required this.indicators,
   });
 
+  List<LegRow> get legs => groups.expand((g) => g.legs).toList();
+
   factory MonitorSnapshot.fromJson(Map<String, dynamic> json) {
     // Indices
     final indicesRaw = json['indices'] as Map<String, dynamic>? ?? {};
@@ -228,21 +264,16 @@ class MonitorSnapshot {
         .map((e) => IndexPrice.fromJson(e.key, e.value as Map<String, dynamic>))
         .toList();
 
-    // Legs from groups
+    // Groups (per-underlying with legs + per-underlying status)
     final groupsRaw = json['groups'] as List<dynamic>? ?? [];
-    final legs = <LegRow>[];
-    for (final grp in groupsRaw) {
-      final grpMap = grp as Map<String, dynamic>;
-      final grpLegs = grpMap['legs'] as List<dynamic>? ?? [];
-      for (final l in grpLegs) {
-        legs.add(LegRow.fromJson(l as Map<String, dynamic>));
-      }
-    }
+    final groups = groupsRaw
+        .map((g) => UnderlyingGroup.fromJson(g as Map<String, dynamic>))
+        .toList();
 
     // Totals
     final totals = json['totals'] as Map<String, dynamic>? ?? {};
 
-    // Status
+    // Status (primary = NIFTY)
     final status = json['status'] as Map<String, dynamic>? ?? {};
 
     // Indicators
@@ -258,11 +289,11 @@ class MonitorSnapshot {
 
     return MonitorSnapshot(
       indices: indices,
-      legs: legs,
+      groups: groups,
       dayRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
       dayUnrealized: (totals['day_unrealized'] as num?)?.toDouble() ?? 0.0,
       dayPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
-      bucket: status['bucket'] as String? ?? '--',
+      bucket: status['bucket'] as String?,
       score: (status['score'] as num?)?.toDouble(),
       doneForDay: status['done_for_day'] as bool? ?? false,
       nOpenShorts: (status['n_open_shorts'] as num?)?.toInt() ?? 0,

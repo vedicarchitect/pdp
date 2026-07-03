@@ -4,6 +4,7 @@ import '../../features/backtest/presentation/backtest_console_screen.dart';
 import '../../features/backtest/presentation/backtest_detail_screen.dart';
 import '../../features/dashboard/presentation/dashboard_screen.dart';
 import '../../features/manage/presentation/manage_hub_screen.dart';
+import '../../features/manage/presentation/strategy_execution_screen.dart';
 import '../../features/portfolio/presentation/portfolio_screen.dart';
 import '../../features/intel/presentation/market_intel_screen.dart';
 import '../../features/journal/presentation/journal_screen.dart';
@@ -39,6 +40,10 @@ final GoRouter appRouter = GoRouter(
               ),
             ),
           ],
+        ),
+        GoRoute(
+          path: '/execution',
+          builder: (context, state) => const StrategyExecutionScreen(),
         ),
         GoRoute(
           path: '/manage',

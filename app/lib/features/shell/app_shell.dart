@@ -30,6 +30,12 @@ class AppShell extends ConsumerWidget {
       selectedIcon: Icons.account_balance_wallet,
     ),
     _Destination(
+      route: '/execution',
+      label: 'Execution',
+      icon: Icons.play_circle_outline,
+      selectedIcon: Icons.play_circle,
+    ),
+    _Destination(
       route: '/backtests',
       label: 'Backtests',
       icon: Icons.science_outlined,
