@@ -1,3 +1,15 @@
+# directional-strangle Specification
+
+## Purpose
+
+Bias-driven multi-leg ratio strangle strategy for index options (NIFTY/BANKNIFTY/SENSEX). A
+deterministic bias-scoring engine (shared by backtest and live) drives PE:CE leg ratios, strike
+selection, VIX/PCR gating, rollups, tiered stops, trend-flip adjustment, and a daily loss cap. The
+same bias function and gates SHALL produce identical decisions in backtest and live given identical
+inputs.
+
+## Requirements
+
 ### Requirement: Bias-scoring engine
 The system SHALL provide a pure, deterministic bias-scoring function in `src/pdp/signals/bias.py` that accepts per-timeframe indicator snapshots (5m/15m/1h/1d/1w), an India VIX series, a PCR value, VWAP, and the 15m opening range, and returns a `BiasResult` containing a normalized score in `[−1, +1]`, a bias bucket, a sell PE:CE lot ratio, a `gated` flag, and a human-readable reason. The same function SHALL be used by both the backtest simulator and the live strategy so that identical inputs yield identical decisions.
 
@@ -179,3 +191,21 @@ the next day starts un-halted.
 #### Scenario: Next day resumes
 - **WHEN** the IST trading day rolls over after a halt
 - **THEN** the halt marker is cleared and the strategy may open legs again
+
+### Requirement: Leg entry metadata
+
+Each open leg SHALL record `entry_time` (IST timezone-aware) and `entry_reason` (a short string
+capturing the bias bucket and score at entry, e.g. `NEUTRAL@0.10`) when the leg is opened, for short,
+hedge, and momentum legs. The `state()` API SHALL include `entry_time` and `entry_reason` in each leg's
+dict so the monitor can display when and why each leg was opened. Closed-leg exit reasons remain sourced
+from the existing `_activity` event buffer.
+
+#### Scenario: Entry metadata captured on open
+
+- **WHEN** a short leg is opened in the NEUTRAL bucket with score 0.10
+- **THEN** the leg's `entry_time` is set to the IST open time and `entry_reason` is `"NEUTRAL@0.10"`
+
+#### Scenario: Entry metadata exposed in state
+
+- **WHEN** `state()` is called with at least one open leg
+- **THEN** each leg dict includes `entry_time` and `entry_reason`
