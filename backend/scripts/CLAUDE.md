@@ -15,6 +15,8 @@ See [README.md](README.md) for full arg reference.
 | `task backfill:options:sensex` | `backfill_options_gap.py` | SENSEX option OHLCV → `option_bars`. Same flags as `backfill:options` |
 | `task backfill:expired` | `backfill_expired_options.py` | Expired-contract bars |
 | `task backfill:vix` | `backfill_vix.py` | India VIX 1m → `market_bars` (sid 21; intraday history from ~Aug-2021). `--from --to --resolve --only-missing` |
+| `task backfill:levels` | `backfill_levels.py` | Daily + weekly standard/Camarilla/Fibonacci levels → `index_levels`. `--symbol --from --to --only-missing --dry-run` |
+| `task backfill:levels:all` | `backfill_levels.py` | Same but runs NIFTY + BANKNIFTY + SENSEX sequentially. |
 | `task audit:strangle` | `audit_strangle_data.py` | Per-year spot/options/VIX coverage for the directional-strangle backtest |
 | `task audit:coverage` | `audit_options_coverage.py` | Coverage gap audit by date+strike |
 | `task validate:warehouse` | `validate_options_warehouse.py` | Integrity: missing days, bad prices, OI |
@@ -29,6 +31,7 @@ See [README.md](README.md) for full arg reference.
 1. `task backfill:nifty` / `backfill:banknifty` / `backfill:sensex` (spot must exist before options derivation)
 2. `task backfill:options` / `backfill:options:banknifty` / `backfill:options:sensex`
 3. `task audit:coverage` + `task validate:warehouse`
+4. `task backfill:levels:all` (requires step 1 to be complete; computes daily+weekly levels from spot bars)
 
 ## Archive
 

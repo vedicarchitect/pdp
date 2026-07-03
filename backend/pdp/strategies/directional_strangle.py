@@ -61,6 +61,33 @@ if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
     from pdp.strategy.context import StrategyContext
 
+from sqlalchemy import select
+
+
+async def _resolve_front_month_futures_sid(
+    underlying: str,
+    session_maker: Any,
+) -> str | None:
+    """Query instruments table for the nearest-expiry FUTIDX for this underlying."""
+    from pdp.instruments.models import Instrument
+
+    try:
+        async with session_maker() as session:
+            result = await session.execute(
+                select(Instrument.security_id)
+                .where(
+                    Instrument.instrument_type == "FUTIDX",
+                    Instrument.underlying == underlying,
+                    Instrument.expiry >= date.today(),
+                )
+                .order_by(Instrument.expiry)
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return str(row) if row else None
+    except Exception:
+        return None
+
 _IST = ZoneInfo("Asia/Kolkata")
 _VIX_RECENT_WINDOW = 3
 
@@ -120,9 +147,17 @@ class DirectionalStrangle(Strategy):
         self.index_segment: str = p.get("index_segment", "IDX_I")
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self._vix_sid: str = str(p.get("vix_security_id", "21"))
-        # Optional front-month futures SID for VWAP (real volume vs zero-volume index spot)
+        # Front-month futures SID for VWAP (real volume vs zero-volume index spot).
+        # Resolved automatically from the instruments table; YAML override still accepted.
         _futs = p.get("futures_security_id")
-        self._futures_sid: str | None = str(_futs) if _futs else None
+        if _futs:
+            self._futures_sid: str | None = str(_futs)
+        elif ctx.session_maker is not None:
+            self._futures_sid = await _resolve_front_month_futures_sid(
+                self.underlying, ctx.session_maker
+            )
+        else:
+            self._futures_sid = None
 
         self._lot_size: int = int(p.get("lot_size", 65))
         self._scale_lots: int = int(p.get("scale_lots", 2))
@@ -230,9 +265,6 @@ class DirectionalStrangle(Strategy):
         # Cache last spot for use in _roll_leg (on_tick doesn't have bar.close)
         self._last_spot: float | None = None
 
-        # Suppress repeated cam_weekly_missing warnings within a session
-        self._cam_weekly_warned: bool = False
-
         # Session start timestamp
         self._started_at: datetime = datetime.now(tz=_IST)
 
@@ -255,6 +287,7 @@ class DirectionalStrangle(Strategy):
             squareoff=self._squareoff_ist.isoformat(),
             roll_trigger_prem=self._roll_trigger_prem,
             roll_target_min_prem=self._roll_target_min_prem,
+            futures_sid=self._futures_sid,
         )
 
         # Timeframe key audit: check which indicator timeframes are warmed
@@ -1063,7 +1096,6 @@ class DirectionalStrangle(Strategy):
             self._day_baseline.clear()
             self._touched_sids.clear()
             self._stop_gate.clear()
-            self._cam_weekly_warned = False
             self._pending_bucket = None
             self._pending_bucket_count = 0
             # _current_bucket is intentionally NOT reset: open legs persist across

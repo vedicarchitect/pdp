@@ -361,11 +361,11 @@ async def strangle_monitor(
     unrealized_by_underlying: dict[str, float] = {}
     active_strike_sids = set()
 
-    for strategy, state in zip(strategies, states):
+    for strategy, state in zip(strategies, states, strict=False):
         und = strategy.underlying  # all legs under same underlying for now
         for leg in state["legs"]:
             leg_enriched = dict(leg)
-    
+
             # Greeks/OI/PCR only for active non-hedge strikes
             if not leg["is_hedge"] and not leg["is_momentum"]:
                 active_strike_sids.add(leg["security_id"])
@@ -377,11 +377,28 @@ async def strangle_monitor(
                     day_start_ts=today_ist_start,
                 )
                 leg_enriched.update(greeks)
-    
+
             legs_by_underlying.setdefault(und, []).append(leg_enriched)
             unrealized_by_underlying[und] = (
                 unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
             )
+
+    # ── Status — per-underlying + overall ──────────────────────────────────
+    primary_state = next(
+        (s for s_idx, s in enumerate(states) if strategies[s_idx].underlying == "NIFTY"),
+        states[0]
+    )
+    # Per-underlying status so Flutter can show individual buckets/scores (must come before groups)
+    underlying_status = {
+        strategies[i].underlying: {
+            "bucket": s.get("bucket"),   # None → JSON null (Flutter shows '--')
+            "score": s.get("score"),
+            "done_for_day": s.get("done_for_day", False),
+            "n_open_shorts": s.get("n_open_shorts", 0),
+            "n_open_hedges": s.get("n_open_hedges", 0),
+        }
+        for i, s in enumerate(states)
+    }
 
     groups = [
         {
@@ -402,23 +419,6 @@ async def strangle_monitor(
         "day_realized": sum(s.get("day_realized", 0.0) for s in states),
         "day_unrealized": sum(s.get("day_unrealized", 0.0) for s in states),
         "day_pnl": sum(s.get("day_pnl", 0.0) for s in states),
-    }
-
-    # ── Status — per-underlying + overall ──────────────────────────────────
-    primary_state = next(
-        (s for s_idx, s in enumerate(states) if strategies[s_idx].underlying == "NIFTY"),
-        states[0]
-    )
-    # Per-underlying status so Flutter can show individual buckets/scores
-    underlying_status = {
-        strategies[i].underlying: {
-            "bucket": s.get("bucket"),   # None → JSON null (Flutter shows '--')
-            "score": s.get("score"),
-            "done_for_day": s.get("done_for_day", False),
-            "n_open_shorts": s.get("n_open_shorts", 0),
-            "n_open_hedges": s.get("n_open_hedges", 0),
-        }
-        for i, s in enumerate(states)
     }
     status = {
         "bucket": primary_state.get("bucket"),   # None → JSON null, not "None" string
@@ -475,7 +475,7 @@ async def strangle_monitor(
 async def get_levels(
     request: Request,
     underlying: str,
-    period: str = Query(default="daily", regex="^(daily|weekly)$"),
+    period: str = Query(default="daily", pattern="^(daily|weekly)$"),
     date: str | None = Query(default=None, description="YYYY-MM-DD (single doc)"),
     start: str | None = Query(default=None, description="YYYY-MM-DD range start"),
     end: str | None = Query(default=None, description="YYYY-MM-DD range end"),

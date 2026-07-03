@@ -207,6 +207,19 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("indicator_warmup_failed", exc=str(exc))
 
+    # Daily levels (standard/Camarilla/Fibonacci) for NIFTY/BANKNIFTY/SENSEX.
+    # Idempotent upsert — safe to re-run on restart. Monday also recomputes weekly.
+    try:
+        from pdp.indicators.levels_store import compute_session_levels
+        await compute_session_levels(
+            mongo_db,
+            security_ids=["13", "25", "51"],
+            holiday_json=settings.NSE_HOLIDAYS_JSON,
+        )
+        log.info("session_levels_computed")
+    except Exception as exc:
+        log.warning("session_levels_compute_failed", exc=str(exc))
+
     # ML loaders — load requested artifacts per watchlist entry (opt-in, non-blocking)
     if settings.ML_ENABLED and settings.ML_ACTIVE_VERSION:
         from pdp.ml.infer import ModelLoader, register_loader

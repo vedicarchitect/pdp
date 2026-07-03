@@ -21,7 +21,7 @@ from typing import Any
 import structlog
 from dotenv import load_dotenv
 
-from pdp.indicators.levels_store import LevelsStore, _UNDERLYING_MAP
+from pdp.indicators.levels_store import _UNDERLYING_MAP
 from pdp.indicators.pivots import _compute_pivots
 from pdp.options.gap_backfill import holidays, trading_days
 from pdp.settings import get_settings
@@ -136,8 +136,8 @@ def _run_backfill(
             log.debug("levels_backfill_no_bars", symbol=symbol, day=str(prior_day), period="daily")
             continue
 
-        h, l, c = hlc
-        ps = _compute_pivots(h, l, c, session_date)
+        dy_h, dy_l, dy_c = hlc
+        ps = _compute_pivots(dy_h, dy_l, dy_c, session_date)
         doc: dict[str, Any] = {
             "schema_version": 1,
             "security_id": security_id,
@@ -145,7 +145,7 @@ def _run_backfill(
             "period": "daily",
             "session_date": session_date.isoformat(),
             "source": {
-                "h": h, "l": l, "c": c,
+                "h": dy_h, "l": dy_l, "c": dy_c,
                 "window_start": prior_day.isoformat(),
                 "window_end": prior_day.isoformat(),
             },
@@ -188,7 +188,6 @@ def _run_backfill(
 
         # Prior ISO week: previous Monday to previous Friday
         prior_monday = monday - timedelta(days=7)
-        prior_friday = monday - timedelta(days=3)  # approximate; use last available trading day
         # Get all trading days in that prior week
         prior_week_days = trading_days(prior_monday, monday - timedelta(days=1), hol_set)
         if not prior_week_days:
@@ -220,8 +219,8 @@ def _run_backfill(
             continue
 
         r = result[0]
-        h, l, c = float(r["h"]), float(r["l"]), float(r["c"])
-        ps = _compute_pivots(h, l, c, monday)
+        wk_h, wk_l, wk_c = float(r["h"]), float(r["l"]), float(r["c"])
+        ps = _compute_pivots(wk_h, wk_l, wk_c, monday)
         doc = {
             "schema_version": 1,
             "security_id": security_id,
@@ -229,7 +228,7 @@ def _run_backfill(
             "period": "weekly",
             "session_date": monday.isoformat(),
             "source": {
-                "h": h, "l": l, "c": c,
+                "h": wk_h, "l": wk_l, "c": wk_c,
                 "window_start": week_start.isoformat(),
                 "window_end": week_end.isoformat(),
             },
