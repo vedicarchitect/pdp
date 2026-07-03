@@ -144,7 +144,7 @@ def main() -> int:
     from pymongo import MongoClient
     col = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]["option_bars"]
 
-    failures = _check(col, cutoff_date=None)
+    failures = _check(col)
 
     if failures:
         for f in failures:

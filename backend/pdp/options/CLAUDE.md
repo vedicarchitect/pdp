@@ -4,7 +4,7 @@
 
 | File | Size | Role |
 |------|------|------|
-| `poller.py` | 10 KB | `OptionsChainPoller` — fetches chain snapshots from Dhan API; persists to MongoDB `option_chains`; **live-only** |
+| `poller.py` | 10 KB | `OptionsChainPoller` — fetches chain snapshots from Dhan API; persists to MongoDB `option_chains`; starts on Dhan creds alone (paper-safe) |
 | `hub.py` | 2.2 KB | `OptionsHub` — WS fan-out for chain updates |
 | `greeks.py` | 3.8 KB | Greeks computation (Delta, Gamma, Theta, Vega, IV) via Black-Scholes |
 | `warehouse.py` | 4.6 KB | Chain data access helpers for backtest/warehouse reads |
@@ -16,8 +16,9 @@
 
 ## Start Condition
 
-`OptionsChainPoller` only starts when `LIVE=1` AND `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` set.
-In paper/dev mode: chain data is read from MongoDB warehouse (pre-loaded historical snapshots).
+`OptionsChainPoller` starts when `OPTIONS_POLLER_ENABLED=true` (default) AND `DHAN_CLIENT_ID` +
+`DHAN_ACCESS_TOKEN` are set. The `LIVE` flag is **not** required — paper sessions get realtime chain
+data (read-only, no order risk). Set `OPTIONS_POLLER_ENABLED=false` to disable without removing creds.
 
 ## MongoDB `option_chains` Schema
 
@@ -45,6 +46,7 @@ TTL: `OPTIONS_CHAIN_TTL_DAYS` (default 7). Index: `(underlying, expiry, strike, 
 | `OPTIONS_RISK_FREE_RATE` | 0.065 |
 | `OPTIONS_UNDERLYINGS` | `["NIFTY","BANKNIFTY"]` |
 | `OPTIONS_CHAIN_TTL_DAYS` | 7 |
+| `OPTIONS_POLLER_ENABLED` | `true` |
 
 ## Gap Backfill
 

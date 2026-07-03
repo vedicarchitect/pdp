@@ -24,6 +24,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_backtest_days(db)
     await _ensure_backtest_folds(db)
     await _ensure_backtest_trades(db)
+    await _ensure_index_levels(db)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -337,3 +338,28 @@ def get_backtest_folds_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorColle
 
 def get_backtest_trades_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["backtest_trades"]
+
+
+def get_index_levels_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["index_levels"]
+
+
+async def _ensure_index_levels(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create index_levels as a regular (non-time-series) collection + compound indexes.
+
+    Regular collection (not time-series) is required because we upsert by unique key;
+    MongoDB TS collections reject upsert operations.
+    """
+    col: AsyncIOMotorCollection = db["index_levels"]  # type: ignore[type-arg]
+    # Unique index: (security_id, period, session_date) — the natural upsert key
+    await col.create_index(
+        [("security_id", ASCENDING), ("period", ASCENDING), ("session_date", ASCENDING)],
+        unique=True,
+        name="idx_levels_unique_key",
+    )
+    # Secondary: (underlying, period, session_date) for name-based lookups
+    await col.create_index(
+        [("underlying", ASCENDING), ("period", ASCENDING), ("session_date", ASCENDING)],
+        name="idx_levels_underlying_period_date",
+    )
+    log.debug("mongo_indexes_ensured", collection="index_levels")

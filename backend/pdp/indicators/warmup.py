@@ -37,6 +37,8 @@ _TF_SESSION_BARS: dict[str, int] = {
     "25m": 15,
     "1H": 7,
     "1h": 7,
+    "1D": 1,
+    "1w": 1,  # one weekly bar per ISO week
 }
 _DEFAULT_SESSION_BARS = 75
 
@@ -50,6 +52,8 @@ _TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
     "25m": 8,   # ceil(50/15)=4 sessions + 4 padding
     "1H": 14,   # ceil(50/7)=8 sessions + 6 padding
     "1h": 14,
+    "1D": 30,   # 1 bar/day; 30 days for EMA(20)
+    "1w": 30,   # 1 bar/week; 30 days covers ~4 weeks (enough for pivot seed)
 }
 _DEFAULT_WARMUP_CALENDAR_DAYS = 1
 
@@ -153,8 +157,15 @@ async def _warm_one(
             bars = sorted(new_bars + bars, key=lambda b: b.bar_time)
 
     if not bars:
-        log.warning("indicator_warmup_no_bars", security_id=security_id, timeframe=timeframe)
-        return
+        if timeframe == "1w":
+            # No 1w bars in Mongo (BarAggregator hasn't run for a full week yet).
+            # Synthesize weekly bars from 1D bars so weekly pivot/Camarilla is seeded.
+            bars = await _synthesize_weekly_from_daily(col, security_id, since)
+            if bars:
+                log.info("indicator_warmup_1w_synthesized_from_1d", security_id=security_id, n=len(bars))
+        if not bars:
+            log.warning("indicator_warmup_no_bars", security_id=security_id, timeframe=timeframe)
+            return
 
     if not engine._suite_trackers.get((security_id, timeframe)):
         log.debug("indicator_warmup_suite_not_configured", security_id=security_id, timeframe=timeframe)
@@ -190,6 +201,54 @@ async def _warm_one(
         bars_fed=fed,
         direction=((_st := engine.get(security_id, timeframe)) and _st.direction) or None,
     )
+
+
+async def _synthesize_weekly_from_daily(
+    col,
+    security_id: str,
+    since: datetime,
+) -> list[BarClosed]:
+    """Build synthetic 1w BarClosed objects by aggregating 1D bars from MongoDB.
+
+    Reads the last ~3 weeks of 1D bars and groups them by ISO week (Monday boundary).
+    Returns one BarClosed per complete prior week so that PivotTracker("1w") can
+    compute weekly Camarilla levels on startup even before any live 1w bar rolls.
+    """
+    # Fetch 1D bars for the last 21 days (covers ~3 ISO weeks including partials)
+    daily_since = since - timedelta(days=21)
+    daily_bars = await _fetch_from_mongo(col, security_id, "1D", daily_since)
+    if not daily_bars:
+        return []
+
+    # Group by ISO-week Monday (UTC Monday 00:00)
+    from pdp.market.bars import _bar_boundary_1w
+
+    weekly: dict[datetime, list[BarClosed]] = {}
+    for bar in daily_bars:
+        wk = _bar_boundary_1w(bar.bar_time)
+        weekly.setdefault(wk, []).append(bar)
+
+    # Build one synthetic 1w BarClosed per complete week (exclude the current partial week)
+    now_week = _bar_boundary_1w(datetime.now(UTC))
+    result: list[BarClosed] = []
+    for wk_start in sorted(weekly):
+        if wk_start >= now_week:
+            continue  # skip current partial week
+        week_bars = sorted(weekly[wk_start], key=lambda b: b.bar_time)
+        result.append(
+            BarClosed(
+                security_id=security_id,
+                timeframe="1w",
+                bar_time=wk_start,
+                open=week_bars[0].open,
+                high=max(b.high for b in week_bars),
+                low=min(b.low for b in week_bars),
+                close=week_bars[-1].close,
+                volume=sum(b.volume for b in week_bars),
+                oi=week_bars[-1].oi,
+            )
+        )
+    return result
 
 
 async def _fetch_from_mongo(

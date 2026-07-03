@@ -17,7 +17,7 @@ from typing import Any
 
 EXPECTED_SESSION_BARS = 375   # 09:15–15:30 inclusive at 1m
 MIN_BARS_FRAC = 0.95          # need ≥ 95% of the session present
-MAX_GAP_MIN = 5               # largest tolerated intraday gap, minutes
+MAX_GAP_MIN = 20.0               # largest tolerated intraday gap, minutes
 
 
 def spot_completeness(

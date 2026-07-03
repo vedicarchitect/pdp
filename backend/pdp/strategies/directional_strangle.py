@@ -26,7 +26,7 @@ Parity additions (chunk 4 strangle-execution-console):
   - leg_status heartbeat after every bias_evaluated
   - Rollup: close short when LTP < roll_trigger_prem (20), reopen at next OTM with prem >= 50
   - Stop-gate: 3-bar cooldown (15 min) before re-entry after a stop
-  - Weekly Camarilla: ind.pivots(sid, "1w") — returns None until 1w bar support added
+  - Weekly Camarilla: ind.pivots(sid, "1w") — seeded from 1w bar aggregation
   - Live PCR: not yet wired (no ind.pcr or accessible poller.latest_pcr)
   - Indicator timeframe audit on startup
 """
@@ -60,6 +60,33 @@ from pdp.strategy.strikes import (
 if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
     from pdp.strategy.context import StrategyContext
+
+from sqlalchemy import select
+
+
+async def _resolve_front_month_futures_sid(
+    underlying: str,
+    session_maker: Any,
+) -> str | None:
+    """Query instruments table for the nearest-expiry FUTIDX for this underlying."""
+    from pdp.instruments.models import Instrument
+
+    try:
+        async with session_maker() as session:
+            result = await session.execute(
+                select(Instrument.security_id)
+                .where(
+                    Instrument.instrument_type == "FUTIDX",
+                    Instrument.underlying == underlying,
+                    Instrument.expiry >= date.today(),
+                )
+                .order_by(Instrument.expiry)
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return str(row) if row else None
+    except Exception:
+        return None
 
 _IST = ZoneInfo("Asia/Kolkata")
 _VIX_RECENT_WINDOW = 3
@@ -101,6 +128,8 @@ class OpenLeg:
     is_hedge: bool = False      # True = far-OTM protective long
     is_momentum: bool = False   # True = ITM directional long (COMPLETE_* only)
     half_stopped: bool = False  # True after pct_stop_half partial close (shorts only)
+    entry_time: datetime | None = None   # IST-aware open timestamp
+    entry_reason: str = ""               # bucket@score at entry (e.g. "NEUTRAL@0.10")
 
 
 class DirectionalStrangle(Strategy):
@@ -118,9 +147,17 @@ class DirectionalStrangle(Strategy):
         self.index_segment: str = p.get("index_segment", "IDX_I")
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self._vix_sid: str = str(p.get("vix_security_id", "21"))
-        # Optional front-month futures SID for VWAP (real volume vs zero-volume index spot)
+        # Front-month futures SID for VWAP (real volume vs zero-volume index spot).
+        # Resolved automatically from the instruments table; YAML override still accepted.
         _futs = p.get("futures_security_id")
-        self._futures_sid: str | None = str(_futs) if _futs else None
+        if _futs:
+            self._futures_sid: str | None = str(_futs)
+        elif ctx.session_maker is not None:
+            self._futures_sid = await _resolve_front_month_futures_sid(
+                self.underlying, ctx.session_maker
+            )
+        else:
+            self._futures_sid = None
 
         self._lot_size: int = int(p.get("lot_size", 65))
         self._scale_lots: int = int(p.get("scale_lots", 2))
@@ -228,9 +265,6 @@ class DirectionalStrangle(Strategy):
         # Cache last spot for use in _roll_leg (on_tick doesn't have bar.close)
         self._last_spot: float | None = None
 
-        # Suppress repeated cam_weekly_missing warnings within a session
-        self._cam_weekly_warned: bool = False
-
         # Session start timestamp
         self._started_at: datetime = datetime.now(tz=_IST)
 
@@ -253,13 +287,14 @@ class DirectionalStrangle(Strategy):
             squareoff=self._squareoff_ist.isoformat(),
             roll_trigger_prem=self._roll_trigger_prem,
             roll_target_min_prem=self._roll_target_min_prem,
+            futures_sid=self._futures_sid,
         )
 
         # Timeframe key audit: check which indicator timeframes are warmed
         ind = ctx.indicators
         warmed: list[str] = []
         missing: list[str] = []
-        for tf in ("5m", "15m", "1h"):
+        for tf in ("5m", "15m", "1H"):
             if ind and ind.ema(self.sid, tf) is not None:
                 warmed.append(tf)
             else:
@@ -581,17 +616,14 @@ class DirectionalStrangle(Strategy):
 
         ema_5m = _to_tf_ema(ind.ema(self.sid, "5m"), spot) if ind else None
         ema_15m = _to_tf_ema(ind.ema(self.sid, "15m"), spot) if ind else None
-        ema_1h = _to_tf_ema(ind.ema(self.sid, "1h"), spot) if ind else None
+        ema_1h = _to_tf_ema(ind.ema(self.sid, "1H"), spot) if ind else None
 
         pivot = ind.pivots(self.sid, "5m") if ind else None
         cam_daily = _to_cam(pivot)
 
-        # Weekly Camarilla: read from "1w" pivot snapshot; returns None until 1w bar support added
+        # Weekly Camarilla: read from "1w" pivot snapshot (seeded by 1w BarAggregator)
         weekly_pivot = ind.pivots(self.sid, "1w") if ind else None
         cam_weekly = _to_cam(weekly_pivot)
-        if cam_weekly is None and not self._cam_weekly_warned:
-            self._cam_weekly_warned = True
-            self.ctx.log.debug("cam_weekly_missing", reason="1w_bar_not_supported_yet")
 
         pl = ind.period_levels(self.sid, "5m") if ind else None
         # VWAP: prefer futures SID (has real volume); fall back to spot (returns None for index)
@@ -647,6 +679,12 @@ class DirectionalStrangle(Strategy):
             await asyncio.sleep(0.15)
         _, avg_px = await self.ctx.orders.get_position(sid)
         if avg_px is None or avg_px == Decimal("0"):
+            # Fallback: use last known LTP from on_tick cache so entry_price is
+            # never stored as 0 (which would make every MTM compute as -ltp).
+            ltp = self._ltp_cache.get(sid)
+            if ltp and ltp > 0:
+                self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, ltp=ltp)
+                return Decimal(str(ltp))
             self.ctx.log.warning("fill_avg_px_zero", sid=sid)
             return Decimal("0")
         return avg_px
@@ -686,9 +724,11 @@ class DirectionalStrangle(Strategy):
             return
 
         avg_px = await self._await_fill_avg_px(sid)
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._short_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
@@ -748,9 +788,11 @@ class DirectionalStrangle(Strategy):
 
         avg_px = await self._await_fill_avg_px(h_sid)
         h_strike = float(target.strike) if target.strike is not None else 0.0
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._hedge_legs.append(OpenLeg(
             security_id=h_sid, segment=segment, opt_type=opt_type,
             strike=h_strike, lots=lots, entry_price=avg_px, is_hedge=True,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=h_sid, opt_type=opt_type, strike=h_strike,
@@ -803,9 +845,11 @@ class DirectionalStrangle(Strategy):
             return
 
         avg_px = await self._await_fill_avg_px(sid)
+        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
         self._momentum_legs.append(OpenLeg(
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,
+            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
@@ -981,6 +1025,8 @@ class DirectionalStrangle(Strategy):
                 "strike": lg.strike,
                 "lots": lg.lots,
                 "entry_price": float(lg.entry_price),
+                "entry_time": lg.entry_time.isoformat() if lg.entry_time else None,
+                "entry_reason": lg.entry_reason,
                 "ltp": ltp,
                 "mtm": mtm,
                 "is_hedge": lg.is_hedge,
@@ -1050,7 +1096,6 @@ class DirectionalStrangle(Strategy):
             self._day_baseline.clear()
             self._touched_sids.clear()
             self._stop_gate.clear()
-            self._cam_weekly_warned = False
             self._pending_bucket = None
             self._pending_bucket_count = 0
             # _current_bucket is intentionally NOT reset: open legs persist across

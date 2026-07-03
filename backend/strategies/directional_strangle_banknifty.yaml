@@ -13,10 +13,14 @@ class: pdp.strategies.directional_strangle.DirectionalStrangle
 watchlist:
   - security_id: "25"       # BANKNIFTY index (Dhan IDX_I)
     exchange_segment: IDX_I
-    timeframes: [5m, 15m, 1h]
+    timeframes: [5m, 15m, 30m, 1H, 1D]
     indicators:
       - family: ema
-        periods: [9, 20, 50]
+        periods: [9, 20, 50, 100]
+      - family: supertrend
+        period: 10
+        multiplier: 2.0
+      - family: psar
       - family: vwap
       - family: pivots
       - family: period_levels
@@ -28,7 +32,7 @@ params:
   index_segment: IDX_I
   option_segment: NSE_FNO
   vix_security_id: "21"          # India VIX
-  # futures_security_id: null    # Set to front-month BANKNIFTY futures Dhan SID for VWAP (update monthly)
+  # futures_security_id — resolved automatically from instruments table at startup
 
   # ---- Lot / strike ----
   lot_size: 30                   # 2025+ BANKNIFTY lot size (SEBI effective Jan 2025)

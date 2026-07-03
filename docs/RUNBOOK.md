@@ -128,7 +128,7 @@ task dev
 | JournalService | Always |
 | DhanTickerAdapter (market feed) | `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` set |
 | DhanBroker (live orders) | `LIVE=1` + `BROKER=dhan` + creds set |
-| OptionsChainPoller | `LIVE=1` + creds set |
+| OptionsChainPoller | `OPTIONS_POLLER_ENABLED=true` (default) + creds set — paper-safe, no `LIVE=1` needed |
 
 ### Key environment flags
 

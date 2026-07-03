@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from pdp.market.bars import BarAggregator, BarBuilder, BarClosed
+from pdp.market.bars import BarAggregator, BarBuilder, BarClosed, _bar_boundary_1w
 from pdp.market.models import Tick
 
 
@@ -31,6 +31,33 @@ def _tick(
 
 def _dt(iso: str) -> datetime:
     return datetime.fromisoformat(iso).replace(tzinfo=UTC)
+
+
+class TestBarBoundary:
+    def test_1w_boundary_aligns_to_monday_0000_ist(self) -> None:
+        # 2026-06-30 is a Tuesday.
+        # Monday of that week is 2026-06-29.
+        # 00:00 IST on Monday is Sunday 18:30 UTC, which is 2026-06-28 18:30:00 UTC.
+
+        # A time on Tuesday 2026-06-30 at 06:00 UTC (11:30 IST)
+        t_tue = _dt("2026-06-30T06:00:00")
+        b_tue = _bar_boundary_1w(t_tue)
+        assert b_tue == _dt("2026-06-28T18:30:00")
+
+        # A time on Monday 2026-06-29 at 03:45 UTC (09:15 IST, market open)
+        t_mon = _dt("2026-06-29T03:45:00")
+        b_mon = _bar_boundary_1w(t_mon)
+        assert b_mon == _dt("2026-06-28T18:30:00")
+
+        # A time on Friday 2026-07-03 at 10:00 UTC (15:30 IST, market close)
+        t_fri = _dt("2026-07-03T10:00:00")
+        b_fri = _bar_boundary_1w(t_fri)
+        assert b_fri == _dt("2026-06-28T18:30:00")
+
+        # Previous Friday 2026-06-26 should roll to the previous Monday (2026-06-21 18:30 UTC)
+        t_prev_fri = _dt("2026-06-26T06:00:00")
+        b_prev_fri = _bar_boundary_1w(t_prev_fri)
+        assert b_prev_fri == _dt("2026-06-21T18:30:00")
 
 
 class TestBarBuilder:

@@ -33,8 +33,8 @@ build/
 .DS_Store
 Thumbs.db
 
-# Data / logs
-data/
+# Data / logs (scope to backend/data/ — Flutter feature data/ dirs must be committed)
+backend/data/
 logs/
 !infra/logs/.gitkeep
 *.log

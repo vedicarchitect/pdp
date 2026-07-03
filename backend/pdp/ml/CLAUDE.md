@@ -58,3 +58,21 @@ task ml:train -- --security-id 13 --timeframe 15m --days 90
 
 The expiry head consumes option-chain analytics features (`max_pain`, `pcr`, `gex`, `iv_atm`, `india_vix`, `oi_wall_above`, `oi_wall_below`, `max_pain_distance`).
 It is gated behind `ML_EXPIRY_HEAD_ENABLED=True` and is disabled by default.
+
+## Feature source: `index_levels`
+
+`pdp.indicators.levels_store.LevelsStore` provides standard/Camarilla/Fibonacci pivot levels
+plus PDH/PDL/PWH/PWL pre-computed per session in Mongo `index_levels`. These are high-quality
+regime features for ML models.
+
+```python
+from pdp.indicators.levels_store import LevelsStore
+
+store = LevelsStore(mongo_db["index_levels"])
+# Range read returns session-date-keyed dicts
+docs = await store.range("13", "daily", start_date, end_date)
+# Flat ML rows: std_pp, cam_r3, fib_s1, pdh, pdl, ...
+rows = await store.to_feature_rows("13", "daily", start_date, end_date)
+```
+
+Join to bars by `session_date`. Both `daily` and `weekly` periods available.

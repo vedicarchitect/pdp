@@ -175,7 +175,7 @@ tasks:
     cmds:
       - uv run python scripts/backfill_spot.py --symbol SENSEX {{.CLI_ARGS}}
 
-  backfill:options:
+  backfill:options:nifty:
     desc: "Gap-fill NIFTY option_bars from Dhan. Args: -- [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--codes 1,2] [--band N] [--only-missing] [--dry-run]"
     dir: backend
     cmds:
@@ -204,6 +204,20 @@ tasks:
     dir: backend
     cmds:
       - uv run python scripts/backfill_vix.py {{.CLI_ARGS}}
+
+  backfill:levels:
+    desc: "Backfill daily+weekly pivot levels → index_levels. Args: -- --symbol NIFTY|BANKNIFTY|SENSEX [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only-missing] [--dry-run]"
+    dir: backend
+    cmds:
+      - uv run python scripts/backfill_levels.py {{.CLI_ARGS}}
+
+  backfill:levels:all:
+    desc: "Backfill daily+weekly levels for NIFTY+BANKNIFTY+SENSEX (5yr). Args: -- [--from YYYY-MM-DD] [--only-missing] [--dry-run]"
+    dir: backend
+    cmds:
+      - uv run python scripts/backfill_levels.py --symbol NIFTY {{.CLI_ARGS}}
+      - uv run python scripts/backfill_levels.py --symbol BANKNIFTY {{.CLI_ARGS}}
+      - uv run python scripts/backfill_levels.py --symbol SENSEX {{.CLI_ARGS}}
 
 
   # ── Data validation & audit ──────────────────────────────────────────────────
