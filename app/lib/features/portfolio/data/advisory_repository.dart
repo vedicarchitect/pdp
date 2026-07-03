@@ -17,6 +17,7 @@ class AdvisoryRepository {
     return {
       'holdings': holdings,
       'advice': advice,
+      'is_mock': response['is_mock'] as bool? ?? false,
     };
   }
 
