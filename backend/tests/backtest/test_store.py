@@ -10,13 +10,21 @@ from pathlib import Path
 import pytest
 
 from pdp.backtest.store import (
+    WF_PASS_NET,
+    WF_PASS_PF,
+    WF_PASS_POS_FRAC,
+    WF_PASS_SHARPE,
     BacktestStore,
     _sharpe_from_rets,
     _safe_float,
     build_day_docs,
+    build_decision_docs,
     build_fold_docs,
+    build_promotion_doc,
     build_run_doc,
+    build_sweep_doc,
     build_trade_docs,
+    verdict_breakdown,
 )
 
 
@@ -244,12 +252,14 @@ class _FakeCol:
         return self._docs.get(key)
 
 
-def _make_store():
+def _make_store(*, with_sweeps=False, with_decisions=False):
     return BacktestStore(
         col_runs=_FakeCol(),
         col_days=_FakeCol(),
         col_folds=_FakeCol(),
         col_trades=_FakeCol(),
+        col_sweeps=_FakeCol() if with_sweeps else None,
+        col_decisions=_FakeCol() if with_decisions else None,
     )
 
 
@@ -305,3 +315,207 @@ def test_store_ingest_wf_csv(tmp_path):
     assert result["run_id"] == "wf_test"
     assert result["folds"] == 2
     assert result["verdict"] in ("PASS", "REVIEW")
+
+
+# ── verdict thresholds / breakdown ───────────────────────────────────────────
+
+
+def test_verdict_breakdown_all_pass():
+    stitched = {"net": 100000.0, "profit_factor": 2.0, "sharpe": 1.5,
+                "folds": 10, "positive_folds": 7}
+    b = verdict_breakdown(stitched)
+    assert b["all_pass"] is True
+    assert b["checks"]["net"]["pass"] is True
+    assert b["checks"]["profit_factor"]["threshold"] == WF_PASS_PF
+    assert b["checks"]["sharpe"]["threshold"] == WF_PASS_SHARPE
+    assert b["checks"]["positive_fold_fraction"]["actual"] == pytest.approx(0.7)
+    assert b["positive_folds"] == 7
+    assert b["folds"] == 10
+
+
+def test_verdict_breakdown_fails_on_low_pf():
+    stitched = {"net": 100000.0, "profit_factor": 0.9, "sharpe": 1.5,
+                "folds": 10, "positive_folds": 7}
+    b = verdict_breakdown(stitched)
+    assert b["all_pass"] is False
+    assert b["checks"]["profit_factor"]["pass"] is False
+    assert b["checks"]["net"]["pass"] is True  # other checks still reported independently
+
+
+def test_verdict_breakdown_fails_on_low_positive_fold_fraction():
+    stitched = {"net": 100000.0, "profit_factor": 2.0, "sharpe": 1.5,
+                "folds": 10, "positive_folds": 5}  # 50% < WF_PASS_POS_FRAC (60%)
+    b = verdict_breakdown(stitched)
+    assert b["all_pass"] is False
+    assert b["checks"]["positive_fold_fraction"]["pass"] is False
+
+
+def test_verdict_breakdown_empty_stitched_all_fail():
+    b = verdict_breakdown({})
+    assert b["all_pass"] is False
+    assert b["folds"] == 0
+    assert b["checks"]["net"]["actual"] == 0.0
+
+
+def test_wf_pass_thresholds_are_the_single_source():
+    # Guards against re-introducing duplicated literals elsewhere.
+    assert WF_PASS_NET == 0
+    assert WF_PASS_PF == 1.2
+    assert WF_PASS_SHARPE == 0.5
+    assert WF_PASS_POS_FRAC == 0.6
+
+
+# ── sweep leaderboard ─────────────────────────────────────────────────────────
+
+
+def test_build_sweep_doc_ranks_by_pf_then_net():
+    combos = [
+        {"params": {"day_loss_limit": 10000}, "metrics": {"profit_factor": 2.0, "net": 5000.0}},
+        {"params": {"day_loss_limit": 15000}, "metrics": {"profit_factor": 3.0, "net": 1000.0}},
+        {"params": {"day_loss_limit": 20000}, "metrics": {"profit_factor": 3.0, "net": 9000.0}},
+    ]
+    doc = build_sweep_doc(
+        "sweep_1", kind="sweep", window={"from": "2026-01-01", "to": "2026-06-01"},
+        grid={"day_loss_limit": [10000, 15000, 20000]}, objective="pf", combos=combos,
+    )
+    assert doc["sweep_id"] == "sweep_1"
+    ranked = doc["combos"]
+    # Highest PF wins; ties broken by higher net -> 20000 (pf=3, net=9000) is rank 1.
+    assert ranked[0]["params"] == {"day_loss_limit": 20000}
+    assert ranked[0]["rank"] == 1
+    assert ranked[1]["params"] == {"day_loss_limit": 15000}
+    assert ranked[2]["params"] == {"day_loss_limit": 10000}
+    assert doc["best_param"] == {"day_loss_limit": 20000}
+
+
+def test_build_sweep_doc_treats_inf_pf_as_best():
+    combos = [
+        {"params": {"a": 1}, "metrics": {"profit_factor": float("inf"), "net": 100.0}},
+        {"params": {"a": 2}, "metrics": {"profit_factor": 3.0, "net": 999999.0}},
+    ]
+    doc = build_sweep_doc("sweep_2", kind="sweep", window={}, grid={"a": [1, 2]},
+                          objective="pf", combos=combos)
+    assert doc["best_param"] == {"a": 1}  # inf PF ranks above any finite PF
+
+
+def test_build_sweep_doc_empty_combos():
+    doc = build_sweep_doc("sweep_3", kind="sweep", window={}, grid={"a": [1]},
+                          objective="pf", combos=[])
+    assert doc["best_param"] is None
+    assert doc["combos"] == []
+
+
+def test_store_upsert_sweep_requires_collection():
+    store = _make_store()  # no col_sweeps
+    with pytest.raises(RuntimeError):
+        store.upsert_sweep({"sweep_id": "x", "combos": []})
+
+
+def test_store_upsert_sweep():
+    store = _make_store(with_sweeps=True)
+    doc = {"sweep_id": "sweep_1", "combos": [{"rank": 1, "params": {}}]}
+    store.upsert_sweep(doc)
+    key = str(sorted({"sweep_id": "sweep_1"}.items()))
+    assert store._sweeps._docs[key]["sweep_id"] == "sweep_1"
+
+
+def test_store_upsert_sweep_ships_each_combo_to_opensearch_with_sweep_id(monkeypatch):
+    """Combos must be individually dual-sunk to backtest-runs, tagged sweep_id/param_grid —
+    otherwise they're invisible to the observability layer even though the leaderboard
+    persists fine in Mongo (task 2.4 / the "Sweep runs indexed to OpenSearch" requirement)."""
+    shipped: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "pdp.backtest.store._ship_backtest",
+        lambda kind, doc: shipped.append((kind, doc)),
+    )
+    store = _make_store(with_sweeps=True)
+    doc = build_sweep_doc(
+        "sweep_2", kind="sweep", window={"from": "2026-01-01", "to": "2026-02-01"},
+        grid={"day_loss_limit": [10000, 15000]}, objective="pf",
+        combos=[
+            {"params": {"day_loss_limit": 10000}, "metrics": {"net": 5000.0, "profit_factor": 2.0}},
+            {"params": {"day_loss_limit": 15000}, "metrics": {"net": 9000.0, "profit_factor": 3.0}},
+        ],
+        base_config={"underlying": "NIFTY"},
+    )
+    store.upsert_sweep(doc)
+
+    run_ships = [d for kind, d in shipped if kind == "run"]
+    assert len(run_ships) == 2
+    for d in run_ships:
+        assert d["sweep_id"] == "sweep_2"
+        assert d["param_grid"] == {"day_loss_limit": [10000, 15000]}
+        assert d["kind"] == "sweep_combo"
+    # Each combo's resolved config merges base_config + its own param override.
+    configs = {d["run_id"]: d["config"] for d in run_ships}
+    assert configs["sweep_2#rank1"] == {"underlying": "NIFTY", "day_loss_limit": 15000}
+    assert configs["sweep_2#rank2"] == {"underlying": "NIFTY", "day_loss_limit": 10000}
+
+
+# ── decision trace ────────────────────────────────────────────────────────────
+
+
+def test_build_decision_docs_shapes_raw_events():
+    raw = [
+        {"ts_ist": "2026-06-02T10:15:00", "date": "2026-06-02", "event": "entry",
+         "action": "open 5PE", "snapshot": {"score": 0.9}},
+        {"ts_ist": "2026-06-02T11:00:00", "date": "2026-06-02", "event": "rollup",
+         "sub_reason": "premium_decay", "action": "roll 5L", "snapshot": {"from_strike": 20000}},
+    ]
+    docs = build_decision_docs("run1", "strangle", raw)
+    assert len(docs) == 2
+    assert docs[0]["run_id"] == "run1"
+    assert docs[0]["strategy_id"] == "strangle"
+    assert docs[0]["event"] == "entry"
+    assert docs[0]["sub_reason"] is None
+    assert docs[1]["sub_reason"] == "premium_decay"
+    assert docs[1]["snapshot"]["from_strike"] == 20000
+
+
+def test_store_upsert_decisions_requires_collection():
+    store = _make_store()  # no col_decisions
+    with pytest.raises(RuntimeError):
+        store.upsert_decisions([{"run_id": "r1", "ts_ist": "t", "event": "entry"}])
+
+
+def test_store_upsert_decisions_returns_count():
+    store = _make_store(with_decisions=True)
+    docs = [
+        {"run_id": "r1", "ts_ist": "2026-06-02T10:15:00", "event": "entry"},
+        {"run_id": "r1", "ts_ist": "2026-06-02T11:00:00", "event": "exit"},
+    ]
+    assert store.upsert_decisions(docs) == 2
+    assert store.upsert_decisions([]) == 0  # empty list is a no-op, not an error
+
+
+# ── promotion rationale ──────────────────────────────────────────────────────
+
+
+def test_build_promotion_doc_snapshots_evidence():
+    run = {
+        "run_id": "wf_run1",
+        "verdict": "PASS",
+        "config": {"timeframe_min": 5},
+        "stitched_oos": {"net": 100000.0, "profit_factor": 2.0, "sharpe": 1.5,
+                         "folds": 10, "positive_folds": 7},
+    }
+    promote_result = {"strategy_id": "promoted_wf_run1", "yaml_path": "strategies/promoted_wf_run1.yaml"}
+    doc = build_promotion_doc(run, promote_result, note="looks good, ship it")
+    assert doc["run_id"] == "wf_run1"
+    assert doc["source_run_id"] == "wf_run1"
+    assert doc["strategy_id"] == "promoted_wf_run1"
+    assert doc["verdict"] == "PASS"
+    assert doc["note"] == "looks good, ship it"
+    assert doc["verdict_breakdown"]["all_pass"] is True
+    assert doc["stitched_oos"]["net"] == pytest.approx(100000.0)
+    assert isinstance(doc["promoted_at"], datetime)
+
+
+def test_build_promotion_doc_no_stitched_oos():
+    """A single-run (non-walk-forward) promotion has no stitched_oos — must not crash."""
+    run = {"run_id": "r1", "verdict": "PASS", "config": {}}
+    promote_result = {"strategy_id": "promoted_r1", "yaml_path": "strategies/promoted_r1.yaml"}
+    doc = build_promotion_doc(run, promote_result)
+    assert doc["stitched_oos"] == {}
+    assert doc["verdict_breakdown"] is None
+    assert doc["note"] is None

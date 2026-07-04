@@ -17,7 +17,8 @@ import structlog
 
 log = structlog.get_logger()
 
-_REPO_ROOT = Path(__file__).parent.parent.parent.parent  # src/pdp/backtest → repo root
+# backend/pdp/backtest/job_handlers.py -> backend/ (cwd for backtest/*.py script invocations)
+_REPO_ROOT = Path(__file__).parent.parent.parent
 
 
 async def _run_subprocess(
@@ -66,14 +67,15 @@ async def backtest_single_handler(
         "--config-file", cfg_path,
         "--from", params["date_from"],
         "--to", params["date_to"],
-        "--out-dir", params.get("out_dir", "backtest/runs"),
     ]
+    if params.get("out_dir"):
+        cmd += ["--out-dir", params["out_dir"]]
     if params.get("hedge") is True:
         cmd.append("--hedge")
     elif params.get("hedge") is False:
         cmd.append("--no-hedge")
-    if params.get("mongo"):
-        cmd.append("--mongo")
+    if params.get("mongo", True) is False:
+        cmd.append("--no-mongo")
 
     await progress(job_id, 5, "running backtest")
     rc = await _run_subprocess(cmd, progress, job_id)
@@ -89,26 +91,66 @@ async def backtest_sweep_handler(
     params: dict[str, Any],
     progress: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    """Run a strangle parameter sweep job."""
-    import json
+    """Run a real in-process strangle parameter sweep and persist a ranked leaderboard.
+
+    Loads the market window once (in a worker thread, off the event loop) and replays
+    every grid combination through ``simulate_strangle_day`` via ``sweep_engine``, then
+    ranks and upserts the leaderboard to ``backtest_sweeps`` (dual-sunk to OpenSearch).
+    """
+    import uuid as uuid_lib
+
+    from pdp.backtest.sweep_engine import run_strangle_sweep
+    from pdp.backtest.store import BacktestStore, build_sweep_doc
+
+    grid = params.get("grid") or {}
+    if not grid:
+        raise ValueError("sweep grid must have at least one field, e.g. {'hedge_enabled': [true, false]}")
+
+    loop = asyncio.get_running_loop()
+
+    def on_progress(pct: int, msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(progress(job_id, pct, msg), loop)
 
     await progress(job_id, 2, "preparing sweep")
-    grid = params.get("grid", {})
-    cmd = [
-        sys.executable, "backtest/strangle_run.py",
-        "--from", params["date_from"],
-        "--to", params["date_to"],
-        "--out-dir", params.get("out_dir", "backtest/runs"),
-    ]
-    # Grid flags for sweep — strangle_run.py doesn't support inline sweep, use run.py grid
-    # For now, run as single with default config; a real sweep integration is future work
-    if params.get("mongo"):
-        cmd.append("--mongo")
-    await progress(job_id, 5, "running sweep")
-    rc = await _run_subprocess(cmd, progress, job_id)
-    if rc != 0:
-        raise RuntimeError(f"sweep process exited with code {rc}")
-    return {"status": "complete", "kind": "sweep"}
+    result = await asyncio.to_thread(
+        run_strangle_sweep,
+        date_from=params["date_from"],
+        date_to=params["date_to"],
+        base_config=params.get("config", {}),
+        grid=grid,
+        no_commission=bool(params.get("no_commission", False)),
+        on_progress=on_progress,
+    )
+
+    sweep_id = params.get("sweep_id") or f"sweep_{uuid_lib.uuid4().hex[:12]}"
+    doc = build_sweep_doc(
+        sweep_id,
+        kind="sweep",
+        window=result["window"],
+        grid=grid,
+        objective=params.get("objective", "pf"),
+        combos=result["combos"],
+        base_config=params.get("config", {}),
+    )
+
+    if params.get("mongo", True):
+        from pdp.settings import get_settings
+        from pymongo import MongoClient
+
+        s = get_settings()
+        mc = MongoClient(s.MONGO_URI)
+        db = mc[s.MONGO_DB_NAME]
+        store = BacktestStore(
+            db["backtest_runs"], db["backtest_days"], db["backtest_folds"], db["backtest_trades"],
+            col_sweeps=db["backtest_sweeps"], col_decisions=db["backtest_decisions"],
+        )
+        await asyncio.to_thread(store.upsert_sweep, doc)
+
+    await progress(job_id, 99, f"sweep complete: {result['n_combos']} combos")
+    return {
+        "status": "complete", "kind": "sweep", "sweep_id": sweep_id,
+        "n_combos": result["n_combos"], "best_param": doc["best_param"],
+    }
 
 
 async def backtest_walkforward_handler(
@@ -117,13 +159,7 @@ async def backtest_walkforward_handler(
     progress: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
     """Run a walk-forward optimization job."""
-    import tempfile
-    import os
-
     await progress(job_id, 2, "preparing walk-forward")
-
-    out_csv = os.path.join("backtest/runs",
-                           f"wf_{job_id.hex[:8]}.csv")
 
     cmd = [
         sys.executable, "backtest/strangle_walkforward.py",
@@ -133,14 +169,15 @@ async def backtest_walkforward_handler(
         "--oos-months", str(params.get("oos_months", 3)),
         "--step-months", str(params.get("step_months", 3)),
         "--objective", params.get("objective", "sharpe"),
-        "--out", out_csv,
     ]
-    if params.get("mongo"):
-        cmd.append("--mongo")
+    if params.get("out_csv"):
+        cmd += ["--out", params["out_csv"]]
+    if params.get("mongo", True) is False:
+        cmd.append("--no-mongo")
 
     await progress(job_id, 5, "running walk-forward")
     rc = await _run_subprocess(cmd, progress, job_id)
     if rc != 0:
         raise RuntimeError(f"walk-forward process exited with code {rc}")
 
-    return {"status": "complete", "kind": "walkforward", "out_csv": out_csv}
+    return {"status": "complete", "kind": "walkforward"}

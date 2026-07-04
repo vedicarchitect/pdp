@@ -22,7 +22,7 @@ OpenSearch is the derived, queryable, realtime layer. Disabled unless `OPENSEARC
 ## Indices (monthly date-suffixed, `dynamic:false`)
 
 `pdp-logs-*` (universal, segregate by `source`), `pdp-strangle-events-*`, `pdp-trades-*`,
-`pdp-journal-*`, `pdp-backtest-{runs,days,trades}-*`.
+`pdp-journal-*`, `pdp-backtest-{runs,days,trades,decisions,promotions}-*`.
 
 ## Rules / gotchas
 

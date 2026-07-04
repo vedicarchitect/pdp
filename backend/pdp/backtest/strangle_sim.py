@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 
 from pdp.backtest.sim import (
     Bar,
@@ -295,12 +296,19 @@ def simulate_strangle_day(
     data: StrangleDayData,
     commission_fn: CommissionFn | None = None,
     trace: list[BarStatus] | None = None,
+    decisions: list[dict] | None = None,
 ) -> DayResult | None:
     """Replay one trade day of the directional strangle. Returns a ``DayResult``.
 
     If ``trace`` is a list, a ``BarStatus`` is appended for every processed bar —
     the detailed every-minute status (bias score + each signal vote, VIX/PCR
     gates, open legs with LTP/MTM, day P&L, and the action taken).
+
+    If ``decisions`` is a list, a strategy-agnostic why-entry/why-exit event dict is
+    appended at each point the engine already computes a reason — entry, scale_in
+    (momentum add-on), rollup (premium decay), exit (tp/stop/flip/squareoff), st_flip
+    (bias sign flip), and reentry (after the 15m stop-gate cooloff). Unlike ``trace``,
+    this is bounded by decisions, not bars — safe to enable on every run/sweep combo.
     """
     commission_fn = commission_fn or _zero_commission
     lot = cfg.lot_size
@@ -330,9 +338,32 @@ def simulate_strangle_day(
     stop_gate: dict[str, dict] = {}
     leg_buckets: dict[str, BiasBucket] = {}   # bucket at time leg was opened
     _gate_bars_needed = max(1, -(-15 // cfg.timeframe_min))  # ceil(15 / tf_min)
+    # Sides whose stop-gate just cleared — the next entry on that side is a "reentry"
+    # (after the 15m cooloff), not a fresh "entry". Consumed on the next open_leg call.
+    cooloff_cleared: set[str] = set()
+
+    def log_decision(ist_dt: datetime, spot: float, event: str, *, action: str,
+                      sub_reason: str | None = None, bias: BiasResult | None = None,
+                      extra: dict | None = None) -> None:
+        """Append a strategy-agnostic why-entry/why-exit event (no-op if not requested)."""
+        if decisions is None:
+            return
+        leg_snap = [
+            {"opt_type": ot, "strike": leg.strike, "lots": leg.lots, "avg_entry": leg.avg_entry}
+            for ot, leg in legs.items()
+        ]
+        snapshot: dict[str, Any] = {"spot": spot, "day_pnl": day_pnl, "legs": leg_snap}
+        if bias is not None:
+            snapshot.update(score=bias.score, bucket=bias.bucket.value, votes=dict(bias.votes))
+        if extra:
+            snapshot.update(extra)
+        decisions.append({
+            "ts_ist": ist_dt, "date": td.isoformat(), "event": event,
+            "sub_reason": sub_reason, "action": action, "snapshot": snapshot,
+        })
 
     def open_leg(opt_type: str, ist_dt: datetime, spot: float, lots: int,
-                 bucket: BiasBucket, note: str) -> bool:
+                 bucket: BiasBucket, note: str, bias: BiasResult | None = None) -> bool:
         if lots <= 0:
             return False
         strike, sbars = _select_strike_for(cfg, bucket, opt_type, data.day_chain, ist_dt, spot,
@@ -354,6 +385,13 @@ def simulate_strangle_day(
             price=px, nifty=spot, note=note, cum_lots=lots, avg_entry=leg.avg_entry,
             day_pnl=day_pnl, commission_inr=comm,
         ))
+        is_reentry = opt_type in cooloff_cleared
+        cooloff_cleared.discard(opt_type)
+        log_decision(
+            ist_dt, spot, "reentry" if is_reentry else "entry", action=note,
+            sub_reason="cooloff_15m" if is_reentry else None, bias=bias,
+            extra={"opt_type": opt_type, "lots": lots, "bucket": bucket.value},
+        )
         open_hedge(opt_type, ist_dt, spot, lots)
         return True
 
@@ -426,12 +464,17 @@ def simulate_strangle_day(
         m.total_cost = px * m_lots * lot
         momentum[opt_type] = m
         comm = commission_fn("BUY", m_lots * lot * px)
+        note = f"momentum_long {m_lots}x{opt_type}@{mstrike:.0f}"
         trades.append(Trade(
             side="BUY", opt_type=opt_type, strike=mstrike, bar_time=ist_dt,
             qty=m_lots * lot, price=px, nifty=spot,
-            note=f"momentum_long {m_lots}x{opt_type}@{mstrike:.0f}",
+            note=note,
             cum_lots=m_lots, avg_entry=m.avg_entry, day_pnl=day_pnl, commission_inr=comm,
         ))
+        log_decision(
+            ist_dt, spot, "scale_in", action=note, sub_reason="momentum_add",
+            extra={"opt_type": opt_type, "lots": m_lots, "strike": mstrike},
+        )
         return True
 
     def close_momentum(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
@@ -456,6 +499,10 @@ def simulate_strangle_day(
                 exit_ist=ist_dt, lots=m.lots, avg_entry=m.avg_entry, exit_px=exit_px,
                 leg_pnl=mom_pnl, reason=f"momentum_close ({reason})",
             ))
+        log_decision(
+            ist_dt, spot, "exit", action=f"momentum_close ({reason})", sub_reason=f"momentum_{reason}",
+            extra={"opt_type": opt_type, "leg_pnl": mom_pnl},
+        )
         del momentum[opt_type]
 
     def close_leg(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
@@ -487,9 +534,21 @@ def simulate_strangle_day(
             ))
         del legs[opt_type]
         leg_buckets.pop(opt_type, None)
-        if day_pnl <= -cfg.day_loss_limit and not done:
+        day_loss_halt = day_pnl <= -cfg.day_loss_limit and not done
+        if day_loss_halt:
             done = True
             done_reason = f"day_loss ({day_pnl:+.0f})"
+        # "roll" closes are logged as part of the rollup event (_roll_leg), not as a
+        # standalone exit — the close+reopen together ARE the rollup.
+        if reason != "roll":
+            _EXIT_SUB = {
+                "take_profit": "tp", "pct_stop_all": "stop_all",
+                "trend_flip": "flip", "squareoff": "squareoff", "squareoff_end": "squareoff",
+            }
+            log_decision(
+                ist_dt, spot, "exit", action=reason, sub_reason=_EXIT_SUB.get(reason, reason),
+                extra={"opt_type": opt_type, "leg_pnl": leg_pnl, "day_loss_halt": day_loss_halt},
+            )
 
     def close_all(ist_dt: datetime, spot: float, reason: str) -> None:
         for ot in list(legs.keys()):
@@ -527,6 +586,11 @@ def simulate_strangle_day(
                 exit_ist=ist_dt, lots=close_lots, avg_entry=leg.avg_entry, exit_px=close_px,
                 leg_pnl=leg_pnl, reason=reason,
             ))
+        log_decision(
+            ist_dt, spot, "exit", action=reason, sub_reason="stop_half",
+            extra={"opt_type": opt_type, "leg_pnl": leg_pnl, "closed_lots": close_lots,
+                   "remaining_lots": remaining},
+        )
         # Reduce remaining position in-place (avg_entry is preserved — cost/qty both halve).
         leg.lots = remaining
         leg.total_qty = remaining * lot
@@ -594,6 +658,11 @@ def simulate_strangle_day(
             price=roll_px, nifty=spot, note=f"roll {lots}L", cum_lots=lots,
             avg_entry=nl.avg_entry, day_pnl=day_pnl, commission_inr=comm,
         ))
+        log_decision(
+            ist_dt, spot, "rollup", action=f"roll {lots}L", sub_reason="premium_decay",
+            extra={"opt_type": opt_type, "from_strike": leg.strike if leg else None,
+                   "to_strike": roll_strike, "lots": lots},
+        )
         open_hedge(opt_type, ist_dt, spot, lots)  # re-establish protection on the rolled short
 
     def emit(ist_dt: datetime, spot: float, bias: BiasResult | None, action: str) -> None:
@@ -676,6 +745,7 @@ def simulate_strangle_day(
                 gate["n_below"] += 1
                 if gate["n_below"] >= _gate_bars_needed:
                     del stop_gate[ot]   # 15m sustained — gate cleared
+                    cooloff_cleared.add(ot)
                 else:
                     gated_sides.append(ot)
             else:
@@ -688,6 +758,8 @@ def simulate_strangle_day(
         if legs and cfg.adjustment_on_flip and pos_sign != 0:
             cur_sign = _sign(bias.score)
             if cur_sign != 0 and cur_sign != pos_sign:
+                log_decision(ist_dt, spot, "st_flip", action="trend_flip", bias=bias,
+                             extra={"prior_sign": pos_sign, "new_sign": cur_sign})
                 close_all(ist_dt, spot, "trend_flip")
                 pos_sign = 0
                 emit(ist_dt, spot, bias, "trend_flip")
@@ -705,10 +777,10 @@ def simulate_strangle_day(
                 opened = False
                 if pe_lots > 0 and "PE" not in stop_gate:
                     opened |= open_leg("PE", ist_dt, spot, pe_lots, bias.bucket,
-                                       f"open {pe_lots}PE [{bias.bucket.value}]")
+                                       f"open {pe_lots}PE [{bias.bucket.value}]", bias=bias)
                 if ce_lots > 0 and "CE" not in stop_gate:
                     opened |= open_leg("CE", ist_dt, spot, ce_lots, bias.bucket,
-                                       f"open {ce_lots}CE [{bias.bucket.value}]")
+                                       f"open {ce_lots}CE [{bias.bucket.value}]", bias=bias)
                 if opened:
                     pos_sign = _sign(bias.score)
                     action = ";".join(t.note for t in trades if t.bar_time == ist_dt) or "entry"

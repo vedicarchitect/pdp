@@ -58,7 +58,11 @@ async def test_init_collections_creates_option_chains_with_ttl() -> None:
             return positional_col
         if name == "events":
             return events_col
-        return chains_col
+        if name == "option_chains":
+            return chains_col
+        # Every other collection init_collections() touches — isolate them from
+        # chains_col so its create_index call_count only reflects option_chains.
+        return MagicMock(create_index=AsyncMock())
 
     db = MagicMock()
     db.create_collection = AsyncMock()

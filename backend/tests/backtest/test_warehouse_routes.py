@@ -47,6 +47,8 @@ def _make_mongo_db(runs: list[dict], days: list[dict], folds: list[dict], trades
 
     col_promotions = MagicMock()
     col_promotions.insert_one = AsyncMock()
+    col_promotions.update_one = AsyncMock()
+    col_promotions.find_one = AsyncMock(return_value=None)
 
     _cols = {
         "backtest_runs": col_runs,
@@ -337,3 +339,59 @@ def test_promote_pass_accepted(client, tmp_path, monkeypatch):
     data = resp.json()
     assert "strategy_id" in data
     assert "yaml_path" in data
+
+    # The evidence-snapshot doc is upserted (not blind-inserted) so re-promotion never duplicates.
+    col_promotions = client.app.state.mongo_db._cols["backtest_promotions"]
+    col_promotions.update_one.assert_awaited_once()
+    (filt, update), kwargs = col_promotions.update_one.call_args
+    assert filt == {"run_id": "strangle_test1"}
+    assert update["$set"]["run_id"] == "strangle_test1"
+    assert update["$set"]["verdict"] == "PASS"
+    assert kwargs.get("upsert") is True
+
+
+def test_promote_with_operator_note(client, tmp_path, monkeypatch):
+    pass_run = {**_RUN, "verdict": "PASS", "kind": "walkforward",
+                "stitched_oos": {"net": 50000.0, "profit_factor": 2.0, "sharpe": 1.0,
+                                 "folds": 5, "positive_folds": 4}}
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=pass_run)
+    monkeypatch.setattr("pdp.strategy.promotion._STRATEGIES_DIR", tmp_path)
+    import pdp.backtest.warehouse_routes as wr
+
+    async def _sync_promote(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(wr.asyncio, "to_thread", _sync_promote)
+
+    resp = client.post(
+        "/api/v1/strangle-backtests/runs/strangle_test1/promote",
+        json={"note": "reviewed OOS folds, looks solid"},
+    )
+    assert resp.status_code == 200
+    col_promotions = client.app.state.mongo_db._cols["backtest_promotions"]
+    (_, update), _ = col_promotions.update_one.call_args
+    doc = update["$set"]
+    assert doc["note"] == "reviewed OOS folds, looks solid"
+    assert doc["verdict_breakdown"]["all_pass"] is True
+    assert doc["stitched_oos"]["net"] == pytest.approx(50000.0)
+
+
+def test_get_promotion_not_found(client):
+    resp = client.get("/api/v1/strangle-backtests/runs/no_such_run/promotion")
+    assert resp.status_code == 404
+
+
+def test_get_promotion_found(client):
+    promo_doc = {
+        "run_id": "strangle_test1", "strategy_id": "promoted_strangle_test1",
+        "verdict": "PASS", "note": None,
+        "promoted_at": datetime.now(UTC),
+    }
+    client.app.state.mongo_db._cols["backtest_promotions"].find_one = AsyncMock(
+        return_value=promo_doc
+    )
+    resp = client.get("/api/v1/strangle-backtests/runs/strangle_test1/promotion")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["run_id"] == "strangle_test1"
+    assert data["strategy_id"] == "promoted_strangle_test1"

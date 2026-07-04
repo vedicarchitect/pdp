@@ -25,6 +25,9 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_backtest_days(db)
     await _ensure_backtest_folds(db)
     await _ensure_backtest_trades(db)
+    await _ensure_backtest_sweeps(db)
+    await _ensure_backtest_decisions(db)
+    await _ensure_backtest_promotions(db)
     await _ensure_index_levels(db)
 
 
@@ -308,6 +311,48 @@ async def _ensure_backtest_trades(db: AsyncIOMotorDatabase) -> None:  # type: ig
     await col.create_index([("run_id", ASCENDING)], name="idx_run_id")
 
 
+async def _ensure_backtest_sweeps(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Sweep leaderboards: one doc per sweep_id with ranked combos + best_param."""
+    try:
+        await db.create_collection("backtest_sweeps")
+        log.info("mongo_collection_created", collection="backtest_sweeps")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_sweeps")
+
+    col = db["backtest_sweeps"]
+    await col.create_index([("sweep_id", ASCENDING)], unique=True, name="uq_sweep_id")
+    await col.create_index([("created_at", DESCENDING)], name="idx_created")
+
+
+async def _ensure_backtest_decisions(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Strategy-agnostic why-entry/why-exit decision events, one doc per event."""
+    try:
+        await db.create_collection("backtest_decisions")
+        log.info("mongo_collection_created", collection="backtest_decisions")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_decisions")
+
+    col = db["backtest_decisions"]
+    await col.create_index(
+        [("run_id", ASCENDING), ("ts_ist", ASCENDING), ("event", ASCENDING)],
+        unique=True, name="uq_run_ts_event",
+    )
+    await col.create_index([("run_id", ASCENDING), ("date", ASCENDING)], name="idx_run_date")
+
+
+async def _ensure_backtest_promotions(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Audit log of PASS-gated promotions: one evidence doc per promoted run."""
+    try:
+        await db.create_collection("backtest_promotions")
+        log.info("mongo_collection_created", collection="backtest_promotions")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="backtest_promotions")
+
+    col = db["backtest_promotions"]
+    await col.create_index([("run_id", ASCENDING)], unique=True, name="uq_run_id")
+    await col.create_index([("promoted_at", DESCENDING)], name="idx_promoted_at")
+
+
 def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["events"]
 
@@ -354,6 +399,18 @@ def get_backtest_folds_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorColle
 
 def get_backtest_trades_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["backtest_trades"]
+
+
+def get_backtest_sweeps_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_sweeps"]
+
+
+def get_backtest_decisions_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_decisions"]
+
+
+def get_backtest_promotions_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["backtest_promotions"]
 
 
 def get_index_levels_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]

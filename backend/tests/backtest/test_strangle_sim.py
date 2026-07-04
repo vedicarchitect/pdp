@@ -299,6 +299,88 @@ def test_hedge_caps_loss_vs_naked():
     assert hedged.gross_pnl > naked.gross_pnl
 
 
+# --------------------------------------------------------------------------- #
+# Decision events (why entry / why exit) — `decisions` accumulator
+# --------------------------------------------------------------------------- #
+
+
+def test_decision_events_entry_has_bias_snapshot():
+    times = [_t(10, 15), _t(10, 20)]
+    chain = _flat_chain({"PE": _PE_PREMS, "CE": _CE_PREMS}, times)
+    data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
+    decisions: list[dict] = []
+    res = simulate_strangle_day(StrangleConfig(), data, decisions=decisions)
+    assert res is not None
+    entries = [d for d in decisions if d["event"] == "entry"]
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["sub_reason"] is None
+    assert e["snapshot"]["bucket"] == "complete_bull"
+    assert e["snapshot"]["opt_type"] == "PE"
+    assert e["date"] == TD.isoformat()
+
+
+def test_decision_events_take_profit_exit():
+    times = [_t(10, 15), _t(11, 0), _t(11, 30)]
+    pe = {20000.0: [(_t(10, 15), 120.0), (_t(11, 0), 50.0), (_t(11, 30), 50.0)]}
+    chain = _varying_chain({"PE": pe, "CE": {20000.0: [(t, 120.0) for t in times]}})
+    data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
+    decisions: list[dict] = []
+    res = simulate_strangle_day(StrangleConfig(take_profit_pct=0.5), data, decisions=decisions)
+    assert res is not None
+    exits = [d for d in decisions if d["event"] == "exit"]
+    assert any(d["sub_reason"] == "tp" for d in exits)
+
+
+def test_decision_events_pct_stop_all_exit():
+    times = [_t(10, 15), _t(11, 0)]
+    pe = {20000.0: [(_t(10, 15), 120.0), (_t(11, 0), 250.0)]}
+    chain = _varying_chain({"PE": pe, "CE": {20000.0: [(t, 120.0) for t in times]}})
+    data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
+    decisions: list[dict] = []
+    res = simulate_strangle_day(StrangleConfig(), data, decisions=decisions)
+    assert res is not None
+    exits = [d for d in decisions if d["event"] == "exit"]
+    assert any(d["sub_reason"] == "stop_all" for d in exits)
+
+
+def test_decision_events_rollup_on_premium_decay():
+    times = [_t(10, 15), _t(11, 0), _t(11, 30)]
+    # Held PE (ATM 20000) entered at a low premium (25) so decay to 18 is only ~28%
+    # captured (< the 50% take-profit threshold) but still < roll_trigger_prem (20) —
+    # isolates the roll path from take-profit. An alternate PE strike (19950) stays
+    # above roll_target_min_prem (50) the whole time, so the roll has somewhere to go.
+    pe = {
+        20000.0: [(_t(10, 15), 25.0), (_t(11, 0), 18.0), (_t(11, 30), 18.0)],
+        19950.0: [(_t(10, 15), 60.0), (_t(11, 0), 60.0), (_t(11, 30), 60.0)],
+    }
+    chain = _varying_chain({"PE": pe, "CE": {20000.0: [(t, 120.0) for t in times]}})
+    data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
+    decisions: list[dict] = []
+    res = simulate_strangle_day(StrangleConfig(), data, decisions=decisions)
+    assert res is not None
+    rollups = [d for d in decisions if d["event"] == "rollup"]
+    assert len(rollups) == 1
+    r = rollups[0]
+    assert r["sub_reason"] == "premium_decay"
+    assert r["snapshot"]["opt_type"] == "PE"
+    assert r["snapshot"]["from_strike"] == 20000.0
+    assert r["snapshot"]["to_strike"] == 19950.0
+    # The roll's internal close must not also log a plain "exit" — only the final
+    # end-of-day squareoff (forced close of the still-open rolled leg) should appear.
+    exit_reasons = {d["sub_reason"] for d in decisions if d["event"] == "exit"}
+    assert exit_reasons <= {"squareoff"}
+
+
+def test_decision_events_none_when_not_requested():
+    """Passing decisions=None (the default) must not raise and must not accumulate anything."""
+    times = [_t(10, 15), _t(10, 20)]
+    chain = _flat_chain({"PE": _PE_PREMS, "CE": _CE_PREMS}, times)
+    data = StrangleDayData(TD, TD, _bars(_bull_bias, times), chain)
+    res = simulate_strangle_day(StrangleConfig(), data)
+    assert res is not None  # no decisions kwarg passed -> no-op logging, no crash
+
+
 def test_premium_method_picks_strike_above_floor():
     times = [_t(10, 15), _t(10, 20)]
     chain = _flat_chain({"PE": _PE_PREMS, "CE": _CE_PREMS}, times)

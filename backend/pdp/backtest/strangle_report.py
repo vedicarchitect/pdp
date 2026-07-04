@@ -1,8 +1,12 @@
-"""Per-day artifact writer for directional-strangle backtest runs.
+"""Per-run artifact writer for directional-strangle backtest runs.
 
-A full multi-year run is only useful if it is auditable: ``RunWriter`` lays every run down as
-a self-describing folder so each day can be inspected, diffed, and verified independently of the
-console summary. Layout (one ``run_id`` per invocation)::
+DB-first by default (``settings.BACKTEST_ARCHIVE_LOCAL=False``): ``RunWriter`` builds
+run/day/trade/decision documents in memory as each day is simulated and upserts them
+straight to Mongo (+ OpenSearch dual-sink) via ``BacktestStore`` at ``finalize()`` — no
+local files. Every run is captured in the warehouse without ever touching disk.
+
+Set ``archive_local=True`` (or ``BACKTEST_ARCHIVE_LOCAL=1``) to fall back to the legacy
+local-folder archive — kept as a short-lived rollback path, not the default::
 
     backtest/runs/<run_id>/
       manifest.json          run config, window, data coverage, git sha, timing totals
@@ -15,7 +19,7 @@ console summary. Layout (one ``run_id`` per invocation)::
         legs.csv             closed-leg records (entry/exit/lots/pnl/reason; incl. hedges)
         day.json             that day's summary + timing
 
-``backtest/runs/`` is intended to be git-ignored — these are reproducible artifacts, not source.
+``backtest/runs/`` is git-ignored — legacy-mode artifacts are reproducible, not source.
 """
 from __future__ import annotations
 
@@ -24,9 +28,11 @@ import json
 import re
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from pdp.backtest.strangle_sim import format_status_line
 
@@ -36,55 +42,108 @@ if TYPE_CHECKING:
     from pdp.backtest.strangle_config import StrangleConfig
     from pdp.backtest.strangle_sim import BarStatus
 
+log = structlog.get_logger()
 _BUCKET_RE = re.compile(r"\[(\w+)\]")
 
 
 class RunWriter:
-    """Writes per-day + run-level artifacts for one backtest invocation."""
+    """Accumulates per-day results for one backtest invocation and persists the run.
 
-    def __init__(self, out_root: str | Path, cfg: StrangleConfig, *, run_id: str | None = None,
-                 store: BacktestStore | None = None):
+    DB-first (default): nothing touches disk; ``finalize()`` upserts the run + every
+    day/trade/decision doc built in memory straight to ``store``.
+    Legacy local-archive mode (``archive_local=True``): unchanged file-based behavior,
+    with ``finalize()`` still ingesting the folder into ``store`` when one is given.
+    """
+
+    def __init__(self, out_root: str | Path | None, cfg: StrangleConfig, *, run_id: str | None = None,
+                 store: BacktestStore | None = None, archive_local: bool | None = None):
+        from pdp.settings import get_settings
+
         self.run_id = run_id or f"strangle_{datetime.now():%Y%m%d-%H%M%S}"
-        self.root = Path(out_root) / self.run_id
-        self.days_dir = self.root / "days"
-        self.days_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_local = (
+            get_settings().BACKTEST_ARCHIVE_LOCAL if archive_local is None else archive_local
+        )
         self._cfg = cfg
         self._store = store
         self._t0 = time.perf_counter()
         self._eq = 0.0
         self._peak = 0.0
-
-        self._summary_fh = (self.root / "summary.csv").open("w", newline="")
-        self._summary = csv.writer(self._summary_fh)
-        self._summary.writerow([
-            "date", "expiry", "nifty_open", "nifty_close", "nifty_chg", "trades",
-            "gross_pnl", "commission", "net", "cum_equity", "drawdown", "halted",
-            "build_ms", "sim_ms",
-        ])
-        self._equity_fh = (self.root / "equity.csv").open("w", newline="")
-        self._equity = csv.writer(self._equity_fh)
-        self._equity.writerow(["date", "net", "cum_equity", "peak", "drawdown"])
-
-        self._journal_fh = (self.root / "trade_journal.csv").open("w", newline="")
-        self._journal = csv.writer(self._journal_fh)
-        self._journal.writerow([
-            "date", "first_entry", "last_exit", "conditions_matched",
-            "gross_pnl", "net_pnl", "cum_equity",
-        ])
-
-        self._log_fh = (self.root / "run.log").open("w", encoding="utf-8")
         self._n_days = 0
         self._n_trades = 0
 
+        # DB-first accumulators — built as each day is simulated, upserted at finalize().
+        self._day_docs: list[dict[str, Any]] = []
+        self._trade_docs: list[dict[str, Any]] = []
+        self._decision_docs: list[dict[str, Any]] = []
+        self._equity_rets: list[float] = []
+
+        self.root: Path | None = None
+        self.days_dir: Path | None = None
+        if self.archive_local:
+            if out_root is None:
+                raise ValueError("out_root is required when archive_local=True")
+            self.root = Path(out_root) / self.run_id
+            self.days_dir = self.root / "days"
+            self.days_dir.mkdir(parents=True, exist_ok=True)
+
+            self._summary_fh = (self.root / "summary.csv").open("w", newline="")
+            self._summary = csv.writer(self._summary_fh)
+            self._summary.writerow([
+                "date", "expiry", "nifty_open", "nifty_close", "nifty_chg", "trades",
+                "gross_pnl", "commission", "net", "cum_equity", "drawdown", "halted",
+                "build_ms", "sim_ms",
+            ])
+            self._equity_fh = (self.root / "equity.csv").open("w", newline="")
+            self._equity = csv.writer(self._equity_fh)
+            self._equity.writerow(["date", "net", "cum_equity", "peak", "drawdown"])
+
+            self._journal_fh = (self.root / "trade_journal.csv").open("w", newline="")
+            self._journal = csv.writer(self._journal_fh)
+            self._journal.writerow([
+                "date", "first_entry", "last_exit", "conditions_matched",
+                "gross_pnl", "net_pnl", "cum_equity",
+            ])
+
+            self._log_fh = (self.root / "run.log").open("w", encoding="utf-8")
+
     # -- logging --------------------------------------------------------------- #
     def log(self, msg: str) -> None:
-        line = f"{datetime.now():%H:%M:%S}  {msg}"
-        self._log_fh.write(line + "\n")
-        self._log_fh.flush()
+        if self.archive_local:
+            line = f"{datetime.now():%H:%M:%S}  {msg}"
+            self._log_fh.write(line + "\n")
+            self._log_fh.flush()
+        else:
+            log.info("backtest_run_log", run_id=self.run_id, msg=msg)
 
     # -- per-day --------------------------------------------------------------- #
     def write_day(self, result: DayResult, trace: list[BarStatus] | None,
-                  build_ms: float, sim_ms: float) -> None:
+                  build_ms: float, sim_ms: float, decisions: list[dict[str, Any]] | None = None) -> None:
+        self._eq += result.realized
+        self._peak = max(self._peak, self._eq)
+        self._equity_rets.append(result.realized)
+
+        from pdp.backtest.store import (
+            build_day_doc_from_result,
+            build_decision_docs,
+            build_trade_doc_from_result,
+        )
+
+        if decisions:
+            strategy_id = re.split(r"_\d{8}", self.run_id)[0]
+            self._decision_docs.extend(build_decision_docs(self.run_id, strategy_id, decisions))
+
+        if not self.archive_local:
+            self._day_docs.append(build_day_doc_from_result(
+                self.run_id, result, cum_equity=self._eq, peak=self._peak,
+                build_ms=build_ms, sim_ms=sim_ms,
+            ))
+            trade_doc = build_trade_doc_from_result(self.run_id, result)
+            if trade_doc is not None:
+                self._trade_docs.append(trade_doc)
+            self._n_days += 1
+            self._n_trades += len(result.trades)
+            return
+
         day_dir = self.days_dir / result.date
         day_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,8 +186,6 @@ class RunWriter:
             if m
         ))
 
-        self._eq += result.realized
-        self._peak = max(self._peak, self._eq)
         dd = self._peak - self._eq
         day_json: dict[str, Any] = {
             "date": result.date, "expiry": result.expiry,
@@ -161,8 +218,32 @@ class RunWriter:
 
     # -- finalize -------------------------------------------------------------- #
     def finalize(self, *, window: dict[str, Any], metrics: dict[str, Any],
-                 extra: dict[str, Any] | None = None) -> Path:
+                 extra: dict[str, Any] | None = None) -> Path | None:
         wall_s = time.perf_counter() - self._t0
+
+        if not self.archive_local:
+            from pdp.backtest.store import build_run_doc
+
+            manifest = {
+                "run_id": self.run_id,
+                "generated": datetime.now(UTC).isoformat(timespec="seconds"),
+                "config": self._safe_cfg(),
+                "window": window,
+                "metrics": metrics,
+            }
+            run_doc = build_run_doc(manifest, kind="single", equity_rets=self._equity_rets)
+            if self._store is not None:
+                self._store.upsert_run(run_doc)
+                self._store.upsert_days(self._day_docs)
+                self._store.upsert_trades(self._trade_docs)
+                self._store.upsert_decisions(self._decision_docs)
+            log.info(
+                "backtest_run_persisted", run_id=self.run_id, days=self._n_days,
+                trades=self._n_trades, decisions=len(self._decision_docs),
+                wall_seconds=round(wall_s, 1), archive_local=False,
+            )
+            return None
+
         manifest = {
             "run_id": self.run_id,
             "generated": datetime.now().isoformat(timespec="seconds"),
@@ -183,10 +264,11 @@ class RunWriter:
         if self._store is not None:
             try:
                 self._store.ingest_run_folder(self.root, kind="single")
+                if self._decision_docs:
+                    self._store.upsert_decisions(self._decision_docs)
             except Exception as exc:
                 # Dual-sink failure must not abort the run
-                import structlog as _sl
-                _sl.get_logger().warning("backtest_mongo_sink_failed", error=str(exc))
+                structlog.get_logger().warning("backtest_mongo_sink_failed", error=str(exc))
         return self.root
 
     def _safe_cfg(self) -> dict[str, Any]:

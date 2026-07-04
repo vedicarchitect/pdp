@@ -46,6 +46,12 @@ from strangle_run import load_vix_window  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
 from pdp.backtest.day_loader import load_window  # noqa: E402
+from pdp.backtest.store import (  # noqa: E402
+    WF_PASS_NET,
+    WF_PASS_PF,
+    WF_PASS_POS_FRAC,
+    WF_PASS_SHARPE,
+)
 from pdp.backtest.strangle_config import StrangleConfig, nifty_lot_size  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_sim import StrangleDayData, simulate_strangle_day  # noqa: E402
@@ -339,7 +345,8 @@ def print_report(rows: list[dict], obj_kind: str) -> None:
     pos = sum(1 for r in rows if r["oos"].net > 0)
     verdict = (
         "PASS — robust OOS edge; proceed to Phase 5 paper"
-        if agg.net > 0 and agg.pf > 1.2 and agg.sharpe > 0.5 and pos >= 0.6 * len(rows)
+        if agg.net > WF_PASS_NET and agg.pf > WF_PASS_PF and agg.sharpe > WF_PASS_SHARPE
+        and pos >= WF_PASS_POS_FRAC * len(rows)
         else "REVIEW — OOS not robustly profitable; do NOT promote to paper yet"
     )
     print(f"  OOS-positive folds: {pos}/{len(rows)}   ->   {verdict}")
@@ -381,8 +388,10 @@ def main() -> int:
                     help="Multiply all ratio_table lots by this factor")
     ap.add_argument("--dte-max", dest="dte_max", type=int, default=None,
                     help="Only include days with calendar DTE <= this (0=expiry/Tue, 1=Mon)")
-    ap.add_argument("--mongo", action="store_true", default=False,
-                    help="Also write walk-forward results to the MongoDB backtest warehouse")
+    ap.add_argument("--mongo", dest="mongo", action="store_true", default=True,
+                    help="Write walk-forward results to the MongoDB backtest warehouse (default ON)")
+    ap.add_argument("--no-mongo", dest="mongo", action="store_false",
+                    help="Skip Mongo persistence entirely (console-only run)")
     args = ap.parse_args()
 
     base = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()

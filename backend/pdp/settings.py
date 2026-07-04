@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     NSE_HOLIDAYS_JSON: str = "data/calendars/nse_holidays_2021_2026.json"
     # Default config YAML loaded by `task backtest` when no --config-file / --config flag is given.
     BACKTEST_DEFAULT_CONFIG: str = "backtest/configs/st10_15m_otm1.yaml"
+    # DB-first backtest results (backtest-results-warehouse): results in Mongo, logs in
+    # OpenSearch, no local `backtest/runs/<id>/` archive. Short-lived rollback flag only —
+    # flip True to restore the old local-file archival if the DB path regresses.
+    BACKTEST_ARCHIVE_LOCAL: bool = False
 
     # ML signal (candlestick-ml-signals capability)
     ML_ENABLED: bool = False                         # master switch; False = no model loaded

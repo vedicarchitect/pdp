@@ -22,9 +22,10 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | `engine.py` | Generic strategy-replay framework (`BacktestEngine`) — not used by the index sim directly |
 | `output.py` | Result formatting, console table, CSV/JSON export |
 | `routes.py` | `/backtest` FastAPI endpoints (legacy options replay) |
-| `store.py` | `BacktestStore` — sync pymongo wrapper; document builders (`build_run_doc`, `build_day_docs`, `build_fold_docs`, `build_trade_docs`) + idempotent upsert for all 4 Mongo warehouse collections |
-| `warehouse_routes.py` | `/api/v1/strangle-backtests` FastAPI router — list/detail/equity/days/folds/trades + compare + launch (POST /runs, /sweeps, /walkforwards) + promote (POST /runs/{id}/promote) |
-| `job_handlers.py` | Async job handlers for `backtest:single`, `backtest:sweep`, `backtest:walkforward` — registered in app factory |
+| `store.py` | `BacktestStore` — sync pymongo wrapper; document builders (`build_run_doc`, `build_day_docs`, `build_fold_docs`, `build_trade_docs`, `build_sweep_doc`, `build_decision_docs`) + idempotent upsert for all 6 Mongo warehouse collections; centralized verdict thresholds (`WF_PASS_*`, `verdict_breakdown`) |
+| `sweep_engine.py` | `run_strangle_sweep` — in-process grid-sweep runner: loads the window once, replays every combo through `simulate_strangle_day`, returns unranked combos for `store.build_sweep_doc` to rank |
+| `warehouse_routes.py` | `/api/v1/strangle-backtests` FastAPI router — list/detail/equity/days/folds/trades/sweeps/decisions/promotion + compare + launch (POST /runs, /sweeps, /walkforwards) + promote (POST /runs/{id}/promote) |
+| `job_handlers.py` | Async job handlers for `backtest:single`, `backtest:sweep` (real in-process grid sweep), `backtest:walkforward` — registered in app factory |
 
 ## Commission Settings (settings.py → `backtest_commission`)
 

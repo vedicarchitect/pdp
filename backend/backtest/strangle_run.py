@@ -164,8 +164,12 @@ def main() -> int:
                     help="Apply take-profit only on complete_bull/bear legs; let balanced legs run to expiry")
     ap.add_argument("--scale-lots", dest="scale_lots", type=int, default=None,
                     help="Multiply all ratio_table lots by this factor (1=base, 2=double, 3=triple)")
-    ap.add_argument("--mongo", action="store_true", default=False,
-                    help="Also write run artifacts to the MongoDB backtest warehouse (requires --out-dir)")
+    ap.add_argument("--mongo", dest="mongo", action="store_true", default=True,
+                    help="Persist run/day/trade/decision docs to the MongoDB backtest warehouse "
+                         "(DB-first; default ON — combine with --out-dir to additionally archive "
+                         "local files)")
+    ap.add_argument("--no-mongo", dest="mongo", action="store_false",
+                    help="Skip Mongo persistence entirely (console-only run)")
     ap.add_argument("--no-vix-gate", dest="no_vix_gate", action="store_true", default=False,
                     help="Disable India VIX entry gate entirely (treat every bar as VIX-safe)")
     args = ap.parse_args()
@@ -230,18 +234,26 @@ def main() -> int:
              len(days), days[0], days[-1], len(chunks),
              "ON" if cfg.hedge_enabled else "OFF", args.out_dir or "-")
 
-    # Archive every-minute logs/trades/timing when --out-dir is given (always traces then).
+    # DB-first by default: --mongo alone is enough to persist to the warehouse. --out-dir
+    # additionally switches the writer into the legacy local-folder archive mode.
     _mongo_store = None
-    if args.mongo and args.out_dir:
+    if args.mongo:
         from pdp.backtest.store import BacktestStore  # noqa: PLC0415
         _mc = MongoClient(s.MONGO_URI)
         _db = _mc[s.MONGO_DB_NAME]
         _mongo_store = BacktestStore(
             _db["backtest_runs"], _db["backtest_days"],
             _db["backtest_folds"], _db["backtest_trades"],
+            col_sweeps=_db["backtest_sweeps"], col_decisions=_db["backtest_decisions"],
         )
-    writer = RunWriter(args.out_dir, cfg, store=_mongo_store) if args.out_dir else None
-    want_trace = bool(args.trace) or writer is not None
+    writer = (
+        RunWriter(args.out_dir, cfg, store=_mongo_store, archive_local=bool(args.out_dir))
+        if (args.out_dir or args.mongo) else None
+    )
+    # Full per-minute trace is only needed for --trace or legacy local-archive mode; DB-first
+    # mode's default persistence is decision events, not the every-minute status log.
+    want_trace = bool(args.trace) or (writer is not None and writer.archive_local)
+    want_decisions = writer is not None
     if writer:
         writer.log(f"run start: {days[0]}..{days[-1]} ({len(days)} biz days, {len(chunks)} chunks)")
 
@@ -283,14 +295,15 @@ def main() -> int:
             if data is None:
                 continue
             trace: list[BarStatus] | None = [] if want_trace else None
+            decisions: list[dict] | None = [] if want_decisions else None
             t1 = time.perf_counter()
-            r = simulate_strangle_day(day_cfg, data, commission_fn, trace=trace)
+            r = simulate_strangle_day(day_cfg, data, commission_fn, trace=trace, decisions=decisions)
             sim_ms = (time.perf_counter() - t1) * 1000.0
             if r is None:
                 continue
             results.append(r)
             if writer:
-                writer.write_day(r, trace, build_ms, sim_ms)
+                writer.write_day(r, trace, build_ms, sim_ms, decisions=decisions)
             if args.trace:
                 print(f"\n----- {d} every-minute status -----")
                 for st in (trace or []):
@@ -310,9 +323,12 @@ def main() -> int:
                     "traded_days": len(results), "skipped": skipped, "vix_days": vix_days_seen},
             metrics=m,
         )
-        print(f"\nArtifacts: {out}")
-        print("  summary.csv / equity.csv / manifest.json + days/<date>/"
-              "{status.log,trades.csv,legs.csv,day.json}")
+        if out is not None:
+            print(f"\nArtifacts: {out}")
+            print("  summary.csv / equity.csv / manifest.json + days/<date>/"
+                  "{status.log,trades.csv,legs.csv,day.json}")
+        else:
+            print(f"\nPersisted to warehouse: run_id={writer.run_id}")
     return 0
 
 

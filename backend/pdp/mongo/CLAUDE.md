@@ -22,7 +22,9 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 | `backtest_days` | Regular | Per-day P&L rows keyed by `(run_id, date)` |
 | `backtest_folds` | Regular | Walk-forward fold rows keyed by `(run_id, fold_index)` |
 | `backtest_trades` | Regular | Fill-level trade rows keyed by `(run_id, date)` |
-| `backtest_promotions` | Regular | Audit log of PASS-gated promotions to paper strategies |
+| `backtest_sweeps` | Regular | Sweep leaderboards: one doc per `sweep_id` with ranked combos + `best_param` |
+| `backtest_decisions` | Regular | Strategy-agnostic why-entry/why-exit decision events, keyed by `(run_id, ts_ist, event)` |
+| `backtest_promotions` | Regular | Audit log of PASS-gated promotions to paper strategies (evidence snapshot + optional note) |
 
 ## Usage
 

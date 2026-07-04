@@ -83,3 +83,38 @@ def test_backtest_run_doc_id_is_run_id():
     assert doc_id == "strangle_20260628-120000"
     assert doc["@timestamp"].startswith("2026-06-28")
     assert doc["metrics"]["net"] == 100.0
+
+
+def test_backtest_run_doc_forwards_sweep_fields():
+    """Sweep combos are shipped as run docs — sweep_id/param_grid must pass through so
+    they're queryable/rankable alongside single and walk-forward runs (task 2.4)."""
+    from datetime import UTC, datetime
+
+    run = {
+        "run_id": "sweep_1#rank1",
+        "kind": "sweep_combo",
+        "strategy_id": "strangle",
+        "window": {"from": "2026-01-01", "to": "2026-06-01"},
+        "metrics": {"net": 100.0},
+        "created_at": datetime(2026, 6, 28, tzinfo=UTC),
+        "config": {"day_loss_limit": 10000},
+        "sweep_id": "sweep_1",
+        "param_grid": {"day_loss_limit": [10000, 15000]},
+    }
+    doc, doc_id = backtest_run_doc(run)
+    assert doc_id == "sweep_1#rank1"
+    assert doc["sweep_id"] == "sweep_1"
+    assert doc["param_grid"] == {"day_loss_limit": [10000, 15000]}
+
+
+def test_backtest_run_doc_sweep_fields_absent_for_plain_runs():
+    """A single/walk-forward run (no sweep_id key at all) must not crash the mapper."""
+    from datetime import UTC, datetime
+
+    run = {
+        "run_id": "strangle_20260628-120000", "kind": "single", "strategy_id": "strangle",
+        "created_at": datetime(2026, 6, 28, tzinfo=UTC), "config": {},
+    }
+    doc, _ = backtest_run_doc(run)
+    assert doc["sweep_id"] is None
+    assert doc["param_grid"] is None
