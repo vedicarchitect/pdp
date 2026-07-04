@@ -72,8 +72,10 @@ async def lifespan(app: FastAPI):
 
     # Job Runner — stored on app.state (no class-level singleton)
     from pdp.housekeeping.tasks import (
+        backfill_levels,
         backfill_options,
         backfill_spot,
+        backfill_vix,
         reset_paper,
         snapshot_instruments,
         validate_warehouse,
@@ -84,6 +86,8 @@ async def lifespan(app: FastAPI):
     job_runner = JobRunner(get_session_maker(), app.state.redis)
     job_runner.register_handler("housekeeping:backfill-spot", backfill_spot)
     job_runner.register_handler("housekeeping:backfill-options", backfill_options)
+    job_runner.register_handler("housekeeping:backfill-levels", backfill_levels)
+    job_runner.register_handler("housekeeping:backfill-vix", backfill_vix)
     job_runner.register_handler("housekeeping:reset-paper", reset_paper)
     job_runner.register_handler("housekeeping:validate-warehouse", validate_warehouse)
     job_runner.register_handler("housekeeping:snapshot-instruments", snapshot_instruments)
@@ -581,6 +585,7 @@ def create_app() -> FastAPI:
     from pdp.observability.ingest import router as logs_ingest_router
     from pdp.observability.routes import router as observability_router
     from pdp.screener.routes import screener_router
+    from pdp.warehouse.routes import router as coverage_router
 
     app.include_router(alerts_router)
     app.include_router(alerts_ws_router)
@@ -613,6 +618,7 @@ def create_app() -> FastAPI:
     app.include_router(logs_ingest_router)
     app.include_router(observability_router)
     app.include_router(screener_router)
+    app.include_router(coverage_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

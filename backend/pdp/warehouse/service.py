@@ -56,6 +56,11 @@ UNDERLYING_REGISTRY: dict[str, dict[str, Any]] = {
     "SENSEX":    {"sid": "51", "step": 100, "expiry_path_setting": "SENSEX_EXPIRY_CACHE_PATH"},
 }
 
+# Dhan IDX_I security_id for every spot-style series the coverage/gap-radar reads from
+# `market_bars`, including India VIX (which is not a tradeable underlying, so it lives outside
+# UNDERLYING_REGISTRY). Single source of truth for underlying/VIX -> SID lookups.
+SID_MAP: dict[str, str] = {**{name: reg["sid"] for name, reg in UNDERLYING_REGISTRY.items()}, "VIX": "21"}
+
 
 @dataclass
 class _UnderlyingState:
@@ -532,11 +537,14 @@ class WarehouseService:
         from pdp.options.gap_backfill import run_gap_backfill
 
         for state in self._states.values():
-            if state.name != "NIFTY":
+            reg = UNDERLYING_REGISTRY[state.name]
+            expiry_path = Path(getattr(self._settings, reg["expiry_path_setting"]))
+            if not expiry_path.exists():  # noqa: ASYNC240 — cheap stat, runs on a multi-hour cycle
                 log.warning(
                     "warehouse.gap_heal.skipped",
                     underlying=state.name,
-                    reason="multi-index-options-backfill not implemented",
+                    reason="expiry_cache_missing",
+                    path=str(expiry_path),
                 )
                 continue
             try:
@@ -553,3 +561,31 @@ class WarehouseService:
                 log.info("warehouse_gap_backfill_cycle", underlying=state.name, **summary)
             except Exception as exc:
                 log.warning("warehouse_gap_backfill_error", underlying=state.name, exc=str(exc))
+                continue
+
+            try:
+                await self._emit_coverage_snapshot(state.name)
+            except Exception as exc:
+                log.warning("warehouse_coverage_snapshot_error", underlying=state.name, exc=str(exc))
+
+    async def _emit_coverage_snapshot(self, underlying: str) -> None:
+        """Ship this cycle's per-family coverage to OpenSearch (no-op if indexer inactive)."""
+        from pdp.observability.indexer import get_active_indexer
+        from pdp.observability.sinks import DATA_COVERAGE, data_coverage_doc
+
+        indexer = get_active_indexer()
+        if indexer is None:
+            return
+
+        from datetime import timedelta
+
+        from pdp.warehouse.coverage import underlying_coverage
+
+        window_to = _ist_today()
+        window_from = window_to - timedelta(days=self._settings.WAREHOUSE_GAP_LOOKBACK_DAYS)
+        result = await underlying_coverage(
+            self._mongo_db, self._settings, underlying, window_from=window_from, window_to=window_to
+        )
+        for family, summary in result["families"].items():
+            doc, doc_id = data_coverage_doc(underlying, family, summary)
+            indexer.enqueue(DATA_COVERAGE, doc, doc_id)

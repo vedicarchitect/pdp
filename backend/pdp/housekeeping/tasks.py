@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-# Resolve script paths relative to the repo root regardless of CWD at runtime.
-# tasks.py lives at src/pdp/housekeeping/tasks.py → parents[3] = repo root.
-_REPO_ROOT = Path(__file__).parents[3]
+# Resolve script paths relative to the backend root regardless of CWD at runtime.
+# tasks.py lives at backend/pdp/housekeeping/tasks.py → parents[2] = backend/.
+_REPO_ROOT = Path(__file__).parents[2]
 
 
 async def _run_script(
@@ -68,7 +68,7 @@ async def backfill_spot(
     params: dict[str, Any],
     progress_cb: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    args: list[str] = []
+    args: list[str] = ["--symbol", params.get("symbol") or "NIFTY"]
     if val := _date_arg(params, "from", "from_date"):
         args.extend(["--from", val])
     if val := _date_arg(params, "to", "to_date"):
@@ -85,7 +85,7 @@ async def backfill_options(
     params: dict[str, Any],
     progress_cb: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    args: list[str] = []
+    args: list[str] = ["--symbol", params.get("symbol") or "NIFTY"]
     if val := _date_arg(params, "from", "from_date"):
         args.extend(["--from", val])
     if val := _date_arg(params, "to", "to_date"):
@@ -99,6 +99,44 @@ async def backfill_options(
     if params.get("dry_run"):
         args.append("--dry-run")
     return await _run_script(job_id, "scripts/backfill_options_gap.py", args, progress_cb)
+
+
+async def backfill_levels(
+    job_id: UUID,
+    params: dict[str, Any],
+    progress_cb: Callable[[UUID, int, str], Awaitable[None]],
+) -> dict[str, Any]:
+    args: list[str] = ["--symbol", params.get("symbol") or "NIFTY"]
+    if val := _date_arg(params, "from", "from_date"):
+        args.extend(["--from", val])
+    if val := _date_arg(params, "to", "to_date"):
+        args.extend(["--to", val])
+    if params.get("only_missing"):
+        args.append("--only-missing")
+    if params.get("dry_run"):
+        args.append("--dry-run")
+    return await _run_script(job_id, "scripts/backfill_levels.py", args, progress_cb)
+
+
+async def backfill_vix(
+    job_id: UUID,
+    params: dict[str, Any],
+    progress_cb: Callable[[UUID, int, str], Awaitable[None]],
+) -> dict[str, Any]:
+    args: list[str] = []
+    if val := _date_arg(params, "from", "from_date"):
+        args.extend(["--from", val])
+    if val := _date_arg(params, "to", "to_date"):
+        args.extend(["--to", val])
+    if params.get("vix_sid"):
+        args.extend(["--vix-sid", str(params["vix_sid"])])
+    if params.get("resolve"):
+        args.append("--resolve")
+    if params.get("only_missing"):
+        args.append("--only-missing")
+    if params.get("dry_run"):
+        args.append("--dry-run")
+    return await _run_script(job_id, "scripts/backfill_vix.py", args, progress_cb)
 
 
 async def reset_paper(

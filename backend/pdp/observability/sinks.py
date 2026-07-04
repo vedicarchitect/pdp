@@ -18,6 +18,7 @@ BACKTEST_DAYS = "backtest-days"
 BACKTEST_TRADES = "backtest-trades"
 BACKTEST_DECISIONS = "backtest-decisions"
 BACKTEST_PROMOTIONS = "backtest-promotions"
+DATA_COVERAGE = "data-coverage"
 
 _EVENT_FIELDS = (
     "event_type", "strategy_id", "account_id", "snapshot_date", "ist_time",
@@ -129,6 +130,25 @@ def backtest_promotion_doc(promo: dict[str, Any]) -> tuple[dict[str, Any], str]:
         "verdict_breakdown": promo.get("verdict_breakdown"),
     }
     return doc, str(promo.get("run_id"))
+
+
+def data_coverage_doc(underlying: str, family: str, summary: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Map one (underlying, family) coverage summary (from `pdp.warehouse.coverage`) → a
+    `data-coverage` doc + id. One doc per (underlying, family, snapshot day)."""
+    now = datetime.now(UTC)
+    doc = {
+        "@timestamp": now.isoformat(),
+        "underlying": underlying,
+        "family": family,
+        "min_date": summary.get("min_date"),
+        "max_date": summary.get("max_date"),
+        "covered_days": _int(summary.get("covered_days")),
+        "total_days": _int(summary.get("total_days")),
+        "coverage_pct": _float(summary.get("coverage_pct")),
+        "gap_days": _int(summary.get("total_days")) - _int(summary.get("covered_days")),
+        "gap_ranges": summary.get("gap_ranges") or [],
+    }
+    return doc, f"{underlying}:{family}:{now.date().isoformat()}"
 
 
 def _float(v: Any) -> float | None:

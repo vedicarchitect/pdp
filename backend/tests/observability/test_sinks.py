@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pdp.observability.sinks import (
     backtest_run_doc,
+    data_coverage_doc,
     fill_doc,
     journal_day_doc,
     strangle_event_doc,
@@ -118,3 +119,44 @@ def test_backtest_run_doc_sweep_fields_absent_for_plain_runs():
     doc, _ = backtest_run_doc(run)
     assert doc["sweep_id"] is None
     assert doc["param_grid"] is None
+
+
+def test_data_coverage_doc_shape_and_id():
+    summary = {
+        "min_date": "2026-06-01", "max_date": "2026-06-30",
+        "covered_days": 18, "total_days": 20, "coverage_pct": 90.0,
+        "gap_ranges": ["2026-06-12", "2026-06-20..2026-06-21"],
+    }
+    doc, doc_id = data_coverage_doc("NIFTY", "options", summary)
+
+    assert doc["underlying"] == "NIFTY"
+    assert doc["family"] == "options"
+    assert doc["min_date"] == "2026-06-01"
+    assert doc["max_date"] == "2026-06-30"
+    assert doc["covered_days"] == 18
+    assert doc["total_days"] == 20
+    assert doc["coverage_pct"] == 90.0
+    assert doc["gap_days"] == 2  # total - covered
+    assert doc["gap_ranges"] == ["2026-06-12", "2026-06-20..2026-06-21"]
+    assert doc["@timestamp"]  # present, ISO-formatted "now"
+
+    # id is (underlying, family, snapshot day) — stable within the same day, distinct per family.
+    other_family_id = data_coverage_doc("NIFTY", "spot", summary)[1]
+    assert doc_id.startswith("NIFTY:options:")
+    assert other_family_id.startswith("NIFTY:spot:")
+    assert doc_id != other_family_id
+
+
+def test_data_coverage_doc_defaults_for_missing_summary_fields():
+    """futures/empty families report None dates and an empty gap_ranges list — the mapper must
+    not crash on the sparse shape `_empty_family()` produces."""
+    summary = {
+        "min_date": None, "max_date": None,
+        "covered_days": 0, "total_days": 5, "coverage_pct": 0.0,
+        "gap_ranges": [],
+    }
+    doc, _ = data_coverage_doc("BANKNIFTY", "futures", summary)
+    assert doc["min_date"] is None
+    assert doc["max_date"] is None
+    assert doc["gap_days"] == 5
+    assert doc["gap_ranges"] == []

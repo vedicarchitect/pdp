@@ -323,6 +323,27 @@ def has_interior_gap(chunks: list[list]) -> bool:
 
 # ── Gap detection ─────────────────────────────────────────────────────────────
 
+def collapse_date_ranges(days: list[date]) -> list[str]:
+    """Collapse a sorted/unsorted date list into ``['YYYY-MM-DD..YYYY-MM-DD', 'YYYY-MM-DD', …]``
+    ranges, tolerating weekend/holiday gaps of up to 3 calendar days between trade days.
+
+    Shared by ``scripts/audit_options_coverage.py`` and ``pdp.warehouse.coverage`` so both report
+    gaps identically.
+    """
+    days = sorted(days)
+    if not days:
+        return []
+    out, start, prev = [], days[0], days[0]
+    for d in days[1:]:
+        if (d - prev).days <= 3:
+            prev = d
+            continue
+        out.append(str(start) if start == prev else f"{start}..{prev}")
+        start = prev = d
+    out.append(str(start) if start == prev else f"{start}..{prev}")
+    return out
+
+
 def expected_contracts(codes: list[int], band: int) -> int:
     """Distinct (expiry, strike, side) contracts a fully-covered day should hold."""
     return len(codes) * (2 * band + 1) * 2
