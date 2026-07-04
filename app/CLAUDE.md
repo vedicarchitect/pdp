@@ -39,9 +39,10 @@ google_fonts (Inter).
 | `lib/core/config/app_config.dart` | Compile-time backend config |
 | `lib/features/shell/app_shell.dart` | Responsive NavigationBar ↔ NavigationRail |
 | `lib/features/portfolio/` | The live-portfolio vertical slice (reference pattern) |
+| `lib/features/backtest/` | Backtest console: run history/leaderboard, run-detail drill-downs, launch flow, coverage/gap-radar, promotion + paper comparison |
 
 ## Not yet built
 
-Order entry, option chain/analytics, backtest console, events/alerts, ML/ops —
-each a future OpenSpec change cloning the portfolio pattern. `features/shell/
+Order entry, option chain/analytics, events/alerts, ML/ops — each a future
+OpenSpec change cloning the portfolio pattern. `features/shell/
 placeholder_screen.dart` lists them.

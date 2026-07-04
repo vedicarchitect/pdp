@@ -218,16 +218,18 @@ flutter test                 # widget/unit tests
 | `API_BASE` | `http://localhost:8000` | REST base (`/api/v1/...`) |
 | `WS_BASE` | `ws://localhost:8000` | WebSocket base (`/ws/...`) |
 | `USE_MOCK` | `false` | Simulated live data, zero backend |
+| `DASHBOARDS_BASE` | `http://localhost:5601` | OpenSearch Dashboards base, used by the backtest console's deep-links |
 
 ### Screens
 
 | Screen | Description |
 |--------|-------------|
 | Portfolio | Live MTM P&L summary + positions list + P&L chart (REST snapshot + `/ws/portfolio`) |
+| Backtest console | Run history/leaderboard, run-detail (equity+drawdown, days, trades, decision trace, walk-forward folds), few-clicks launch flow, data-coverage/gap-radar panel, promotion rationale, backtest-vs-paper comparison, CSV/JSON export, OpenSearch dashboard links |
 
-> The first build ships the app shell + the Portfolio vertical slice. Further screens
-> (orders, analytics, backtest console, events, alerts) land as separate OpenSpec changes,
-> each reusing the shell + data/provider pattern.
+> The first build ships the app shell + the Portfolio vertical slice; the backtest console
+> followed. Further screens (orders, analytics, events, alerts) land as separate OpenSpec
+> changes, each reusing the shell + data/provider pattern.
 
 ---
 
