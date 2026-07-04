@@ -7,12 +7,13 @@
 | `host.py` | 13 KB | `StrategyHost` — loads YAML configs, subscribes to ticks/bars/fills, manages lifecycle |
 | `context.py` | 10.8 KB | `StrategyContext` — passed to every strategy `on_bar()` call; holds order_router, indicators, positions |
 | `abc.py` | 3.7 KB | `BaseStrategy` abstract class — implement `on_bar(ctx)` |
-| `registry.py` | 3.2 KB | `load_all(dir)` → `list[StrategyConfig]` from YAML |
+| `registry.py` | 3.2 KB | `load_all(dir)` → `list[StrategyConfig]` from YAML (live configs only) |
+| `unified_registry.py` | — | `strategy-registry-unification` — canonical-id registry spanning live `strategies/*.yaml` **and** backtest `backtest/configs/*.yaml`; `StrategyEntry{id, kind, underlying, params_schema, defaults}`, `load_all()`, `register_strategy()`, `canonical_id(run_label, underlying)` (used by `backtest/store.py` + `backtest/paper_compare.py` for canonical run identity) |
 | `recovery.py` | 4 KB | Crash-recovery: restores open positions on restart |
 | `log.py` | 1.5 KB | Strategy-specific structured logging helpers |
 | `strikes.py` | 3.6 KB | Strike selection helpers (ATM, OTM ±N) |
 | `schemas.py` | 0.8 KB | Pydantic schemas for strategy API |
-| `routes.py` | 1.8 KB | `/strategy` endpoints (list, start, stop, status) |
+| `routes.py` | — | `/api/v1/strategies` endpoints: list (merges live host state + `unified_registry`, adds `params_schema`/`defaults`/`source`), `POST /register` (new strategy via registry), start, stop; plus strangle-console + levels routers |
 | `promotion.py` | ~2 KB | `promote_run(run_id, strategy_id)` — PASS-gate promote: writes `strategies/<id>.yaml` + `backtest_promotions` audit doc in Mongo |
 
 ## Strategy YAML Config (strategies/*.yaml)
@@ -65,3 +66,4 @@ ctx.session      # AsyncSession (PostgreSQL)
 - Crash recovery is automatic — `recovery.py` restores positions on `StrategyHost` restart.
 - **Position isolation**: all `StrategyContext` position queries (`get_net_qty`, `get_position`, `get_realized_pnl`, `get_positions`) filter by `strategy_id`. Each strategy sees only its own rows — no cross-strategy bleed. Fixed 2026-06-18 via migration `0012`.
 - Active specs: `live-supertrend-session-warmup`.
+- Adding a new strategy/params without a code change: use `/strategy:add` (`.claude/skills/strategy-add/SKILL.md`) — registers via `POST /api/v1/strategies/register`, immediately visible in `GET /api/v1/strategies` and launchable as a backtest. See `openspec/specs/strategy-registry/spec.md`.

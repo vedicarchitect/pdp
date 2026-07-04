@@ -273,6 +273,22 @@ flutter test                 # widget/unit tests
 
 4. Restart API — `StrategyHost` auto-loads all `*.yaml`.
 
+The flow above is for a **new live strategy engine** (new Python class). To register a new
+**param variant of an existing engine** (`strangle` or `supertrend`) for backtesting — no code
+change, no restart — use `/strategy:add` instead (`strategy-registry-unification`, archived
+2026-07-04): `POST /api/v1/strategies/register {strategy_id, kind, params}` writes a
+`backend/backtest/configs/<id>.yaml` and it's immediately visible in `GET /api/v1/strategies`
+and launchable via `/backtest:run`.
+
+### `GET /api/v1/strategies` — unified registry listing
+
+Lists every strategy across the live `strategies/*.yaml` configs (with running status) and the
+backtest `backtest/configs/*.yaml` configs (unrun ones get `status: "BACKTEST_ONLY"`). Each entry
+carries `id` (canonical id), `kind` (`strangle`/`supertrend`), `underlying`, `source`
+(`live`/`backtest`), `params_schema` (name/type/default/bounds), and `defaults` (ready to use as
+a `POST /runs` body). Backed by `pdp.strategy.unified_registry`; see
+`openspec/specs/strategy-registry/spec.md`.
+
 ### Strategy YAML params reference
 
 | Param | Type | Default | Description |

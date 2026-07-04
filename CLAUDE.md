@@ -58,9 +58,12 @@ decision-trace, promotion evidence snapshot, DB-first cutover, legacy runs inges
 (✓ done, archived 2026-07-04 — per-index/family coverage API, gap radar, delta-fill jobs, multi-index self-heal, OpenSearch dashboard) ·
 **3** `backtest-paper-comparison` (✓ done, archived 2026-07-04 — per-strategy paper P&L from the PG ledger,
 `GET /runs/{id}/vs-paper` day+minute alignment, gap-radar divergence root-causing, ST-only `compare.py` retired) ·
-**4** `strategy-registry-unification` (proposal drafted, not started) · **5** `flutter-backtest-console`
-(proposal+design+specs drafted, not started). See `openspec/changes/<id>/` for each; changes 3-4 could have
-run in parallel but 3 finished first — 4 is next, then 5 (UI) lands last against the firmed-up APIs.
+**4** `strategy-registry-unification` (✓ done, archived 2026-07-04 — canonical-id registry spanning live
+`strategies/*.yaml` + backtest `backtest/configs/*.yaml`, `GET /api/v1/strategies` with editable param
+schema, `POST /register`, `canonical_id()` wired into run identity + vs-paper; `/strategy:add` skill) ·
+**5** `flutter-backtest-console` (proposal+design+specs drafted, not started — next up). See
+`openspec/changes/<id>/` for each; changes 3-4 could have run in parallel but 3 finished first — 5 (UI)
+lands last against the now-firmed-up APIs.
 
 ## Key Commands (run from repo root)
 
