@@ -127,12 +127,17 @@ def build_run_doc(
     run_id = manifest["run_id"]
     # Derive strategy_id from run_id prefix (e.g. "strangle" from "strangle_20260626-120127")
     strategy_id = re.split(r"_\d{8}", run_id)[0]
+    config = manifest.get("config", {})
+
+    from pdp.strategy.unified_registry import canonical_id
+    canonical_strategy_id = canonical_id(strategy_id, config.get("underlying"))
 
     doc: dict[str, Any] = {
         "run_id": run_id,
         "kind": kind,
         "strategy_id": strategy_id,
-        "config": manifest.get("config", {}),
+        "canonical_strategy_id": canonical_strategy_id,
+        "config": config,
         "window": manifest.get("window", {}),
         "metrics": {
             "net": net,

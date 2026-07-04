@@ -114,22 +114,16 @@ async def paper_pnl_by_strategy(
 
 
 def resolve_live_strategy_id(run: dict[str, Any]) -> str | None:
-    """Map a backtest run to its live/paper `strategy_id`.
+    """Map a backtest run to its live/paper `strategy_id` via the unified strategy registry.
 
-    Interim until the unified strategy registry (`strategy-registry-unification`) provides a
-    direct link: the directional-strangle live strategies are named
-    `directional_strangle_<underlying>` (see `strategies/directional_strangle_*.yaml`). Runs
-    ingested before `backtest-multi-index-strangle` never set `config.underlying` — NIFTY was
-    the only underlying backtested then — so a `strangle`-family run with no `underlying`
-    defaults to NIFTY rather than failing to resolve.
+    Delegates to `pdp.strategy.unified_registry.canonical_id`, which looks up the matching
+    live `strategies/*.yaml` entry by family + underlying instead of hardcoding the
+    `directional_strangle_<underlying>` naming scheme.
     """
+    from pdp.strategy.unified_registry import canonical_id
+
     underlying = (run.get("config") or {}).get("underlying")
-    if not underlying:
-        if run.get("strategy_id") == "strangle":
-            underlying = "NIFTY"
-        else:
-            return None
-    return f"directional_strangle_{str(underlying).lower()}"
+    return canonical_id(run.get("strategy_id"), underlying)
 
 
 # ── 2. vs-paper per-day alignment ───────────────────────────────────────────────
