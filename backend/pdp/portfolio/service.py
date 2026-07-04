@@ -55,6 +55,7 @@ class PortfolioService:
         self._settings = settings
         self._mongo_db = mongo_db
         self._cache: dict[tuple[str | None, str, str, str], PositionState] = {}
+        self._sid_to_keys: dict[str, list[tuple[str | None, str, str, str]]] = {}
         self._dirty: set[tuple[str | None, str, str, str]] = set()
         self._subscribed_sids: set[str] = set()
         self._stop_event = asyncio.Event()
@@ -152,6 +153,7 @@ class PortfolioService:
         result = await session.execute(select(Position))
         positions = result.scalars().all()
         self._cache.clear()
+        self._sid_to_keys.clear()
         for pos in positions:
             key = (pos.strategy_id, pos.security_id, pos.exchange_segment, pos.product)
             self._cache[key] = PositionState(
@@ -165,6 +167,10 @@ class PortfolioService:
                 unrealized_pnl=pos.unrealized_pnl,
                 updated_at=pos.updated_at,
             )
+            if pos.security_id not in self._sid_to_keys:
+                self._sid_to_keys[pos.security_id] = []
+            self._sid_to_keys[pos.security_id].append(key)
+
         self._subscribed_sids = {ps.security_id for ps in self._cache.values() if ps.net_qty != 0}
         self._needs_broadcast = True
 
@@ -226,8 +232,11 @@ class PortfolioService:
             return
 
         changed = False
-        for key, ps in self._cache.items():
-            if ps.security_id == sid and ps.net_qty != 0:
+        # O(1) lookup instead of O(N) iteration over all positions
+        keys = self._sid_to_keys.get(sid, [])
+        for key in keys:
+            ps = self._cache[key]
+            if ps.net_qty != 0:
                 ps.unrealized_pnl = _round4(Decimal(str(ps.net_qty)) * (ltp - ps.avg_price))
                 ps.ltp_stale = False
                 ps.updated_at = datetime.now(UTC)
