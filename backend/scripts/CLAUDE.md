@@ -36,4 +36,6 @@ See [README.md](README.md) for full arg reference.
 ## Archive
 
 `archive/` — archived scripts. Do not use as templates.
-Backtest runners moved to `backtest/` (repo root): use `task backtest` / `task backtest:sweep` / `task backtest:compare`.
+Backtest runners moved to `backtest/` (repo root): use `task backtest` / `task backtest:sweep`. Backtest-vs-paper
+comparison is now `GET /api/v1/strangle-backtests/runs/{id}/vs-paper` (or the `/backtest:vs-paper` skill), not a
+Taskfile task — the old single-day `backtest:compare` CLI is retired.

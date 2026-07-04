@@ -349,15 +349,17 @@ Grid axes (`backtest/run.py` defaults when axis is omitted):
 - `--tf` — timeframe minutes, comma-separated (default: `3,5,15,30,60`)
 - `--moneyness` — `+N` OTM / `0` ATM / `−N` ITM (default: `3,2,1,0,-1,-2,-3`)
 
-### Backtest compare (single day vs paper journal)
+### Backtest vs paper comparison
 
-```powershell
-# Default: today's IST date
-task backtest:compare
+The single-day, SuperTrend-only `backtest:compare` CLI is retired. Compare any warehoused
+run against its live paper results via the generic API (any strategy, any window):
 
-# Specific date
-task backtest:compare -- --date 2026-06-10
 ```
+GET /api/v1/strangle-backtests/runs/{run_id}/vs-paper                       # per-day P&L alignment
+GET /api/v1/strangle-backtests/runs/{run_id}/vs-paper?date=2026-07-01&granularity=minute  # decision diff
+```
+
+Or interactively via the `/backtest:vs-paper` skill.
 
 > **Data prerequisite**: Run spot + options backfill first (see §9) to avoid `[DATA INCOMPLETE]` days.
 

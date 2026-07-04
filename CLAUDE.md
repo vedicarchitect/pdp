@@ -56,11 +56,11 @@ Making the backtest console enterprise-grade + DB-first (no local result files).
 **1** `backtest-results-warehouse` (✓ done, archived 2026-07-04 — real sweeps+leaderboard, strategy-agnostic
 decision-trace, promotion evidence snapshot, DB-first cutover, legacy runs ingested) · **2** `market-data-coverage`
 (✓ done, archived 2026-07-04 — per-index/family coverage API, gap radar, delta-fill jobs, multi-index self-heal, OpenSearch dashboard) ·
-**3** `backtest-paper-comparison` (proposal drafted, not started) · **4** `strategy-registry-unification`
-(proposal drafted, not started) · **5** `flutter-backtest-console` (proposal+design+specs drafted, not started).
-See `openspec/changes/<id>/` for each; full program plan lives in the session's plan file (`opsx:explore`
-history) — the short version: changes 2-4 can proceed in parallel, change 5 (UI) lands last against the
-firmed-up APIs.
+**3** `backtest-paper-comparison` (✓ done, archived 2026-07-04 — per-strategy paper P&L from the PG ledger,
+`GET /runs/{id}/vs-paper` day+minute alignment, gap-radar divergence root-causing, ST-only `compare.py` retired) ·
+**4** `strategy-registry-unification` (proposal drafted, not started) · **5** `flutter-backtest-console`
+(proposal+design+specs drafted, not started). See `openspec/changes/<id>/` for each; changes 3-4 could have
+run in parallel but 3 finished first — 4 is next, then 5 (UI) lands last against the firmed-up APIs.
 
 ## Key Commands (run from repo root)
 
