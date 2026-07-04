@@ -1,7 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Expose an async REST API for housekeeping tasks (backfill, snapshot, validation) that can be submitted as background jobs with progress tracking.
-## Requirements
 ### Requirement: Housekeeping REST API
 The system SHALL expose `POST /api/v1/housekeeping/{task}` for tasks: `backfill-spot`,
 `backfill-options`, `backfill-levels`, `backfill-vix`, `reset-paper`, `snapshot-instruments`,
@@ -39,4 +37,3 @@ was the real, working design). The job handlers SHALL pass the `symbol` paramete
 #### Scenario: Symbol flows from job to CLI args
 - **WHEN** a `backfill-options` job is submitted with `symbol=SENSEX`
 - **THEN** the handler invokes the backfill subprocess with `--symbol SENSEX`, producing docs with `underlying=SENSEX`
-
