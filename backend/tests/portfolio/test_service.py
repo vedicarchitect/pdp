@@ -34,6 +34,7 @@ def _make_service(hub=None):
 
 def _make_pos(net_qty=1, avg_price="22000.0000") -> PositionState:
     return PositionState(
+        strategy_id=None,
         security_id="13",
         exchange_segment="NSE_FNO",
         product="NRML",
@@ -47,8 +48,9 @@ def _make_pos(net_qty=1, avg_price="22000.0000") -> PositionState:
 
 def test_mtm_recomputed_on_tick():
     svc = _make_service()
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1, avg_price="22000.0000")
+    svc._sid_to_keys["13"] = [key]
 
     tick_data = {"security_id": "13", "ltp": "22500.0000"}
     svc._handle_tick(tick_data)
@@ -61,8 +63,9 @@ def test_mtm_recomputed_on_tick():
 
 def test_mtm_short_position():
     svc = _make_service()
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=-1, avg_price="22000.0000")
+    svc._sid_to_keys["13"] = [key]
 
     svc._handle_tick({"security_id": "13", "ltp": "21500.0000"})
 
@@ -72,8 +75,9 @@ def test_mtm_short_position():
 
 def test_tick_for_unrelated_security_ignored():
     svc = _make_service()
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1, avg_price="22000.0000")
+    svc._sid_to_keys["13"] = [key]
 
     svc._handle_tick({"security_id": "999", "ltp": "100.0"})
 
@@ -83,8 +87,9 @@ def test_tick_for_unrelated_security_ignored():
 
 def test_ltp_stale_cleared_on_tick():
     svc = _make_service()
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos()
+    svc._sid_to_keys["13"] = [key]
     svc._cache[key].ltp_stale = True  # pre-marked stale
 
     svc._handle_tick({"security_id": "13", "ltp": "22300.0"})
@@ -96,8 +101,9 @@ async def test_ltp_stale_set_when_redis_key_missing():
     """_check_ltp_stale sets ltp_stale=True when Redis GET returns None."""
     svc = _make_service()
     svc._redis.get = AsyncMock(return_value=None)  # key expired
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1)
+    svc._sid_to_keys["13"] = [key]
 
     await svc._check_ltp_stale()
 
@@ -108,10 +114,11 @@ async def test_ltp_stale_set_when_redis_key_missing():
 async def test_ltp_stale_not_set_when_redis_key_present():
     svc = _make_service()
     svc._redis.get = AsyncMock(return_value="22500.0")  # key alive
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     ps = _make_pos(net_qty=1)
     ps.ltp_stale = False
     svc._cache[key] = ps
+    svc._sid_to_keys["13"] = [key]
 
     await svc._check_ltp_stale()
 
@@ -126,8 +133,8 @@ def _make_pos_for_sid(sid: str, net_qty: int = 1) -> PositionState:
 
 def test_get_snapshot_returns_all_positions():
     svc = _make_service()
-    svc._cache[("13", "NSE_FNO", "NRML")] = _make_pos_for_sid("13", net_qty=1)
-    svc._cache[("25", "NSE_FNO", "NRML")] = _make_pos_for_sid("25", net_qty=-2)
+    svc._cache[(None, "13", "NSE_FNO", "NRML")] = _make_pos_for_sid("13", net_qty=1)
+    svc._cache[(None, "25", "NSE_FNO", "NRML")] = _make_pos_for_sid("25", net_qty=-2)
 
     snapshot = svc.get_snapshot()
     assert len(snapshot) == 2
@@ -138,8 +145,9 @@ def test_get_snapshot_returns_all_positions():
 def test_tick_flags_broadcast_needed():
     hub = MagicMock()
     svc = _make_service(hub=hub)
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1)
+    svc._sid_to_keys["13"] = [key]
     svc._needs_broadcast = False
 
     svc._handle_tick({"security_id": "13", "ltp": "22500.0"})
@@ -150,8 +158,9 @@ def test_tick_flags_broadcast_needed():
 @pytest.mark.asyncio
 async def test_flush_dirty_writes_to_pg():
     svc = _make_service()
-    key = ("13", "NSE_FNO", "NRML")
+    key = (None, "13", "NSE_FNO", "NRML")
     svc._cache[key] = _make_pos(net_qty=1, avg_price="22000.0000")
+    svc._sid_to_keys["13"] = [key]
     svc._cache[key].unrealized_pnl = Decimal("500.0000")
     svc._dirty.add(key)
 
