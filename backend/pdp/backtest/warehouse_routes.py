@@ -13,6 +13,7 @@ Read routes (tasks 2.2, 2.3, 2.4):
   GET  /sweeps/{sweep_id}            sweep leaderboard (ranked combos + best_param)
   GET  /runs/{id}/decisions          decision trace (events by default; ?full=true for per-minute)
   GET  /runs/{id}/promotion          promotion rationale/evidence
+  GET  /runs/{id}/vs-paper           backtest-vs-paper alignment (per-day; ?date=&granularity=minute)
 
 Multi-run comparison (task 2.4):
   POST /compare                      aligned equity + headline metrics for N run ids
@@ -28,11 +29,27 @@ Promotion (task 5.2):
 from __future__ import annotations
 
 import asyncio
+from datetime import date as _date
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from pdp.backtest.paper_compare import (
+    align_days,
+    annotate_day_divergence,
+    annotate_minute_divergence,
+    minute_diff,
+    paper_pnl_by_strategy,
+    resolve_live_strategy_id,
+)
+from pdp.db.session import get_db
+from pdp.observability.client import get_opensearch
+from pdp.observability.query import fetch_session_events
+from pdp.settings import get_settings
+from pdp.warehouse.coverage import underlying_coverage
 
 log = structlog.get_logger()
 
@@ -393,3 +410,93 @@ async def get_promotion(request: Request, run_id: str) -> dict[str, Any]:
     if doc is None:
         raise HTTPException(404, detail=f"No promotion recorded for run: {run_id}")
     return _doc_out(doc)
+
+
+# ── backtest-vs-paper comparison ────────────────────────────────────────────────
+
+async def _gap_radar(
+    request: Request, underlying: str, win_from: _date, win_to: _date,
+) -> dict[str, Any] | None:
+    """Best-effort gap-radar lookup for divergence root-causing; `None` if unavailable."""
+    try:
+        coverage = await underlying_coverage(
+            request.app.state.mongo_db, get_settings(), underlying,
+            window_from=win_from, window_to=win_to,
+        )
+    except ValueError:
+        return None
+    return coverage.get("radar")
+
+
+@router.get("/runs/{run_id}/vs-paper")
+async def get_run_vs_paper(
+    request: Request,
+    run_id: str,
+    date: str | None = Query(
+        None, description="Restrict to one trade date YYYY-MM-DD (required when granularity=minute)"),
+    granularity: str = Query(
+        "day", description="'day' (default, per-day P&L alignment) or 'minute' (decision diff for `date`)"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Align a backtest run against the live paper results for the same strategy.
+
+    Default (`granularity=day`): per-day backtest-vs-paper net P&L, aligned by date, with
+    divergence annotated against the data-coverage gap radar. `granularity=minute` (requires
+    `date`): a minute-level decision-event diff between the run's `backtest_decisions` trace
+    and the live strangle event log, normalized onto a shared vocabulary.
+    """
+    run = await _col(request, "backtest_runs").find_one(
+        {"run_id": run_id}, {"_id": 0, "config": 1, "window": 1})
+    if run is None:
+        raise HTTPException(404, detail=f"Run not found: {run_id}")
+
+    live_strategy_id = resolve_live_strategy_id(run)
+    if live_strategy_id is None:
+        raise HTTPException(422, detail=f"Cannot resolve a live strategy_id for run: {run_id}")
+
+    window = run.get("window") or {}
+    if not window.get("from") or not window.get("to"):
+        raise HTTPException(422, detail=f"Run {run_id} has no window to compare against.")
+    win_from = _date.fromisoformat(str(window["from"])[:10])
+    win_to = _date.fromisoformat(str(window["to"])[:10])
+    underlying = str((run.get("config") or {}).get("underlying", "NIFTY"))
+
+    if granularity == "minute":
+        if not date:
+            raise HTTPException(400, detail="`date` is required when granularity=minute")
+        decisions = await _col(request, "backtest_decisions").find(
+            {"run_id": run_id, "date": date}, {"_id": 0}).sort("ts_ist", 1).to_list(length=5000)
+
+        live_docs: list[dict[str, Any]] = []
+        client = get_opensearch()
+        if client is not None:
+            live_docs = await fetch_session_events(client, date=date, strategy_id=live_strategy_id)
+
+        rows = minute_diff(decisions, live_docs)
+        radar = await _gap_radar(request, underlying, win_from, win_to)
+        rows = annotate_minute_divergence(rows, radar)
+        return {
+            "run_id": run_id,
+            "strategy_id": live_strategy_id,
+            "date": date,
+            "granularity": "minute",
+            "minutes": rows,
+        }
+
+    backtest_days = await _col(request, "backtest_days").find(
+        {"run_id": run_id}, {"_id": 0, "date": 1, "net": 1}).sort("date", 1).to_list(length=2000)
+
+    paper_by_strategy = await paper_pnl_by_strategy(db, win_from, win_to, live_strategy_id)
+    paper_days = paper_by_strategy.get(live_strategy_id, [])
+
+    aligned = align_days(backtest_days, paper_days)
+    radar = await _gap_radar(request, underlying, win_from, win_to)
+    aligned = annotate_day_divergence(aligned, radar)
+
+    return {
+        "run_id": run_id,
+        "strategy_id": live_strategy_id,
+        "granularity": "day",
+        "paper_data_available": bool(paper_days),
+        "days": aligned,
+    }
