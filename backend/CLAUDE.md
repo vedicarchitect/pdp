@@ -9,7 +9,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 |------------------------|-----------|
 | Directional strangle (core) | `pdp/strategies/` (strangle), `pdp/signals/`, `pdp/backtest/strangle_config.py`, `backtest/strangle_run.py` |
 | Strangle backtest tuning | `backtest/strangle_run.py`, `backtest/configs/strangle_*.yaml`, `pdp/backtest/` |
-| Backtest engine / sweeps | `pdp/backtest/`, `backtest/run.py`, `backtest/sweep_all.py` |
+| Backtest engine / sweeps | `pdp/backtest/`, `backtest/run.py`, `backtest/sweep_all.py`; DB-first warehouse + skills — see `pdp/backtest/CLAUDE.md` |
 | Options warehouse / backfill | `pdp/warehouse/`, `pdp/options/`, `scripts/backfill_*.py`, `scripts/audit_*.py` |
 | Orders / broker / execution | `pdp/orders/`, `pdp/portfolio/`, `pdp/risk/` |
 | Live strategy host / paper | `pdp/strategy/`, `pdp/market/`, `pdp/indicators/` |

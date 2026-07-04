@@ -1239,23 +1239,35 @@ all_legs_closed            — squareoff or full close
 
 ### 17.4 Backtest commands
 
+Since `backtest-results-warehouse` (archived 2026-07-04), backtests are **DB-first**: results
+persist to MongoDB by default (`backtest_runs`/`backtest_days`/`backtest_trades`/`backtest_decisions`)
+and logs route to OpenSearch — no local `backtest/runs/` folder is written unless you explicitly
+pass `--out-dir` for one-off manual inspection. Prefer the skills (`/backtest:run`, `/backtest:sweep`,
+`/backtest:promote`, `/backtest:explain`) over raw CLI for day-to-day use.
+
 ```powershell
-# Quick 30-day run (canonical config)
+# Quick 30-day run (canonical config) — persists to Mongo, no local files
 task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --days 30
 
 # 2026 YTD
-task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2026-01-01 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2026-01-01
 
 # Full 5-year (takes ~12 min)
-task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25
 
-# Trace mode (every-minute status.log per day)
-task backtest:strangle -- --from 2026-06-20 --days 3 --trace
+# Opt out of Mongo, archive locally instead (legacy/manual inspection only)
+task backtest:strangle -- --from 2026-06-20 --days 3 --no-mongo --out-dir backtest/runs --trace
 ```
 
 ### 17.5 Reading the outputs
 
-Each run in `backtest/runs/<run_id>/` contains:
+**DB-first (default)**: query via `/api/v1/strangle-backtests` or the skills — run detail, equity/day
+series, trades, walk-forward folds, sweep leaderboard, and the every-minute decision trace
+(`/backtest:explain`, or `GET /runs/{id}/decisions?date=&full=`) are all served from Mongo. Promotion
+rationale (stitched-OOS metrics, per-threshold PASS/actual, operator note) is at
+`GET /runs/{id}/promotion`.
+
+**Legacy local mode** (`--out-dir` explicitly passed): each run in `backtest/runs/<run_id>/` contains:
 
 | File | Contents |
 |------|---------|
@@ -1265,6 +1277,10 @@ Each run in `backtest/runs/<run_id>/` contains:
 | `days/<date>/status.log` | Every-minute BarStatus: score, votes, legs, actions |
 | `days/<date>/trades.csv` | Every fill: time, side, strike, qty, price, leg/day P&L |
 | `days/<date>/legs.csv` | Closed-leg records: entry/exit/lots/pnl/reason |
+
+Legacy local runs are migrated into the warehouse via `/backtest:ingest` (or
+`scripts/ingest_backtest_run.py --bulk-dir backtest/runs --remove`), which verifies each run landed in
+Mongo before deleting its local folder — never removes an unverified run.
 
 ### 17.6 Data prerequisites for backtest
 
@@ -1732,9 +1748,11 @@ task search:init
 | `pdp-strangle-events-*` | strategy | Per-bar events: bias evaluations, leg open/close/stop |
 | `pdp-trades-*` | journal | Individual fills / order executions |
 | `pdp-journal-*` | journal | Daily stats: realized P&L, win/loss counts, premium sold/bought |
-| `pdp-backtest-runs-*` | backtest | Per-run metrics (net, PF, Sharpe, MaxDD, verdict) |
+| `pdp-backtest-runs-*` | backtest | Per-run metrics (net, PF, Sharpe, MaxDD, verdict); sweep combos carry `sweep_id`/`param_grid` |
 | `pdp-backtest-days-*` | backtest | Per-day equity curve within a run |
 | `pdp-backtest-trades-*` | backtest | Simulated fills inside a backtest |
+| `pdp-backtest-decisions-*` | backtest | Why-entry/why-exit decision events (reason codes: `st_flip`, `entry`, `scale_in`, `rollup`, `exit`, `reentry`) |
+| `pdp-backtest-promotions-*` | backtest | Promotion events: stitched-OOS metrics + per-threshold PASS/actual breakdown |
 
 All indices are monthly date-suffixed (`pdp-logs-2026.06`) and use `dynamic: false` mappings.
 

@@ -51,6 +51,18 @@ Override via `.env`: `BACKTEST_COMMISSION__BROKERAGE_PER_ORDER=15`
 - `strategy_config.py` is the canonical config format; YAML files in `backtest/configs/` are its serialized form.
 - **Suite indicators in backtest**: set `suite_indicators` in `StrategyConfig` to replay any live-suite family alongside ST. `sim.py` builds the bundle, warms it from `prior_session_bars`, and updates it per bar — same tracker classes as live, so states are identical. The snapshot lands as `_suite_snap` in the series loop, ready for strategy conditions.
 
+## DB-first warehouse (since `backtest-results-warehouse`, archived 2026-07-04)
+
+Results are DB-first, not local files. `strangle_run.py`/`strangle_walkforward.py` persist to Mongo by
+default (`--mongo` default True; opt out with `--no-mongo`); local `backtest/runs/<id>/` archival only
+happens if `--out-dir` is explicitly passed (legacy/manual inspection). Logs route to OpenSearch, not
+`logs/*.log`. 6 Mongo collections: `backtest_runs`, `backtest_days`, `backtest_folds`, `backtest_trades`,
+`backtest_sweeps` (leaderboard), `backtest_decisions` (why-entry/why-exit event trace). Every decision
+event uses a strategy-agnostic reason-code vocabulary: `st_flip | entry | scale_in | rollup | exit |
+reentry`. Operate the machinery via skills, not raw API calls: `/backtest:run`, `/backtest:sweep`,
+`/backtest:promote`, `/backtest:ingest`, `/backtest:explain` (`.claude/skills/backtest-*/SKILL.md`).
+Spec: `openspec/specs/backtest-warehouse/spec.md` + `backtest-sweeps/spec.md` + `backtest-decision-trace/spec.md`.
+
 ## Common Tasks
 
 **Add a commission field:** Edit `BacktestCommissionSettings` in `settings.py` + update `commissions.py`.
