@@ -152,10 +152,13 @@ GET  /api/v1/strategies               → loaded strategy configs + status
 POST /api/v1/orders                   → place order
 POST /risk/kill                       → manual kill-switch (flatten all)
 GET  /api/v1/options/NIFTY/chain      → chain [?expiry=YYYY-MM-DD]
+GET  /api/v1/coverage                 → data coverage per index/family [?underlying=NIFTY&from=2026-01-01&to=2026-06-30]
+POST /api/v1/housekeeping/{task}      → async job (backfill-spot/options/levels/vix, validate-warehouse, etc.) [?symbol=NIFTY]
 WS   /ws/market                       → tick stream
 WS   /ws/orders                       → fill events
 WS   /ws/portfolio                    → MTM P&L stream
 WS   /ws/options                      → option chain updates
+WS   /ws/jobs                         → housekeeping job progress
 ```
 
 Interactive docs: `http://localhost:8000/docs`
@@ -1753,12 +1756,13 @@ task search:init
 | `pdp-backtest-trades-*` | backtest | Simulated fills inside a backtest |
 | `pdp-backtest-decisions-*` | backtest | Why-entry/why-exit decision events (reason codes: `st_flip`, `entry`, `scale_in`, `rollup`, `exit`, `reentry`) |
 | `pdp-backtest-promotions-*` | backtest | Promotion events: stitched-OOS metrics + per-threshold PASS/actual breakdown |
+| `pdp-data-coverage-*` | warehouse | Market-data coverage snapshots per index/family: gaps, coverage %, min/max dates |
 
 All indices are monthly date-suffixed (`pdp-logs-2026.06`) and use `dynamic: false` mappings.
 
 ### 18.4 Dashboards
 
-Open `http://localhost:5601` after `task search:up && task search:init`. Eight dashboards
+Open `http://localhost:5601` after `task search:up && task search:init`. Nine dashboards
 are pre-imported:
 
 | # | Dashboard | Key question |
@@ -1771,6 +1775,7 @@ are pre-imported:
 | 6 | Bias Effectiveness | Is the bucket signal actually predictive? |
 | 7 | Live ↔ Backtest Parity | Does live performance match backtest expectations? |
 | 8 | UI Health | Are there Flutter errors spiking on a specific screen? |
+| 9 | Data Coverage | Which market-data families are complete/gapped per index/date? |
 
 ### 18.5 Claude session review
 

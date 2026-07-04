@@ -55,7 +55,7 @@ In-flight strangle work: `live-directional-strangle-paper`. `backtest-multi-inde
 Making the backtest console enterprise-grade + DB-first (no local result files). Order:
 **1** `backtest-results-warehouse` (✓ done, archived 2026-07-04 — real sweeps+leaderboard, strategy-agnostic
 decision-trace, promotion evidence snapshot, DB-first cutover, legacy runs ingested) · **2** `market-data-coverage`
-(in progress — coverage/gap-radar API, one-click delta-fill, multi-index self-heal done) ·
+(✓ done, archived 2026-07-04 — per-index/family coverage API, gap radar, delta-fill jobs, multi-index self-heal, OpenSearch dashboard) ·
 **3** `backtest-paper-comparison` (proposal drafted, not started) · **4** `strategy-registry-unification`
 (proposal drafted, not started) · **5** `flutter-backtest-console` (proposal+design+specs drafted, not started).
 See `openspec/changes/<id>/` for each; full program plan lives in the session's plan file (`opsx:explore`
