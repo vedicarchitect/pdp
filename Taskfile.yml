@@ -13,12 +13,14 @@ tasks:
     desc: Run the API with reload (development only — not for trading hours)
     dir: backend
     cmds:
+      - uv run python scripts/ensure_port_free.py --port 8000
       - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
 
   dev:trade:
     desc: Run the API for trading — stable, no file-watch restarts
     dir: backend
     cmds:
+      - uv run python scripts/ensure_port_free.py --port 8000
       - uv run uvicorn pdp.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   trade:up:

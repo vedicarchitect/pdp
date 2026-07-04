@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../application/advisory_providers.dart';
@@ -13,12 +14,46 @@ class AdvisoryTab extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: const [
+        _DemoDataBanner(),
         _HoldingsOverview(),
         SizedBox(height: 24),
         _AllocationAdvice(),
         SizedBox(height: 24),
         _HistoryChart(),
       ],
+    );
+  }
+}
+
+class _DemoDataBanner extends ConsumerWidget {
+  const _DemoDataBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final advisoryAsync = ref.watch(advisoryProvider);
+    final isMock = advisoryAsync.value?['is_mock'] as bool? ?? false;
+    if (!isMock) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.amber.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.amber.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.info_outline, size: 18, color: Colors.amber),
+            const SizedBox(width: 8),
+            Text(
+              'Demo data — connect a broker sync run to see real holdings',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -105,7 +140,7 @@ class _AllocationAdvice extends ConsumerWidget {
                     title: Text(advice.title, style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Text(advice.description),
                     trailing: FilledButton.tonal(
-                      onPressed: () {},
+                      onPressed: () => context.push('/screener'),
                       child: Text(advice.action),
                     ),
                   ),

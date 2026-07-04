@@ -1,8 +1,12 @@
-# Options Warehouse Feed
+# options-warehouse-feed Specification
 
-Standalone live NIFTY options warehousing service that streams option bars independently of the trading application.
+## Purpose
 
----
+Standalone live NIFTY options warehousing service that streams option bars independently of the
+trading application, keeps a rolling ATM±10 current/next-week strike band subscribed, self-heals
+coverage gaps, and gates the realtime options-chain poller so paper sessions get Greeks/OI/PCR data.
+
+## Requirements
 
 ### Requirement: Standalone live options warehouser service
 
@@ -89,3 +93,28 @@ already-covered day is non-duplicate. The feature MUST be toggleable via
 - **WHEN** a gap-backfill cycle runs (blocking Dhan REST + pymongo work)
 - **THEN** it executes off the event loop (worker thread) so tick consumption and bar writing
   continue uninterrupted
+
+---
+
+### Requirement: Options chain poller start condition
+
+The options chain poller SHALL start whenever `DHAN_CLIENT_ID` and `DHAN_ACCESS_TOKEN` are present and
+`OPTIONS_POLLER_ENABLED` is true, independent of the `LIVE` flag, so that paper sessions receive realtime
+chain data (Greeks, OI, PCR). The poller is read-only market data and MUST NOT place or modify orders.
+When credentials are absent or `OPTIONS_POLLER_ENABLED` is false, the poller SHALL NOT start and chain
+REST endpoints SHALL return an empty `{"mode":"paper"}` snapshot.
+
+#### Scenario: Poller runs in paper with credentials
+
+- **WHEN** `LIVE` is unset but `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN` are set and `OPTIONS_POLLER_ENABLED` is true
+- **THEN** the options poller starts and persists `option_chains` snapshots during market hours
+
+#### Scenario: Poller disabled by flag
+
+- **WHEN** `OPTIONS_POLLER_ENABLED` is false
+- **THEN** the poller does not start regardless of credentials
+
+#### Scenario: Poller skipped without credentials
+
+- **WHEN** `DHAN_CLIENT_ID` or `DHAN_ACCESS_TOKEN` is absent
+- **THEN** the poller does not start and `GET /api/v1/options/NIFTY/chain` returns `{"mode":"paper", ...}`

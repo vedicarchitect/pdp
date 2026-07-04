@@ -25,7 +25,7 @@ class AppShell extends ConsumerWidget {
     ),
     _Destination(
       route: '/portfolio',
-      label: 'Portfolio',
+      label: 'Holdings',
       icon: Icons.account_balance_wallet_outlined,
       selectedIcon: Icons.account_balance_wallet,
     ),

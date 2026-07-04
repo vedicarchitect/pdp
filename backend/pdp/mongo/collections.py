@@ -17,6 +17,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_option_chains(db, settings.MONGO_CHAIN_TTL_DAYS, settings.OPTIONS_CHAIN_TTL_DAYS)
     await _ensure_oi_snapshots(db)
     await _ensure_portfolio_snapshots(db)
+    await _ensure_advisory_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
     await _ensure_broker_snapshots(db)
     await _ensure_events(db, settings.EVENTS_TTL_DAYS)
@@ -170,6 +171,21 @@ async def _ensure_portfolio_snapshots(db: AsyncIOMotorDatabase, ttl_days: int = 
         [("snapshot_date", ASCENDING)],
         unique=True,
         name="uq_snapshot_date",
+    )
+
+
+async def _ensure_advisory_snapshots(db: AsyncIOMotorDatabase, ttl_days: int = 90) -> None:  # type: ignore[type-arg]
+    """Audit trail of computed portfolio-advisory results (holdings + advice)."""
+    try:
+        await db.create_collection("advisory_snapshots")
+        log.info("mongo_collection_created", collection="advisory_snapshots")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="advisory_snapshots")
+
+    await db["advisory_snapshots"].create_index(
+        [("snapshot_ts", ASCENDING)],
+        expireAfterSeconds=ttl_days * 86400,
+        name="ttl_snapshot_ts",
     )
 
 

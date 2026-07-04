@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdp_app/core/theme/app_colors.dart';
-import 'package:pdp_app/features/portfolio/application/portfolio_providers.dart';
-import 'package:pdp_app/features/portfolio/domain/portfolio_snapshot.dart';
-import 'package:pdp_app/features/portfolio/domain/portfolio_summary.dart';
-import 'package:pdp_app/features/portfolio/domain/position.dart';
+import 'package:pdp_app/features/portfolio/application/holdings_providers.dart';
+import 'package:pdp_app/features/portfolio/domain/holdings_models.dart';
 import 'package:pdp_app/features/portfolio/presentation/portfolio_screen.dart';
 import 'package:pdp_app/shared/widgets/pnl_text.dart';
 
@@ -38,53 +36,63 @@ void main() {
     expect(red.style.color, AppColors.loss);
   });
 
-  testWidgets('PortfolioScreen renders summary totals and position rows',
+  testWidgets('PortfolioScreen renders holdings summary and per-stock rows',
       (tester) async {
-    const snapshot = PortfolioSnapshot(
-      summary: PortfolioSummary(
-        totalUnrealizedPnl: 500,
-        totalRealizedPnl: 250,
-        dayPnl: 750,
-        openPositions: 2,
-        mode: 'paper',
-      ),
-      positions: [
-        Position(
-          securityId: '1',
-          exchangeSegment: 'NSE_FNO',
-          product: 'INTRADAY',
-          netQty: -75,
-          avgPrice: 100,
-          realizedPnl: 0,
-          unrealizedPnl: 1200,
-          symbol: 'NIFTY 24500 CE',
-        ),
-        Position(
-          securityId: '2',
-          exchangeSegment: 'NSE_FNO',
-          product: 'INTRADAY',
-          netQty: -75,
-          avgPrice: 90,
-          realizedPnl: 0,
-          unrealizedPnl: -400,
-          symbol: 'NIFTY 24300 PE',
-        ),
-      ],
+    const summary = HoldingsSummary(
+      totalInvested: 82000,
+      totalCurrentValue: 100000,
+      totalPnl: 18000,
+      totalPnlPct: 21.95,
+      holdingsCount: 2,
+      cashAvailable: 15000,
     );
+    const holdings = [
+      HoldingDetail(
+        symbol: 'TCS',
+        exchange: 'NSE',
+        sector: 'Technology',
+        qty: 20,
+        avgPrice: 3200,
+        lastPrice: 3800,
+        investedValue: 64000,
+        currentValue: 76000,
+        pnl: 12000,
+        pnlPct: 18.75,
+      ),
+      HoldingDetail(
+        symbol: 'SUNPHARMA',
+        exchange: 'NSE',
+        sector: 'Healthcare',
+        qty: 5,
+        avgPrice: 900,
+        lastPrice: 800,
+        investedValue: 4500,
+        currentValue: 4000,
+        pnl: -500,
+        pnlPct: -11.11,
+      ),
+    ];
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          portfolioProvider.overrideWith((ref) => Stream.value(snapshot)),
+          holdingsProvider.overrideWith(
+            (ref) async => {
+              'summary': summary,
+              'holdings': holdings,
+              'is_mock': false,
+            },
+          ),
         ],
         child: const MaterialApp(home: Scaffold(body: PortfolioScreen())),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('NIFTY 24500 CE'), findsOneWidget);
-    expect(find.text('NIFTY 24300 PE'), findsOneWidget);
-    expect(find.text('+₹1,200.00'), findsOneWidget); // profit row
-    expect(find.text('-₹400.00'), findsOneWidget); // loss row
+    expect(find.text('Holdings'), findsWidgets);
+    expect(find.text('TCS'), findsOneWidget);
+    expect(find.text('SUNPHARMA'), findsOneWidget);
+    expect(find.text('+₹12,000.00'), findsOneWidget); // profit row
+    expect(find.text('-₹500.00'), findsOneWidget); // loss row
   });
 }
