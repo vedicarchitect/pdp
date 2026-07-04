@@ -9,6 +9,7 @@ class AppConfig {
     required this.apiBase,
     required this.wsBase,
     required this.useMock,
+    required this.dashboardsBase,
   });
 
   /// REST base, e.g. `http://localhost:8000`. Paths are appended under `/api/v1`.
@@ -20,9 +21,15 @@ class AppConfig {
   /// When true, the app runs on a simulated live feed and never touches a backend.
   final bool useMock;
 
+  /// OpenSearch Dashboards base, e.g. `http://localhost:5601`, for deep links
+  /// into the backtest/coverage dashboards (`task search:up`).
+  final String dashboardsBase;
+
   static const AppConfig current = AppConfig(
     apiBase: String.fromEnvironment('API_BASE', defaultValue: 'http://localhost:8000'),
     wsBase: String.fromEnvironment('WS_BASE', defaultValue: 'ws://localhost:8000'),
     useMock: bool.fromEnvironment('USE_MOCK'),
+    dashboardsBase:
+        String.fromEnvironment('DASHBOARDS_BASE', defaultValue: 'http://localhost:5601'),
   );
 }

@@ -26,6 +26,12 @@ abstract final class AppColors {
   static const textMuted = Color(0xFF94A3B8);
   static const border = Color(0xFF334155);
 
-  /// Warning amber (paper-mode badge).
+  /// Warning amber (paper-mode badge, REVIEW verdict).
   static const warning = Color(0xFFF59E0B);
+
+  /// Informational blue (running/pending job states, neutral chips).
+  static const info = Color(0xFF3B82F6);
+
+  /// Neutral grey (unknown/cancelled states, disabled chrome).
+  static const neutral = Color(0xFF64748B);
 }
