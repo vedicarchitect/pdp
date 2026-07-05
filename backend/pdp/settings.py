@@ -204,6 +204,27 @@ class Settings(BaseSettings):
         "SENSEX": 1000,
     }
 
+    # ── Dashboard intel feeds (dashboard-market-feeds capability) ──────────
+    # Master switch: third-party (yfinance/nsepython/feedparser/vaderSentiment) sources are
+    # gated behind this AND a successful lib import — a broken/missing lib degrades that one
+    # section to Stub (available:false), it never blocks startup or the request path.
+    INTEL_ENABLED: bool = False
+    INTEL_GLOBAL_INDICES_POLL_SECONDS: float = 300.0
+    INTEL_NEWS_POLL_SECONDS: float = 300.0
+    INTEL_FII_DII_POLL_SECONDS: float = 900.0
+    INTEL_NEWS_FEED_URLS: str = (
+        '["https://www.moneycontrol.com/rss/marketreports.xml",'
+        '"https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"]'
+    )
+    # India VIX rides the same tick feed / Redis ltp:<sid> cache as indices.
+    VIX_SECURITY_ID: str = "21"
+    # MCX commodity security ids (Dhan security master) — empty means "not configured",
+    # which degrades that commodity to available:false rather than a guessed sid.
+    MCX_GOLD_SECURITY_ID: str = ""
+    MCX_CRUDE_SECURITY_ID: str = ""
+    MCX_NATGAS_SECURITY_ID: str = ""
+    MCX_SILVER_SECURITY_ID: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

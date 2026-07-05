@@ -125,6 +125,69 @@ async def lifespan(app: FastAPI):
     from pdp.options.fii_dii import StubFIIDIISource
     app.state.fii_dii_source = StubFIIDIISource()
 
+    # Dashboard intel feeds (dashboard-market-feeds capability) — third-party/scrape-based
+    # sources (global indices, news, sentiment, FII/DII) are gated on INTEL_ENABLED AND a
+    # successful lib import; a missing lib or import failure degrades that source to its Stub
+    # (never blocks startup). A background poller refreshes them off the hot path.
+    intel_poller = None
+    if settings.INTEL_ENABLED:
+        import json as _json
+
+        from pdp.intel.poller import IntelPoller
+        from pdp.intel.sources.global_market import (
+            StubGlobalMarketSource,
+            YfinanceGlobalMarketSource,
+        )
+        from pdp.intel.sources.news import FeedparserNewsSource, StubNewsSource
+        from pdp.intel.sources.sentiment import BlendedSentimentSource, StubSentimentSource
+        from pdp.options.fii_dii import NseFIIDIISource
+
+        try:
+            import yfinance as _yf  # noqa: F401
+            global_market_source = YfinanceGlobalMarketSource()
+        except ImportError:
+            log.warning("intel_global_market_lib_missing")
+            global_market_source = StubGlobalMarketSource()
+
+        try:
+            import feedparser as _fp  # noqa: F401
+            news_source = FeedparserNewsSource()
+        except ImportError:
+            log.warning("intel_news_lib_missing")
+            news_source = StubNewsSource()
+
+        try:
+            import vaderSentiment as _vs  # noqa: F401
+            sentiment_source = BlendedSentimentSource()
+        except ImportError:
+            log.warning("intel_sentiment_lib_missing")
+            sentiment_source = StubSentimentSource()
+
+        try:
+            import nsepython as _nse  # noqa: F401
+            app.state.fii_dii_source = NseFIIDIISource()
+        except ImportError:
+            log.warning("intel_fii_dii_lib_missing")
+
+        intel_poller = IntelPoller(
+            redis=app.state.redis,
+            global_market_source=global_market_source,
+            news_source=news_source,
+            sentiment_source=sentiment_source,
+            fii_dii_source=app.state.fii_dii_source,
+            news_feed_urls=_json.loads(settings.INTEL_NEWS_FEED_URLS),
+            vix_security_id=settings.VIX_SECURITY_ID,
+            global_indices_interval=settings.INTEL_GLOBAL_INDICES_POLL_SECONDS,
+            news_interval=settings.INTEL_NEWS_POLL_SECONDS,
+            fii_dii_interval=settings.INTEL_FII_DII_POLL_SECONDS,
+            mongo_db=app.state.mongo_db,
+        )
+        intel_poller.start()
+        log.info("intel_enabled")
+    else:
+        log.info("intel_disabled")
+    app.state.intel_poller = intel_poller
+
     # Paper broker + order router — always started (no external credentials needed)
     from pdp.orders.paper import PaperBroker
     from pdp.orders.router import OrderRouter
@@ -285,6 +348,16 @@ async def lifespan(app: FastAPI):
         strategy_host.set_market_adapter(adapter)
         async with get_session_maker()() as session:
             await adapter.start(session)
+            # MCX commodities (dashboard-market-feeds capability): subscribe configured sids
+            # once — persisted subscriptions auto-restore on every future restart, so this is
+            # idempotent. Missing sids are skipped (that commodity stays available:false).
+            if settings.INTEL_ENABLED:
+                for _sid in (
+                    settings.MCX_GOLD_SECURITY_ID, settings.MCX_SILVER_SECURITY_ID,
+                    settings.MCX_CRUDE_SECURITY_ID, settings.MCX_NATGAS_SECURITY_ID,
+                ):
+                    if _sid:
+                        await adapter.subscribe(_sid, "MCX_COMM", session)
         tick_router = TickRouter(
             bar_aggregator=bar_aggregator,
             bar_writer=bar_writer,
@@ -481,6 +554,8 @@ async def lifespan(app: FastAPI):
                 await strategy_host.stop(_auto_sid)
             except Exception:
                 pass
+        if intel_poller is not None:
+            await intel_poller.stop()
         if scrip_refresh_scheduler is not None:
             await scrip_refresh_scheduler.stop()
         if broker_sync_scheduler is not None:
@@ -581,6 +656,7 @@ def create_app() -> FastAPI:
     from pdp.ml.routes import router as ml_router
     from pdp.housekeeping.routes import router as housekeeping_router
     from pdp.broker_sync.routes import router as broker_sync_router
+    from pdp.intel.dashboard_routes import router as dashboard_router
     from pdp.intel.routes import router as intel_router
     from pdp.observability.ingest import router as logs_ingest_router
     from pdp.observability.routes import router as observability_router
@@ -615,6 +691,7 @@ def create_app() -> FastAPI:
     app.include_router(housekeeping_router, prefix="/api/v1/housekeeping", tags=["Housekeeping"])
     app.include_router(broker_sync_router)
     app.include_router(intel_router, prefix="/api/v1/intel", tags=["Intel"])
+    app.include_router(dashboard_router)
     app.include_router(logs_ingest_router)
     app.include_router(observability_router)
     app.include_router(screener_router)

@@ -317,6 +317,28 @@ async def get_fii_dii(request: Request, date_str: str | None = None) -> JSONResp
         "data": {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in asdict(data).items()}
     })
 
+
+@router.get("/fii-dii/history")
+async def get_fii_dii_history(request: Request, days: int = 7) -> JSONResponse:
+    """Yesterday + last `days` trading days of FII/DII net flow, for the dashboard panel."""
+    source = getattr(request.app.state, "fii_dii_source", StubFIIDIISource())
+    fetch_range = getattr(source, "fetch_range", None)
+    if fetch_range is None:
+        return JSONResponse({"available": False, "days": []})
+
+    from dataclasses import asdict
+
+    rows = await fetch_range(days)
+    if not rows:
+        return JSONResponse({"available": False, "days": []})
+    return JSONResponse({
+        "available": True,
+        "days": [
+            {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(r).items()}
+            for r in rows
+        ],
+    })
+
 @router.post("/{underlying}/refresh", status_code=202)
 async def refresh(request: Request, underlying: str) -> dict[str, str]:
     poller = getattr(request.app.state, "options_poller", None)
