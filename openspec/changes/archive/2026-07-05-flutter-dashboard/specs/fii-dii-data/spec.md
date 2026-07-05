@@ -1,9 +1,4 @@
-# fii-dii-data Specification
-
-## Purpose
-Provides a pluggable interface for FII/DII (Foreign/Domestic Institutional Investor) options flow data. The default implementation is a stub that returns no data; a concrete source can be wired in when a real data feed is available.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Pluggable FII/DII data source
 
