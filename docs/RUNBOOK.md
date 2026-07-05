@@ -129,6 +129,7 @@ task dev
 | DhanTickerAdapter (market feed) | `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` set |
 | DhanBroker (live orders) | `LIVE=1` + `BROKER=dhan` + creds set |
 | OptionsChainPoller | `OPTIONS_POLLER_ENABLED=true` (default) + creds set — paper-safe, no `LIVE=1` needed |
+| IntelPoller (dashboard's global-indices/news/sentiment/FII-DII feeds) | `INTEL_ENABLED=true` (default `false`) — degrades that source to `Stub`/`available:false` per-lib if `yfinance`/`nsepython`/`feedparser`/`vaderSentiment` isn't importable |
 
 ### Key environment flags
 
@@ -138,6 +139,8 @@ task dev
 | `LIVE=true` + `BROKER=dhan` | Routes orders to Dhan |
 | `DHAN_CLIENT_ID=<id>` | Enables market feed |
 | `LOG_LEVEL=DEBUG` | Verbose structlog output |
+| `INTEL_ENABLED=true` | Enables the dashboard's third-party feeds (global indices/news/sentiment/FII-DII) off-hot-path poller |
+| `MCX_GOLD_SECURITY_ID` / `_SILVER_` / `_CRUDE_` / `_NATGAS_` | MCX commodity security ids (empty = that commodity ships `available:false`) |
 
 ### API endpoints (quick ref)
 
@@ -149,6 +152,13 @@ GET  /api/v1/trades                   → today's trades
 GET  /api/v1/portfolio/summary        → MTM P&L summary
 GET  /api/v1/portfolio/positions      → open positions
 GET  /api/v1/strategies               → loaded strategy configs + status
+GET  /api/v1/dashboard                → composed dashboard: indices, global markets, commodities,
+                                         VIX, next-expiry, FII/DII, sentiment+news, portfolio,
+                                         today's P&L, margin, strategy chips — one call, each
+                                         section keyed `available`(+`as_of`)
+GET  /api/v1/intel/{global-indices,commodities,vix,next-expiry,news,sentiment}  → standalone
+                                         per-section reads (same cache the composed endpoint uses)
+GET  /api/v1/options/fii-dii[/history] → FII/DII net flow (today / last N days)
 POST /api/v1/orders                   → place order
 POST /risk/kill                       → manual kill-switch (flatten all)
 GET  /api/v1/options/NIFTY/chain      → chain [?expiry=YYYY-MM-DD]
@@ -224,11 +234,12 @@ flutter test                 # widget/unit tests
 
 | Screen | Description |
 |--------|-------------|
+| Dashboard | Canonical home screen: NIFTY/BANKNIFTY/SENSEX index cards (vs-prev-close change + sparkline), global markets strip (Dow/Nasdaq/S&P/Nikkei/Hang Seng/FTSE via `yfinance`), MCX commodities strip (gold/crude/natgas/silver via the Dhan feed), India VIX gauge, FII/DII panel (yesterday + 7-day, via `nsepython`), blended sentiment gauge + news feed (`feedparser`/`vaderSentiment` + VIX/PCR internals), next-expiry chips, portfolio snapshot + today's P&L + margin, strategy-status chips, editable watchlist — single `GET /api/v1/dashboard` seed + existing `/ws/market`+`/ws/portfolio` sockets for live deltas |
 | Portfolio | Live MTM P&L summary + positions list + P&L chart (REST snapshot + `/ws/portfolio`) |
 | Backtest console | Run history/leaderboard, run-detail (equity+drawdown, days, trades, decision trace, walk-forward folds), few-clicks launch flow, data-coverage/gap-radar panel, promotion rationale, backtest-vs-paper comparison, CSV/JSON export, OpenSearch dashboard links |
 
-> The first build ships the app shell + the Portfolio vertical slice; the backtest console
-> followed. Further screens (orders, analytics, events, alerts) land as separate OpenSpec
+> The first build ships the app shell + the Portfolio vertical slice; the backtest console and the
+> Dashboard followed. Further screens (orders, analytics, events, alerts) land as separate OpenSpec
 > changes, each reusing the shell + data/provider pattern.
 
 ---

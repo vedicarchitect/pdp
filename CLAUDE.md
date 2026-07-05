@@ -44,7 +44,12 @@ Each dev activity loads **only** the files it needs:
 
 Foundation **1** `repo-restructure-and-claude-arch` (✓ done). Then:
 **2** `broker-account-sync` (✓ done) · **3** `broker-reports-vault` · **4** `strangle-execution-console` (42/43 — owner paper-run pending) ·
-**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) · **6** `flutter-dashboard` · **7** `flutter-screener` ·
+**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) ·
+**6** `flutter-dashboard` (✓ done, archived 2026-07-05 — canonical home screen: indices w/ vs-prev-close
+change math + sparkline, global markets via yfinance, MCX commodities via Dhan feed, India VIX,
+FII/DII via nsepython, blended sentiment (news+internals) via feedparser/vaderSentiment, portfolio
+snapshot, strategy chips, editable watchlist w/ live-quote resolution; single composed
+`GET /api/v1/dashboard` + existing WS sockets; new `dashboard-market-feeds` capability) · **7** `flutter-screener` ·
 **8** `flutter-backtest-console` (✓ done, archived 2026-07-04 — see Backtest console program below) · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
 **11** `flutter-portfolio-advisory` · **12** `flutter-market-intel` · **13** `flutter-event-feed` ·
 **14** `flutter-management-hub` · **15** `multi-broker-kite` · **16** `cloud-deploy-aws`.

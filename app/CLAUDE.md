@@ -40,6 +40,7 @@ google_fonts (Inter).
 | `lib/features/shell/app_shell.dart` | Responsive NavigationBar ↔ NavigationRail |
 | `lib/features/portfolio/` | The live-portfolio vertical slice (reference pattern) |
 | `lib/features/backtest/` | Backtest console: run history/leaderboard, run-detail drill-downs, launch flow, coverage/gap-radar, promotion + paper comparison |
+| `lib/features/dashboard/` | Canonical home screen: indices w/ vs-prev-close change + sparkline, global markets, MCX commodities, India VIX, FII/DII, blended sentiment+news, next-expiry, portfolio snapshot, strategy chips, editable watchlist — single `GET /api/v1/dashboard` seed + existing `/ws/market`+`/ws/portfolio` sockets |
 
 ## Not yet built
 
