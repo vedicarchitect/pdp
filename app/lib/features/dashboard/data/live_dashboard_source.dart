@@ -3,94 +3,115 @@ import 'dart:async';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/ws_client.dart';
 import '../../portfolio/data/portfolio_source.dart';
-import '../../portfolio/domain/portfolio_summary.dart';
 import '../domain/dashboard_models.dart';
 import 'dashboard_source.dart';
 
+/// Seeds from a single `GET /api/v1/dashboard` call, then applies live deltas
+/// over the existing `/ws/market` (index + commodity ticks) and
+/// `/ws/portfolio` sockets. Slow-moving sections (global indices, news,
+/// sentiment, FII/DII, next-expiry, today's P&L, margin, strategy chips) are
+/// refreshed by periodically re-fetching the composed endpoint rather than
+/// opening any new socket.
 class LiveDashboardSource implements DashboardSource {
   LiveDashboardSource({
     required this.api,
     required this.ws,
     required this.portfolioSource,
+    this.refreshInterval = const Duration(seconds: 60),
+    this.sparklineLength = 30,
   });
 
   final ApiClient api;
   final WsClient ws;
   final PortfolioSource portfolioSource;
+  final Duration refreshInterval;
+  final int sparklineLength;
+
+  final Map<String, List<double>> _sparklines = {};
+
+  List<double> _pushSparkline(String securityId, double ltp) {
+    final buf = _sparklines.putIfAbsent(securityId, () => []);
+    buf.add(ltp);
+    if (buf.length > sparklineLength) buf.removeAt(0);
+    return List.unmodifiable(buf);
+  }
+
+  Future<DashboardData> _fetch() async {
+    final json = await api.getJson('/api/v1/dashboard');
+    return DashboardData.fromJson(json);
+  }
 
   @override
   Stream<DashboardData> streamDashboard() async* {
-    List<MarketIndex> currentIndices = [
-      const MarketIndex(securityId: '13', name: 'NIFTY', ltp: 0.0, change: 0.0, changePct: 0.0),
-      const MarketIndex(securityId: '25', name: 'BANKNIFTY', ltp: 0.0, change: 0.0, changePct: 0.0),
-      const MarketIndex(securityId: '51', name: 'SENSEX', ltp: 0.0, change: 0.0, changePct: 0.0),
-    ];
-    PortfolioSummary currentSummary = PortfolioSummary.empty;
-
-    // 1) Fetch initial LTPs via REST
+    DashboardData current;
     try {
-      final ids = currentIndices.map((i) => i.securityId).join(',');
-      final ltpJson = await api.getJson('/api/v1/ltp?ids=$ids');
-      currentIndices = currentIndices.map((idx) {
-        final val = ltpJson[idx.securityId];
-        if (val is num) {
-          return idx.copyWith(ltp: val.toDouble());
-        }
-        return idx;
-      }).toList();
+      current = await _fetch();
     } catch (_) {
-      // Best effort
+      current = DashboardData.empty;
     }
+    yield current;
 
-    yield DashboardData(indices: currentIndices, summary: currentSummary);
-
-    // 2) Listen to portfolio stream and market websocket
+    final controller = StreamController<DashboardData>();
     ws.connect();
 
-    // Subscribe to index updates
-    // WS doesn't expose a method directly, we can send a raw message on the WebSocketChannel 
-    // but WsClient only exposes decoded stream. Let's assume we can just listen to ticks 
-    // and that the server broadcasts indices automatically, or we just listen to all ticks.
-    // In our design, the WsClient doesn't expose the raw sink, so we will rely on ticks that come in.
-
-    // Combine Streams
-    final streamController = StreamController<DashboardData>();
-
     final portfolioSub = portfolioSource.watch().listen((snapshot) {
-      currentSummary = snapshot.summary;
-      streamController.add(DashboardData(indices: currentIndices, summary: currentSummary));
+      current = current.copyWith(summary: snapshot.summary);
+      controller.add(current);
     });
 
     final wsSub = ws.stream.listen((msg) {
-      if (msg['type'] == 'tick') {
-        final secId = msg['security_id']?.toString();
-        final ltpRaw = msg['ltp'];
-        final ltp = (ltpRaw is num) ? ltpRaw.toDouble() : double.tryParse(ltpRaw?.toString() ?? '') ?? 0.0;
-        
-        bool changed = false;
-        currentIndices = currentIndices.map((idx) {
-          if (idx.securityId == secId) {
-            changed = true;
-            // Rough calc for change if we don't have previous close; keep simple
-            final oldLtp = idx.ltp;
-            final change = oldLtp > 0 ? (ltp - oldLtp) + idx.change : 0.0; 
-            final pct = oldLtp > 0 ? (change / oldLtp) * 100 : 0.0;
-            return idx.copyWith(ltp: ltp, change: change, changePct: pct);
-          }
-          return idx;
-        }).toList();
+      if (msg['type'] != 'tick') return;
+      final secId = msg['security_id']?.toString();
+      if (secId == null) return;
+      final ltpRaw = msg['ltp'];
+      final ltp = (ltpRaw is num) ? ltpRaw.toDouble() : double.tryParse(ltpRaw?.toString() ?? '');
+      if (ltp == null) return;
 
-        if (changed) {
-          streamController.add(DashboardData(indices: currentIndices, summary: currentSummary));
+      var changed = false;
+
+      final updatedIndices = current.indices.map((idx) {
+        if (idx.securityId == secId) {
+          changed = true;
+          return idx.copyWith(ltp: ltp, available: true, sparkline: _pushSparkline(secId, ltp));
         }
+        return idx;
+      }).toList();
+
+      final updatedCommodities = current.commodities.map((c) {
+        if (c.securityId == secId) {
+          changed = true;
+          return c.copyWith(ltp: ltp, available: true);
+        }
+        return c;
+      }).toList();
+
+      var updatedVix = current.vix;
+      if (current.vix.securityId != null && secId == current.vix.securityId) {
+        changed = true;
+        updatedVix = VixData(available: true, securityId: current.vix.securityId, value: ltp);
+      }
+
+      if (changed) {
+        current = current.copyWith(indices: updatedIndices, commodities: updatedCommodities, vix: updatedVix);
+        controller.add(current);
       }
     });
 
-    streamController.onCancel = () {
+    final refreshTimer = Timer.periodic(refreshInterval, (_) async {
+      try {
+        current = await _fetch();
+        controller.add(current);
+      } catch (_) {
+        // Best effort — keep showing the last good snapshot.
+      }
+    });
+
+    controller.onCancel = () {
       portfolioSub.cancel();
       wsSub.cancel();
+      refreshTimer.cancel();
     };
 
-    yield* streamController.stream;
+    yield* controller.stream;
   }
 }

@@ -8,7 +8,6 @@ and version-controlled config files. The Python package lives in `src/pdp/backte
 | Path | Role |
 |------|------|
 | `run.py` | Single entry point: single-config per-trade detail OR grid sweep |
-| `compare.py` | Replay one day, compare vs paper journal (side-by-side, no DB writes) |
 | `strangle_run.py` | **Directional-strangle** multi-year runner — quarter-chunked load, replays per day; `--hedge/--no-hedge`, `--trace`, `--out-dir` archives per-day logs |
 | `strangle_walkforward.py` | Walk-forward IS/OOS optimizer (go/no-go gate) — grouped-knob grid, stitched OOS equity + verdict |
 | `daily_flow.py` | Print human-readable daily/monthly P&L flow from a run's `summary.csv`; `python backtest/daily_flow.py <run_dir> [--monthly] [--losing] [--year N]` |
@@ -78,10 +77,10 @@ task backtest -- --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,
 
 # Grid sweep — pass at least one grid flag (--st / --tf / --moneyness) to trigger grid mode
 task backtest:sweep -- --days 90 --st "3,1;10,2" --tf "5,15" --moneyness "1,0,-1"
-
-# Paper journal comparison for a date
-task backtest:compare -- --date 2026-06-12
 ```
+
+Backtest-vs-paper comparison is `GET /api/v1/strangle-backtests/runs/{id}/vs-paper` (or the
+`/backtest:vs-paper` skill) — generic over strategy and window, not a Taskfile task.
 
 ## Config YAML shape
 

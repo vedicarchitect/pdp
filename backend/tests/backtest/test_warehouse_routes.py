@@ -5,6 +5,7 @@ Uses a patched app.state.mongo_db so no live Mongo is needed.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -12,6 +13,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+from pdp.db.session import get_db
 from pdp.main import create_app
 
 
@@ -28,7 +30,10 @@ def _cursor(docs: list[dict]) -> MagicMock:
     return c
 
 
-def _make_mongo_db(runs: list[dict], days: list[dict], folds: list[dict], trades: list[dict]):
+def _make_mongo_db(
+    runs: list[dict], days: list[dict], folds: list[dict], trades: list[dict],
+    decisions: list[dict] | None = None,
+):
     """Build a stable dict-keyed mock DB so tests can override individual collection methods."""
     col_runs = MagicMock()
     col_runs.find.return_value = _cursor(runs)
@@ -47,6 +52,11 @@ def _make_mongo_db(runs: list[dict], days: list[dict], folds: list[dict], trades
 
     col_promotions = MagicMock()
     col_promotions.insert_one = AsyncMock()
+    col_promotions.update_one = AsyncMock()
+    col_promotions.find_one = AsyncMock(return_value=None)
+
+    col_decisions = MagicMock()
+    col_decisions.find.return_value = _cursor(decisions or [])
 
     _cols = {
         "backtest_runs": col_runs,
@@ -54,6 +64,7 @@ def _make_mongo_db(runs: list[dict], days: list[dict], folds: list[dict], trades
         "backtest_folds": col_folds,
         "backtest_trades": col_trades,
         "backtest_promotions": col_promotions,
+        "backtest_decisions": col_decisions,
     }
 
     db = MagicMock()
@@ -67,7 +78,7 @@ _RUN = {
     "run_id": "strangle_test1",
     "kind": "single",
     "strategy_id": "strangle",
-    "config": {"timeframe_min": 5},
+    "config": {"timeframe_min": 5, "underlying": "NIFTY"},
     "window": {"from": "2026-01-02", "to": "2026-01-10"},
     "metrics": {"net": 10000.0, "profit_factor": 3.0, "max_dd": 2000.0},
     "verdict": None,
@@ -337,3 +348,180 @@ def test_promote_pass_accepted(client, tmp_path, monkeypatch):
     data = resp.json()
     assert "strategy_id" in data
     assert "yaml_path" in data
+
+    # The evidence-snapshot doc is upserted (not blind-inserted) so re-promotion never duplicates.
+    col_promotions = client.app.state.mongo_db._cols["backtest_promotions"]
+    col_promotions.update_one.assert_awaited_once()
+    (filt, update), kwargs = col_promotions.update_one.call_args
+    assert filt == {"run_id": "strangle_test1"}
+    assert update["$set"]["run_id"] == "strangle_test1"
+    assert update["$set"]["verdict"] == "PASS"
+    assert kwargs.get("upsert") is True
+
+
+def test_promote_with_operator_note(client, tmp_path, monkeypatch):
+    pass_run = {**_RUN, "verdict": "PASS", "kind": "walkforward",
+                "stitched_oos": {"net": 50000.0, "profit_factor": 2.0, "sharpe": 1.0,
+                                 "folds": 5, "positive_folds": 4}}
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=pass_run)
+    monkeypatch.setattr("pdp.strategy.promotion._STRATEGIES_DIR", tmp_path)
+    import pdp.backtest.warehouse_routes as wr
+
+    async def _sync_promote(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(wr.asyncio, "to_thread", _sync_promote)
+
+    resp = client.post(
+        "/api/v1/strangle-backtests/runs/strangle_test1/promote",
+        json={"note": "reviewed OOS folds, looks solid"},
+    )
+    assert resp.status_code == 200
+    col_promotions = client.app.state.mongo_db._cols["backtest_promotions"]
+    (_, update), _ = col_promotions.update_one.call_args
+    doc = update["$set"]
+    assert doc["note"] == "reviewed OOS folds, looks solid"
+    assert doc["verdict_breakdown"]["all_pass"] is True
+    assert doc["stitched_oos"]["net"] == pytest.approx(50000.0)
+
+
+def test_get_promotion_not_found(client):
+    resp = client.get("/api/v1/strangle-backtests/runs/no_such_run/promotion")
+    assert resp.status_code == 404
+
+
+def test_get_promotion_found(client):
+    promo_doc = {
+        "run_id": "strangle_test1", "strategy_id": "promoted_strangle_test1",
+        "verdict": "PASS", "note": None,
+        "promoted_at": datetime.now(UTC),
+    }
+    client.app.state.mongo_db._cols["backtest_promotions"].find_one = AsyncMock(
+        return_value=promo_doc
+    )
+    resp = client.get("/api/v1/strangle-backtests/runs/strangle_test1/promotion")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["run_id"] == "strangle_test1"
+    assert data["strategy_id"] == "promoted_strangle_test1"
+
+
+# ── vs-paper ──────────────────────────────────────────────────────────────────
+
+
+def _fake_pg_session(rows: list[tuple]) -> AsyncMock:
+    result = MagicMock()
+    result.all = MagicMock(return_value=rows)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
+@pytest.fixture()
+def _no_gap_radar(monkeypatch):
+    """vs-paper cross-references the gap radar; stub it so tests don't hit a real Mongo/pymongo."""
+    monkeypatch.setattr(
+        "pdp.backtest.warehouse_routes.underlying_coverage",
+        AsyncMock(return_value={"radar": {}}),
+    )
+
+
+def test_vs_paper_day_alignment(client, _no_gap_radar):
+    rows = [
+        ("directional_strangle_nifty", "1001", "SELL", 50, Decimal("100"), Decimal("5"),
+         datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1001", "BUY", 50, Decimal("60"), Decimal("5"),
+         datetime(2026, 1, 2, 6, 0, tzinfo=UTC)),
+    ]
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session(rows)
+    try:
+        resp = client.get("/api/v1/strangle-backtests/runs/strangle_test1/vs-paper")
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["strategy_id"] == "directional_strangle_nifty"
+    assert data["paper_data_available"] is True
+    day = next(d for d in data["days"] if d["date"] == "2026-01-02")
+    assert day["paper_net"] == pytest.approx(1990.0)
+    assert day["backtest_net"] == 2000.0  # from _DAY fixture
+
+
+def test_vs_paper_no_paper_data_returns_indicator_not_error(client, _no_gap_radar):
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get("/api/v1/strangle-backtests/runs/strangle_test1/vs-paper")
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["paper_data_available"] is False
+    day = next(d for d in data["days"] if d["date"] == "2026-01-02")
+    assert day["paper_net"] is None
+    assert day["diverges"] is False
+
+
+def test_vs_paper_run_not_found(client, _no_gap_radar):
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=None)
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get("/api/v1/strangle-backtests/runs/nope/vs-paper")
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 404
+
+
+def test_vs_paper_unresolvable_strategy_id(client, _no_gap_radar):
+    run = {**_RUN, "config": {}}
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=run)
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get("/api/v1/strangle-backtests/runs/strangle_test1/vs-paper")
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 422
+
+
+def test_vs_paper_minute_granularity_requires_date(client, _no_gap_radar):
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper?granularity=minute"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 400
+
+
+def test_vs_paper_minute_diff_flags_mismatch(client, _no_gap_radar, monkeypatch):
+    decision = {
+        "run_id": "strangle_test1", "date": "2026-01-02",
+        "ts_ist": datetime(2026, 1, 2, 9, 35), "event": "entry",
+        "sub_reason": None, "action": "entry", "snapshot": {},
+    }
+    client.app.state.mongo_db._cols["backtest_decisions"].find.return_value = _cursor([decision])
+    monkeypatch.setattr(
+        "pdp.backtest.warehouse_routes.get_opensearch", lambda: object()
+    )
+    monkeypatch.setattr(
+        "pdp.backtest.warehouse_routes.fetch_session_events",
+        AsyncMock(return_value=[{
+            "event_type": "bias_evaluated", "ist_time": "2026-01-02T09:35:00+05:30",
+        }]),
+    )
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper"
+            "?date=2026-01-02&granularity=minute"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["granularity"] == "minute"
+    assert len(data["minutes"]) == 1
+    assert data["minutes"][0]["mismatch"] is True

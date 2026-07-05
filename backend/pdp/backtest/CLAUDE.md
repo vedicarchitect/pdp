@@ -22,9 +22,11 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | `engine.py` | Generic strategy-replay framework (`BacktestEngine`) — not used by the index sim directly |
 | `output.py` | Result formatting, console table, CSV/JSON export |
 | `routes.py` | `/backtest` FastAPI endpoints (legacy options replay) |
-| `store.py` | `BacktestStore` — sync pymongo wrapper; document builders (`build_run_doc`, `build_day_docs`, `build_fold_docs`, `build_trade_docs`) + idempotent upsert for all 4 Mongo warehouse collections |
-| `warehouse_routes.py` | `/api/v1/strangle-backtests` FastAPI router — list/detail/equity/days/folds/trades + compare + launch (POST /runs, /sweeps, /walkforwards) + promote (POST /runs/{id}/promote) |
-| `job_handlers.py` | Async job handlers for `backtest:single`, `backtest:sweep`, `backtest:walkforward` — registered in app factory |
+| `store.py` | `BacktestStore` — sync pymongo wrapper; document builders (`build_run_doc`, `build_day_docs`, `build_fold_docs`, `build_trade_docs`, `build_sweep_doc`, `build_decision_docs`) + idempotent upsert for all 6 Mongo warehouse collections; centralized verdict thresholds (`WF_PASS_*`, `verdict_breakdown`) |
+| `sweep_engine.py` | `run_strangle_sweep` — in-process grid-sweep runner: loads the window once, replays every combo through `simulate_strangle_day`, returns unranked combos for `store.build_sweep_doc` to rank |
+| `warehouse_routes.py` | `/api/v1/strangle-backtests` FastAPI router — list/detail/equity/days/folds/trades/sweeps/decisions/promotion/vs-paper + compare + launch (POST /runs, /sweeps, /walkforwards) + promote (POST /runs/{id}/promote) |
+| `job_handlers.py` | Async job handlers for `backtest:single`, `backtest:sweep` (real in-process grid sweep), `backtest:walkforward` — registered in app factory |
+| `paper_compare.py` | Generic backtest-vs-paper comparison (`backtest-paper-comparison`) — per-strategy paper realized P&L from the PG ledger, per-day alignment, shared decision-event vocabulary + minute-level diff, gap-radar divergence annotation |
 
 ## Commission Settings (settings.py → `backtest_commission`)
 
@@ -49,6 +51,20 @@ Override via `.env`: `BACKTEST_COMMISSION__BROKERAGE_PER_ORDER=15`
 - Data source: MongoDB `option_bars` and `market_bars` collections.
 - `strategy_config.py` is the canonical config format; YAML files in `backtest/configs/` are its serialized form.
 - **Suite indicators in backtest**: set `suite_indicators` in `StrategyConfig` to replay any live-suite family alongside ST. `sim.py` builds the bundle, warms it from `prior_session_bars`, and updates it per bar — same tracker classes as live, so states are identical. The snapshot lands as `_suite_snap` in the series loop, ready for strategy conditions.
+
+## DB-first warehouse (since `backtest-results-warehouse`, archived 2026-07-04)
+
+Results are DB-first, not local files. `strangle_run.py`/`strangle_walkforward.py` persist to Mongo by
+default (`--mongo` default True; opt out with `--no-mongo`); local `backtest/runs/<id>/` archival only
+happens if `--out-dir` is explicitly passed (legacy/manual inspection). Logs route to OpenSearch, not
+`logs/*.log`. 6 Mongo collections: `backtest_runs`, `backtest_days`, `backtest_folds`, `backtest_trades`,
+`backtest_sweeps` (leaderboard), `backtest_decisions` (why-entry/why-exit event trace). Every decision
+event uses a strategy-agnostic reason-code vocabulary: `st_flip | entry | scale_in | rollup | exit |
+reentry`. Operate the machinery via skills, not raw API calls: `/backtest:run`, `/backtest:sweep`,
+`/backtest:promote`, `/backtest:ingest`, `/backtest:explain`, `/backtest:vs-paper`
+(`.claude/skills/backtest-*/SKILL.md`).
+Spec: `openspec/specs/backtest-warehouse/spec.md` + `backtest-sweeps/spec.md` + `backtest-decision-trace/spec.md`
++ `backtest-paper-comparison/spec.md`.
 
 ## Common Tasks
 

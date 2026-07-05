@@ -217,3 +217,35 @@ def test_fii_dii_stub_returns_unavailable(client):
     resp = client.get("/api/v1/options/fii-dii")
     assert resp.status_code == 200
     assert resp.json() == {"available": False}
+
+
+def test_fii_dii_history_unavailable_for_stub(client):
+    from pdp.options.fii_dii import StubFIIDIISource
+    client.app.state.fii_dii_source = StubFIIDIISource()
+
+    resp = client.get("/api/v1/options/fii-dii/history")
+    assert resp.status_code == 200
+    assert resp.json() == {"available": False, "days": []}
+
+
+def test_fii_dii_history_returns_rows_for_nse_source(client):
+    from datetime import date as _date
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pdp.options.fii_dii import FIIDIIData
+
+    source = MagicMock()
+    source.fetch_range = AsyncMock(return_value=[
+        FIIDIIData(date=_date(2026, 7, 3), fii_index_futures_net=0.0,
+                   fii_index_options_net=0.0, fii_stock_futures_net=1355.33,
+                   dii_index_futures_net=0.0, dii_index_options_net=0.0,
+                   dii_stock_futures_net=-1953.89),
+    ])
+    client.app.state.fii_dii_source = source
+
+    resp = client.get("/api/v1/options/fii-dii/history?days=7")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert len(body["days"]) == 1
+    assert body["days"][0]["date"] == "2026-07-03"

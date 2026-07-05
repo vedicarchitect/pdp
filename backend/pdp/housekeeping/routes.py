@@ -11,6 +11,8 @@ router = APIRouter()
 _VALID_TASKS = {
     "backfill-spot",
     "backfill-options",
+    "backfill-levels",
+    "backfill-vix",
     "reset-paper",
     "validate-warehouse",
     "snapshot-instruments",

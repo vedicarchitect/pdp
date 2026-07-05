@@ -1,74 +1,57 @@
 from __future__ import annotations
 
 import datetime
-from fastapi import APIRouter
+
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+from pdp.intel.sections import (
+    compute_commodities,
+    compute_global_indices,
+    compute_news,
+    compute_next_expiry,
+    compute_sentiment,
+    compute_vix,
+)
 
 router = APIRouter()
 
+
+@router.get("/global-indices")
+async def get_global_indices(request: Request) -> JSONResponse:
+    return JSONResponse(await compute_global_indices(request))
+
+
 @router.get("/news")
-async def get_news() -> JSONResponse:
-    # Mock news data
-    data = {
-        "articles": [
-            {
-                "id": "n1",
-                "headline": "Fed signals potential rate cuts later this year",
-                "source": "Reuters",
-                "url": "https://example.com/news1",
-                "published_at": datetime.datetime.now().isoformat(),
-                "sentiment": "positive",
-            },
-            {
-                "id": "n2",
-                "headline": "Tech stocks rally as AI demand surges",
-                "source": "Bloomberg",
-                "url": "https://example.com/news2",
-                "published_at": (datetime.datetime.now() - datetime.timedelta(hours=2)).isoformat(),
-                "sentiment": "positive",
-            },
-            {
-                "id": "n3",
-                "headline": "Oil prices dip amid global growth concerns",
-                "source": "WSJ",
-                "url": "https://example.com/news3",
-                "published_at": (datetime.datetime.now() - datetime.timedelta(hours=5)).isoformat(),
-                "sentiment": "negative",
-            },
-        ]
-    }
-    return JSONResponse(content=data)
+async def get_news(request: Request) -> JSONResponse:
+    return JSONResponse(await compute_news(request))
+
 
 @router.get("/sentiment")
-async def get_sentiment() -> JSONResponse:
-    # Mock X/Twitter sentiment scores
-    data = {
-        "overall_score": 68,
-        "label": "Bullish",
-        "breakdown": {
-            "positive": 55,
-            "neutral": 30,
-            "negative": 15,
-        }
-    }
-    return JSONResponse(content=data)
+async def get_sentiment(request: Request) -> JSONResponse:
+    return JSONResponse(await compute_sentiment(request))
+
 
 @router.get("/commodities")
-async def get_commodities() -> JSONResponse:
-    # Mock commodity prices
-    data = {
-        "commodities": [
-            {"symbol": "GOLD", "name": "Gold", "price": 2350.40, "change_pct": 0.8},
-            {"symbol": "SILVER", "name": "Silver", "price": 28.15, "change_pct": 1.2},
-            {"symbol": "CRUDE", "name": "Crude Oil", "price": 78.50, "change_pct": -0.5},
-            {"symbol": "NATGAS", "name": "Natural Gas", "price": 2.65, "change_pct": -1.1},
-        ]
-    }
-    return JSONResponse(content=data)
+async def get_commodities(request: Request) -> JSONResponse:
+    """MCX commodity LTP in INR — from the live Dhan feed's Redis ltp cache, not a
+    third-party library."""
+    return JSONResponse({"commodities": await compute_commodities(request)})
+
+
+@router.get("/vix")
+async def get_vix(request: Request) -> JSONResponse:
+    return JSONResponse(await compute_vix(request))
+
+
+@router.get("/next-expiry")
+async def get_next_expiry(request: Request) -> JSONResponse:
+    return JSONResponse(await compute_next_expiry())
+
 
 @router.get("/calendar")
 async def get_calendar() -> JSONResponse:
-    # Mock economic calendar
+    # Mock economic calendar — out of scope for flutter-dashboard; unchanged.
     data = {
         "events": [
             {

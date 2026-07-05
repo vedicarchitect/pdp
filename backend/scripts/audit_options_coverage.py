@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from pdp.options.gap_backfill import days_missing, holidays, trading_days
+from pdp.options.gap_backfill import collapse_date_ranges, days_missing, holidays, trading_days
 from pdp.settings import get_settings
 
 load_dotenv()
@@ -35,7 +35,6 @@ log = structlog.get_logger()
 
 IST = timedelta(hours=5, minutes=30)
 IST_MS = int(IST.total_seconds() * 1000)
-UNDERLYING = "NIFTY"
 
 
 def _ist_date(ts: datetime) -> date:
@@ -43,23 +42,10 @@ def _ist_date(ts: datetime) -> date:
     return (ts + IST).date()
 
 
-def _collapse(days: list[date]) -> list[str]:
-    """Collapse a sorted date list into ['YYYY-MM-DD..YYYY-MM-DD', 'YYYY-MM-DD', …] ranges."""
-    if not days:
-        return []
-    out, start, prev = [], days[0], days[0]
-    for d in days[1:]:
-        if (d - prev).days <= 3 and (d.weekday() != 0 or (d - prev).days <= 3):
-            prev = d
-            continue
-        out.append(str(start) if start == prev else f"{start}..{prev}")
-        start = prev = d
-    out.append(str(start) if start == prev else f"{start}..{prev}")
-    return out
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="Audit option_bars coverage (read-only).")
+    ap.add_argument("--symbol", default="NIFTY", choices=["NIFTY", "BANKNIFTY", "SENSEX"],
+                    help="Underlying to audit (default: NIFTY).")
     ap.add_argument("--from", dest="date_from", default=None, help="IST start (default: earliest data).")
     ap.add_argument("--to", dest="date_to", default=None, help="IST end (default: today).")
     ap.add_argument("--codes", default="1,2")
@@ -71,35 +57,41 @@ def main() -> int:
     s = get_settings()
     band = a.band if a.band is not None else s.WAREHOUSE_STRIKE_BAND
     codes = [int(x) for x in a.codes.split(",") if x.strip()]
+    underlying_match = {"underlying": a.symbol}
 
     from pymongo import MongoClient
     col = MongoClient(s.MONGO_URI)[s.MONGO_DB_NAME]["option_bars"]
 
-    total = col.estimated_document_count()
+    total = col.count_documents(underlying_match)
     if total == 0:
-        print("option_bars is empty.")
+        print(f"option_bars has no docs for {a.symbol}.")
         return 0
 
     # ── Overall range + source split ──────────────────────────────────────────
-    first = col.find_one({}, {"ts": 1}, sort=[("ts", 1)])["ts"]
-    last = col.find_one({}, {"ts": 1}, sort=[("ts", -1)])["ts"]
+    first = col.find_one(underlying_match, {"ts": 1}, sort=[("ts", 1)])["ts"]
+    last = col.find_one(underlying_match, {"ts": 1}, sort=[("ts", -1)])["ts"]
     data_lo, data_hi = _ist_date(first), _ist_date(last)
-    src = {r["_id"]: r["n"] for r in col.aggregate([{"$group": {"_id": "$source", "n": {"$sum": 1}}}])}
+    src = {r["_id"]: r["n"] for r in col.aggregate([
+        {"$match": underlying_match},
+        {"$group": {"_id": "$source", "n": {"$sum": 1}}},
+    ])}
     src_str = ", ".join(f"{k}={v:,}" for k, v in sorted(src.items(), key=lambda x: str(x[0])))
 
-    print("\n  option_bars coverage audit")
+    print(f"\n  option_bars coverage audit — {a.symbol}")
     print(f"  total docs : {total:,}")
     print(f"  IST range  : {data_lo} .. {data_hi}")
     print(f"  source     : {src_str}")
 
     # ── Per-month: docs + distinct trade-days ─────────────────────────────────
     by_month = {r["_id"]: r["n"] for r in col.aggregate([
+        {"$match": underlying_match},
         {"$group": {"_id": {"$dateToString": {"format": "%Y-%m",
                                               "date": {"$add": ["$ts", IST_MS]}, "timezone": "UTC"}},
                     "n": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ], allowDiskUse=True)}
     days_per_month = {r["_id"]: r["days"] for r in col.aggregate([
+        {"$match": underlying_match},
         {"$group": {"_id": {"$dateTrunc": {"date": {"$add": ["$ts", IST_MS]}, "unit": "day"}}}},
         {"$group": {"_id": {"$dateToString": {"format": "%Y-%m", "date": "$_id", "timezone": "UTC"}},
                     "days": {"$sum": 1}}},
@@ -115,8 +107,8 @@ def main() -> int:
     dto = date.fromisoformat(a.date_to) if a.date_to else date.today()
     hol = holidays(s.NSE_HOLIDAYS_JSON)
     tdays = trading_days(dfrom, dto, hol)
-    gaps = days_missing(col, tdays, codes, band, min_fraction=a.min_fraction)
-    gap_ranges = _collapse(sorted(gaps))
+    gaps = days_missing(col, tdays, codes, band, min_fraction=a.min_fraction, underlying=a.symbol)
+    gap_ranges = collapse_date_ranges(gaps)
 
     print(f"\n  Gap scan {dfrom}..{dto}  (codes={codes}, band={band}, min_fraction={a.min_fraction})")
     print(f"  trading days : {len(tdays)}")
@@ -125,10 +117,13 @@ def main() -> int:
         for rng in gap_ranges:
             print(f"    - {rng}")
         print("\n  Suggested fill (where Dhan serves the range):")
-        print(f"    python scripts/backfill_options_gap.py --from {dfrom} --to {dto} --only-missing")
+        print(
+            f"    python scripts/backfill_options_gap.py --symbol {a.symbol} "
+            f"--from {dfrom} --to {dto} --only-missing"
+        )
 
     summary = {
-        "total_docs": total, "ist_range": [str(data_lo), str(data_hi)], "source": src,
+        "symbol": a.symbol, "total_docs": total, "ist_range": [str(data_lo), str(data_hi)], "source": src,
         "docs_by_month": by_month, "trade_days_by_month": days_per_month,
         "gap_scan": {"from": str(dfrom), "to": str(dto), "codes": codes, "band": band,
                      "min_fraction": a.min_fraction, "trading_days": len(tdays),
@@ -138,7 +133,7 @@ def main() -> int:
         with open(a.out, "w") as fh:
             json.dump(summary, fh, indent=2)
         print(f"\n  wrote {a.out}")
-    log.info("coverage_audit_done", total=total, months=len(by_month), gap_days=len(gaps))
+    log.info("coverage_audit_done", symbol=a.symbol, total=total, months=len(by_month), gap_days=len(gaps))
     return 0
 
 

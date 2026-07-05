@@ -77,7 +77,7 @@ class Order(Base):
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reject_reason: Mapped[str | None] = mapped_column(String, nullable=True)
-    strategy_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    strategy_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
 
 class Trade(Base):

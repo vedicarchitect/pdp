@@ -30,6 +30,10 @@ dependencies = [
     "lightgbm>=4.3",
     "pywebpush>=2.0",
     "opensearch-py[async]>=2.6",
+    "yfinance>=1.5.1",
+    "nsepython>=2.97",
+    "feedparser>=6.0.12",
+    "vadersentiment>=3.3.2",
 ]
 
 [project.optional-dependencies]

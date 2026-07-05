@@ -32,4 +32,5 @@ Records fills, computes daily P&L stats, and persists paper-trading journal entr
 
 `JournalService` is started automatically during API lifespan.
 It subscribes to the `orders.filled` event from `OrderRouter`.
-`backtest_compare.py` reads `paper_journal` for the comparison report.
+Backtest-vs-paper comparison reads realized P&L from the PostgreSQL `trades`/`orders` ledger
+(`pdp.backtest.paper_compare`), not this Mongo journal — see `GET /runs/{id}/vs-paper`.

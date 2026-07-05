@@ -9,7 +9,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 |------------------------|-----------|
 | Directional strangle (core) | `pdp/strategies/` (strangle), `pdp/signals/`, `pdp/backtest/strangle_config.py`, `backtest/strangle_run.py` |
 | Strangle backtest tuning | `backtest/strangle_run.py`, `backtest/configs/strangle_*.yaml`, `pdp/backtest/` |
-| Backtest engine / sweeps | `pdp/backtest/`, `backtest/run.py`, `backtest/sweep_all.py` |
+| Backtest engine / sweeps | `pdp/backtest/`, `backtest/run.py`, `backtest/sweep_all.py`; DB-first warehouse + skills — see `pdp/backtest/CLAUDE.md` |
 | Options warehouse / backfill | `pdp/warehouse/`, `pdp/options/`, `scripts/backfill_*.py`, `scripts/audit_*.py` |
 | Orders / broker / execution | `pdp/orders/`, `pdp/portfolio/`, `pdp/risk/` |
 | Live strategy host / paper | `pdp/strategy/`, `pdp/market/`, `pdp/indicators/` |
@@ -19,6 +19,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 | Migrations | `alembic/`, `alembic.ini` |
 | Broker account/report sync (chunk 2–3) | `pdp/portfolio/`, `pdp/orders/`, `pdp/db/`, `dhanhq` skill |
 | Unified log pipeline / OpenSearch | `pdp/observability/` (+ `CLAUDE.md` there), `pdp/logging.py`, `pdp/settings.py` (`OPENSEARCH_*`), `infra/compose/docker-compose.yml` |
+| Dashboard feeds (chunk 6) | `pdp/intel/` (poller, sources, sections, routes, dashboard_routes), `pdp/options/fii_dii.py` (`NseFIIDIISource`), `pdp/settings.py` (`INTEL_*`, `MCX_*_SECURITY_ID`, `VIX_SECURITY_ID`) |
 
 ## Module map (`backend/pdp/*` — each folder has its own CLAUDE.md)
 
@@ -34,6 +35,7 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 | `pdp/housekeeping/` | Async housekeeping tasks + REST routes |
 | `pdp/indicators/` | IndicatorEngine, SuperTrend, warmup |
 | `pdp/instruments/` | Dhan scrip master, expiry calendar |
+| `pdp/intel/` | Dashboard market-intel feeds: `poller.py` (off-hot-path refresher, gated `INTEL_ENABLED`), `sources/{global_market,news,sentiment}.py` (yfinance/feedparser/vaderSentiment, each Protocol+Stub+real impl), `sections.py` (shared section builders), `routes.py` (standalone `/api/v1/intel/*`), `dashboard_routes.py` (composed `GET /api/v1/dashboard`) |
 | `pdp/jobs/` | Async job runner + WS progress stream |
 | `pdp/journal/` | Fill recording, daily stats |
 | `pdp/market/` | Tick feed, bar agg, WS hub |

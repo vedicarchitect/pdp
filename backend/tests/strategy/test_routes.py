@@ -66,7 +66,12 @@ def test_client(strategies_dir):
 # ---------------------------------------------------------------------------
 
 def test_list_strategies_returns_all(strategies_dir):
+    # `strategies_dir` (the fixture) holds a real `null_strat.yaml`, so the unified registry
+    # (merged with the mocked host's running-state) picks it up for real, alongside whatever
+    # real `backtest/configs/*.yaml` entries exist in this repo checkout — hence asserting on
+    # the one entry we care about rather than the total count.
     mock_host = MagicMock()
+    mock_host.strategies_dir = strategies_dir
     mock_host.list_all.return_value = [
         {
             "id": "null_strat",
@@ -89,8 +94,12 @@ def test_list_strategies_returns_all(strategies_dir):
         resp = c.get("/api/v1/strategies")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 1
-    assert data[0]["id"] == "null_strat"
+    by_id = {s["id"]: s for s in data["strategies"]}
+    assert by_id["null_strat"]["status"] == "STOPPED"
+    assert by_id["null_strat"]["source"] == "live"
+    assert by_id["null_strat"]["watchlist"] == [
+        {"security_id": "1333", "exchange_segment": "NSE_EQ", "timeframes": ["1m"]}
+    ]
 
 
 @pytest.mark.asyncio
@@ -127,6 +136,51 @@ async def test_start_stop_lifecycle(strategies_dir):
         resp4 = c.post("/api/v1/strategies/null_strat/stop")
         assert resp4.status_code == 409
         assert "not running" in resp4.json()["detail"]
+
+
+def test_register_strategy_route(tmp_path, monkeypatch):
+    from functools import partial
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from pdp.strategy import routes, unified_registry
+
+    # Redirect the route's registration writes into tmp_path — never touch the real
+    # backend/backtest/configs/ directory from a test.
+    monkeypatch.setattr(
+        routes.unified_registry, "register_strategy",
+        partial(unified_registry.register_strategy, configs_dir=tmp_path),
+    )
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.state.strategy_host = MagicMock()
+
+    with TestClient(app) as c:
+        resp = c.post("/api/v1/strategies/register", json={
+            "strategy_id": "test_new_strat",
+            "kind": "strangle",
+            "params": {"underlying": "NIFTY", "timeframe_min": 15},
+        })
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["id"] == "test_new_strat"
+        assert body["underlying"] == "NIFTY"
+        assert (tmp_path / "test_new_strat.yaml").exists()
+
+        # Duplicate id -> 422 (already registered, per register_strategy's own id check)
+        resp2 = c.post("/api/v1/strategies/register", json={
+            "strategy_id": "test_new_strat", "kind": "strangle", "params": {},
+        })
+        assert resp2.status_code == 422
+        assert "already registered" in resp2.json()["detail"]
+
+        # Unknown kind -> 422
+        resp3 = c.post("/api/v1/strategies/register", json={
+            "strategy_id": "another_strat", "kind": "bogus", "params": {},
+        })
+        assert resp3.status_code == 422
 
 
 @pytest.mark.asyncio

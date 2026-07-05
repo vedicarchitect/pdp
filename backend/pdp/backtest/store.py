@@ -19,11 +19,43 @@ import structlog
 log = structlog.get_logger()
 
 _TRADING_DAYS_PER_YEAR = 252
-# Verdict thresholds matching strangle_walkforward.py
-_WF_PASS_NET = 0
-_WF_PASS_PF = 1.2
-_WF_PASS_SHARPE = 0.5
-_WF_PASS_POS_FRAC = 0.6
+
+# Verdict thresholds — single source of truth. `backtest/strangle_walkforward.py`
+# imports these instead of re-declaring literals so the printed verdict, the stored
+# verdict, and the promotion-evidence breakdown can never disagree.
+WF_PASS_NET = 0
+WF_PASS_PF = 1.2
+WF_PASS_SHARPE = 0.5
+WF_PASS_POS_FRAC = 0.6
+# Back-compat aliases (module-private names used elsewhere in this file).
+_WF_PASS_NET = WF_PASS_NET
+_WF_PASS_PF = WF_PASS_PF
+_WF_PASS_SHARPE = WF_PASS_SHARPE
+_WF_PASS_POS_FRAC = WF_PASS_POS_FRAC
+
+
+def verdict_breakdown(stitched_oos: dict[str, Any]) -> dict[str, Any]:
+    """Per-threshold PASS/actual breakdown for a stitched-OOS summary (promotion evidence)."""
+    net = _safe_float(stitched_oos.get("net")) or 0.0
+    pf = _safe_float(stitched_oos.get("profit_factor")) or 0.0
+    sharpe = _safe_float(stitched_oos.get("sharpe")) or 0.0
+    folds = int(stitched_oos.get("folds") or 0)
+    positive_folds = int(stitched_oos.get("positive_folds") or 0)
+    pos_frac = (positive_folds / folds) if folds else 0.0
+    checks = {
+        "net": {"actual": net, "threshold": WF_PASS_NET, "pass": net > WF_PASS_NET},
+        "profit_factor": {"actual": pf, "threshold": WF_PASS_PF, "pass": pf > WF_PASS_PF},
+        "sharpe": {"actual": sharpe, "threshold": WF_PASS_SHARPE, "pass": sharpe > WF_PASS_SHARPE},
+        "positive_fold_fraction": {
+            "actual": pos_frac, "threshold": WF_PASS_POS_FRAC, "pass": pos_frac >= WF_PASS_POS_FRAC,
+        },
+    }
+    return {
+        "checks": checks,
+        "all_pass": all(c["pass"] for c in checks.values()),
+        "positive_folds": positive_folds,
+        "folds": folds,
+    }
 
 
 def _sharpe_from_rets(rets: list[float]) -> float | None:
@@ -62,6 +94,12 @@ def _ship_backtest(kind: str, doc: dict[str, Any]) -> None:
     elif kind == "trade":
         d, did = sinks.backtest_trade_doc(doc)
         indexer.enqueue(sinks.BACKTEST_TRADES, d, did)
+    elif kind == "decision":
+        d, did = sinks.backtest_decision_doc(doc)
+        indexer.enqueue(sinks.BACKTEST_DECISIONS, d, did)
+    elif kind == "promotion":
+        d, did = sinks.backtest_promotion_doc(doc)
+        indexer.enqueue(sinks.BACKTEST_PROMOTIONS, d, did)
 
 
 # ── Document builders ─────────────────────────────────────────────────────────
@@ -89,12 +127,17 @@ def build_run_doc(
     run_id = manifest["run_id"]
     # Derive strategy_id from run_id prefix (e.g. "strangle" from "strangle_20260626-120127")
     strategy_id = re.split(r"_\d{8}", run_id)[0]
+    config = manifest.get("config", {})
+
+    from pdp.strategy.unified_registry import canonical_id
+    canonical_strategy_id = canonical_id(strategy_id, config.get("underlying"))
 
     doc: dict[str, Any] = {
         "run_id": run_id,
         "kind": kind,
         "strategy_id": strategy_id,
-        "config": manifest.get("config", {}),
+        "canonical_strategy_id": canonical_strategy_id,
+        "config": config,
         "window": manifest.get("window", {}),
         "metrics": {
             "net": net,
@@ -292,6 +335,166 @@ def build_trade_docs(
     return docs
 
 
+def build_day_doc_from_result(
+    run_id: str,
+    result: Any,
+    *,
+    cum_equity: float,
+    peak: float,
+    build_ms: float,
+    sim_ms: float,
+) -> dict[str, Any]:
+    """Build one `backtest_days` doc directly from a `DayResult` (DB-first path — no CSV round-trip)."""
+    return {
+        "run_id": run_id,
+        "date": result.date,
+        "expiry": result.expiry,
+        "nifty_open": _safe_float(result.nifty_open),
+        "nifty_close": _safe_float(result.nifty_close),
+        "nifty_chg": _safe_float(result.nifty_chg),
+        "trades": len(result.trades),
+        "gross_pnl": _safe_float(result.gross_pnl),
+        "commission": _safe_float(result.commission),
+        "net": _safe_float(result.realized),
+        "cum_equity": _safe_float(cum_equity),
+        "peak": _safe_float(peak),
+        "drawdown": _safe_float(peak - cum_equity),
+        "halted": result.done_reason or "",
+        "build_ms": _safe_float(build_ms),
+        "sim_ms": _safe_float(sim_ms),
+        "status_log": [],
+    }
+
+
+def build_trade_doc_from_result(run_id: str, result: Any) -> dict[str, Any] | None:
+    """Build one `backtest_trades` doc (fills bucket) directly from a `DayResult`."""
+    if not result.trades:
+        return None
+    fills = [{
+        "time": t.bar_time.strftime("%H:%M") if hasattr(t.bar_time, "strftime") else str(t.bar_time),
+        "side": t.side,
+        "opt_type": t.opt_type,
+        "strike": _safe_float(t.strike),
+        "qty": t.qty,
+        "price": _safe_float(t.price),
+        "nifty": _safe_float(t.nifty),
+        "leg_pnl": _safe_float(t.leg_pnl) if t.leg_pnl is not None else None,
+        "day_pnl": _safe_float(t.day_pnl),
+        "commission": _safe_float(t.commission_inr),
+        "note": t.note,
+    } for t in result.trades]
+    return {"run_id": run_id, "date": result.date, "fills": fills}
+
+
+# ── sweep leaderboard ──────────────────────────────────────────────────────────
+
+
+def build_sweep_doc(
+    sweep_id: str,
+    *,
+    kind: str,
+    window: dict[str, Any],
+    grid: dict[str, Any],
+    objective: str,
+    combos: list[dict[str, Any]],
+    base_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a `backtest_sweeps` leaderboard document.
+
+    *combos* is a list of ``{params, metrics}`` (unranked); this ranks by
+    ``(-profit_factor, -net)`` (matching ``backtest/run.py:print_table``) and
+    picks the top combo's ``params`` as ``best_param``.
+    """
+    def _rank_key(c: dict[str, Any]) -> tuple[float, float]:
+        pf = c["metrics"].get("profit_factor")
+        pf = pf if pf not in (None, float("inf")) else 1e9
+        net = c["metrics"].get("net") or 0.0
+        return (-pf, -net)
+
+    ranked = sorted(combos, key=_rank_key)
+    for i, c in enumerate(ranked, 1):
+        c["rank"] = i
+
+    return {
+        "sweep_id": sweep_id,
+        "kind": kind,
+        "window": window,
+        "grid": grid,
+        "objective": objective,
+        "base_config": base_config or {},
+        "combos": ranked,
+        "best_param": ranked[0]["params"] if ranked else None,
+        "created_at": datetime.now(UTC),
+    }
+
+
+# ── promotion rationale ─────────────────────────────────────────────────────────
+
+
+def build_promotion_doc(
+    run: dict[str, Any],
+    promote_result: dict[str, Any],
+    *,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Build a self-contained `backtest_promotions` evidence doc.
+
+    Snapshots the justifying evidence at promote time so the audit doc never needs to
+    join back to `backtest_runs`: stitched-OOS metrics, per-threshold PASS-vs-actual
+    breakdown, positive-fold fraction, source-run link, plus an optional operator note.
+    """
+    stitched_oos = run.get("stitched_oos") or {}
+    breakdown = verdict_breakdown(stitched_oos) if stitched_oos else None
+    return {
+        "run_id": run["run_id"],
+        "source_run_id": run["run_id"],
+        "strategy_id": promote_result["strategy_id"],
+        "yaml_path": promote_result["yaml_path"],
+        "verdict": run.get("verdict"),
+        "config": run.get("config", {}),
+        "stitched_oos": stitched_oos,
+        "verdict_breakdown": breakdown,
+        "note": note,
+        "promoted_at": datetime.now(UTC),
+    }
+
+
+def ship_promotion_event(doc: dict[str, Any]) -> None:
+    """Dual-sink a promotion doc to OpenSearch (no-op when indexer inactive)."""
+    _ship_backtest("promotion", doc)
+
+
+# ── decision trace (why entry / why exit) ──────────────────────────────────────
+
+# Closed vocabulary of top-level reason codes. `sub_reason` and `snapshot` stay
+# open maps so any strategy can emit the same shape.
+DECISION_EVENTS = ("st_flip", "entry", "scale_in", "rollup", "exit", "reentry")
+
+
+def build_decision_docs(
+    run_id: str,
+    strategy_id: str,
+    raw_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Shape raw decision events (as emitted by the sim) into `backtest_decisions` docs.
+
+    *raw_events* items: ``{ts_ist, date, event, sub_reason?, action, snapshot}``.
+    """
+    docs: list[dict[str, Any]] = []
+    for e in raw_events:
+        docs.append({
+            "run_id": run_id,
+            "strategy_id": strategy_id,
+            "ts_ist": e["ts_ist"],
+            "date": e["date"],
+            "event": e["event"],
+            "sub_reason": e.get("sub_reason"),
+            "action": e.get("action", ""),
+            "snapshot": e.get("snapshot", {}),
+        })
+    return docs
+
+
 # ── BacktestStore ─────────────────────────────────────────────────────────────
 
 
@@ -308,11 +511,15 @@ class BacktestStore:
         col_days: Any,
         col_folds: Any,
         col_trades: Any,
+        col_sweeps: Any | None = None,
+        col_decisions: Any | None = None,
     ) -> None:
         self._runs = col_runs
         self._days = col_days
         self._folds = col_folds
         self._trades = col_trades
+        self._sweeps = col_sweeps
+        self._decisions = col_decisions
 
     # -- upserts ---------------------------------------------------------------- #
 
@@ -358,6 +565,50 @@ class BacktestStore:
                 upsert=True,
             )
             _ship_backtest("trade", doc)
+        return len(docs)
+
+    def upsert_sweep(self, doc: dict[str, Any]) -> None:
+        if self._sweeps is None:
+            raise RuntimeError("BacktestStore was constructed without a sweeps collection")
+        self._sweeps.update_one(
+            {"sweep_id": doc["sweep_id"]},
+            {"$set": doc},
+            upsert=True,
+        )
+        log.info("backtest_sweep_upserted", sweep_id=doc["sweep_id"], combos=len(doc.get("combos", [])))
+        # Dual-sink each combo to OpenSearch's backtest-runs family, tagged with
+        # sweep_id/param_grid — the leaderboard above (not a backtest_runs Mongo doc
+        # per combo) stays the DB source of truth, but combos must still be queryable
+        # and rankable alongside single/walk-forward runs in the observability layer.
+        base_config = doc.get("base_config") or {}
+        for combo in doc.get("combos", []):
+            _ship_backtest("run", {
+                "run_id": f"{doc['sweep_id']}#rank{combo.get('rank')}",
+                "kind": "sweep_combo",
+                "strategy_id": "strangle",
+                "config": {**base_config, **combo.get("params", {})},
+                "window": doc.get("window", {}),
+                "metrics": combo.get("metrics", {}),
+                "verdict": None,
+                "promotion_state": "none",
+                "git_sha": None,
+                "created_at": doc.get("created_at"),
+                "sweep_id": doc["sweep_id"],
+                "param_grid": doc.get("grid", {}),
+            })
+
+    def upsert_decisions(self, docs: list[dict[str, Any]]) -> int:
+        if not docs:
+            return 0
+        if self._decisions is None:
+            raise RuntimeError("BacktestStore was constructed without a decisions collection")
+        for doc in docs:
+            self._decisions.update_one(
+                {"run_id": doc["run_id"], "ts_ist": doc["ts_ist"], "event": doc["event"]},
+                {"$set": doc},
+                upsert=True,
+            )
+            _ship_backtest("decision", doc)
         return len(docs)
 
     # -- high-level ingest ------------------------------------------------------ #

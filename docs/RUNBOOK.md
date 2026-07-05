@@ -129,6 +129,7 @@ task dev
 | DhanTickerAdapter (market feed) | `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` set |
 | DhanBroker (live orders) | `LIVE=1` + `BROKER=dhan` + creds set |
 | OptionsChainPoller | `OPTIONS_POLLER_ENABLED=true` (default) + creds set — paper-safe, no `LIVE=1` needed |
+| IntelPoller (dashboard's global-indices/news/sentiment/FII-DII feeds) | `INTEL_ENABLED=true` (default `false`) — degrades that source to `Stub`/`available:false` per-lib if `yfinance`/`nsepython`/`feedparser`/`vaderSentiment` isn't importable |
 
 ### Key environment flags
 
@@ -138,6 +139,8 @@ task dev
 | `LIVE=true` + `BROKER=dhan` | Routes orders to Dhan |
 | `DHAN_CLIENT_ID=<id>` | Enables market feed |
 | `LOG_LEVEL=DEBUG` | Verbose structlog output |
+| `INTEL_ENABLED=true` | Enables the dashboard's third-party feeds (global indices/news/sentiment/FII-DII) off-hot-path poller |
+| `MCX_GOLD_SECURITY_ID` / `_SILVER_` / `_CRUDE_` / `_NATGAS_` | MCX commodity security ids (empty = that commodity ships `available:false`) |
 
 ### API endpoints (quick ref)
 
@@ -149,13 +152,23 @@ GET  /api/v1/trades                   → today's trades
 GET  /api/v1/portfolio/summary        → MTM P&L summary
 GET  /api/v1/portfolio/positions      → open positions
 GET  /api/v1/strategies               → loaded strategy configs + status
+GET  /api/v1/dashboard                → composed dashboard: indices, global markets, commodities,
+                                         VIX, next-expiry, FII/DII, sentiment+news, portfolio,
+                                         today's P&L, margin, strategy chips — one call, each
+                                         section keyed `available`(+`as_of`)
+GET  /api/v1/intel/{global-indices,commodities,vix,next-expiry,news,sentiment}  → standalone
+                                         per-section reads (same cache the composed endpoint uses)
+GET  /api/v1/options/fii-dii[/history] → FII/DII net flow (today / last N days)
 POST /api/v1/orders                   → place order
 POST /risk/kill                       → manual kill-switch (flatten all)
 GET  /api/v1/options/NIFTY/chain      → chain [?expiry=YYYY-MM-DD]
+GET  /api/v1/coverage                 → data coverage per index/family [?underlying=NIFTY&from=2026-01-01&to=2026-06-30]
+POST /api/v1/housekeeping/{task}      → async job (backfill-spot/options/levels/vix, validate-warehouse, etc.) [?symbol=NIFTY]
 WS   /ws/market                       → tick stream
 WS   /ws/orders                       → fill events
 WS   /ws/portfolio                    → MTM P&L stream
 WS   /ws/options                      → option chain updates
+WS   /ws/jobs                         → housekeeping job progress
 ```
 
 Interactive docs: `http://localhost:8000/docs`
@@ -215,16 +228,19 @@ flutter test                 # widget/unit tests
 | `API_BASE` | `http://localhost:8000` | REST base (`/api/v1/...`) |
 | `WS_BASE` | `ws://localhost:8000` | WebSocket base (`/ws/...`) |
 | `USE_MOCK` | `false` | Simulated live data, zero backend |
+| `DASHBOARDS_BASE` | `http://localhost:5601` | OpenSearch Dashboards base, used by the backtest console's deep-links |
 
 ### Screens
 
 | Screen | Description |
 |--------|-------------|
+| Dashboard | Canonical home screen: NIFTY/BANKNIFTY/SENSEX index cards (vs-prev-close change + sparkline), global markets strip (Dow/Nasdaq/S&P/Nikkei/Hang Seng/FTSE via `yfinance`), MCX commodities strip (gold/crude/natgas/silver via the Dhan feed), India VIX gauge, FII/DII panel (yesterday + 7-day, via `nsepython`), blended sentiment gauge + news feed (`feedparser`/`vaderSentiment` + VIX/PCR internals), next-expiry chips, portfolio snapshot + today's P&L + margin, strategy-status chips, editable watchlist — single `GET /api/v1/dashboard` seed + existing `/ws/market`+`/ws/portfolio` sockets for live deltas |
 | Portfolio | Live MTM P&L summary + positions list + P&L chart (REST snapshot + `/ws/portfolio`) |
+| Backtest console | Run history/leaderboard, run-detail (equity+drawdown, days, trades, decision trace, walk-forward folds), few-clicks launch flow, data-coverage/gap-radar panel, promotion rationale, backtest-vs-paper comparison, CSV/JSON export, OpenSearch dashboard links |
 
-> The first build ships the app shell + the Portfolio vertical slice. Further screens
-> (orders, analytics, backtest console, events, alerts) land as separate OpenSpec changes,
-> each reusing the shell + data/provider pattern.
+> The first build ships the app shell + the Portfolio vertical slice; the backtest console and the
+> Dashboard followed. Further screens (orders, analytics, events, alerts) land as separate OpenSpec
+> changes, each reusing the shell + data/provider pattern.
 
 ---
 
@@ -269,6 +285,22 @@ flutter test                 # widget/unit tests
 3. Implement class at `backend/pdp/strategies/my_strategy.py` (extends `pdp.strategy.abc.BaseStrategy`).
 
 4. Restart API — `StrategyHost` auto-loads all `*.yaml`.
+
+The flow above is for a **new live strategy engine** (new Python class). To register a new
+**param variant of an existing engine** (`strangle` or `supertrend`) for backtesting — no code
+change, no restart — use `/strategy:add` instead (`strategy-registry-unification`, archived
+2026-07-04): `POST /api/v1/strategies/register {strategy_id, kind, params}` writes a
+`backend/backtest/configs/<id>.yaml` and it's immediately visible in `GET /api/v1/strategies`
+and launchable via `/backtest:run`.
+
+### `GET /api/v1/strategies` — unified registry listing
+
+Lists every strategy across the live `strategies/*.yaml` configs (with running status) and the
+backtest `backtest/configs/*.yaml` configs (unrun ones get `status: "BACKTEST_ONLY"`). Each entry
+carries `id` (canonical id), `kind` (`strangle`/`supertrend`), `underlying`, `source`
+(`live`/`backtest`), `params_schema` (name/type/default/bounds), and `defaults` (ready to use as
+a `POST /runs` body). Backed by `pdp.strategy.unified_registry`; see
+`openspec/specs/strategy-registry/spec.md`.
 
 ### Strategy YAML params reference
 
@@ -346,15 +378,17 @@ Grid axes (`backtest/run.py` defaults when axis is omitted):
 - `--tf` — timeframe minutes, comma-separated (default: `3,5,15,30,60`)
 - `--moneyness` — `+N` OTM / `0` ATM / `−N` ITM (default: `3,2,1,0,-1,-2,-3`)
 
-### Backtest compare (single day vs paper journal)
+### Backtest vs paper comparison
 
-```powershell
-# Default: today's IST date
-task backtest:compare
+The single-day, SuperTrend-only `backtest:compare` CLI is retired. Compare any warehoused
+run against its live paper results via the generic API (any strategy, any window):
 
-# Specific date
-task backtest:compare -- --date 2026-06-10
 ```
+GET /api/v1/strangle-backtests/runs/{run_id}/vs-paper                       # per-day P&L alignment
+GET /api/v1/strangle-backtests/runs/{run_id}/vs-paper?date=2026-07-01&granularity=minute  # decision diff
+```
+
+Or interactively via the `/backtest:vs-paper` skill.
 
 > **Data prerequisite**: Run spot + options backfill first (see §9) to avoid `[DATA INCOMPLETE]` days.
 
@@ -1239,23 +1273,35 @@ all_legs_closed            — squareoff or full close
 
 ### 17.4 Backtest commands
 
+Since `backtest-results-warehouse` (archived 2026-07-04), backtests are **DB-first**: results
+persist to MongoDB by default (`backtest_runs`/`backtest_days`/`backtest_trades`/`backtest_decisions`)
+and logs route to OpenSearch — no local `backtest/runs/` folder is written unless you explicitly
+pass `--out-dir` for one-off manual inspection. Prefer the skills (`/backtest:run`, `/backtest:sweep`,
+`/backtest:promote`, `/backtest:explain`) over raw CLI for day-to-day use.
+
 ```powershell
-# Quick 30-day run (canonical config)
+# Quick 30-day run (canonical config) — persists to Mongo, no local files
 task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --days 30
 
 # 2026 YTD
-task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2026-01-01 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2026-01-01
 
 # Full 5-year (takes ~12 min)
-task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25 --out-dir backtest/runs
+task backtest:strangle -- --config-file backtest/configs/strangle_nifty_hedged.yaml --from 2021-09-01 --to 2026-06-25
 
-# Trace mode (every-minute status.log per day)
-task backtest:strangle -- --from 2026-06-20 --days 3 --trace
+# Opt out of Mongo, archive locally instead (legacy/manual inspection only)
+task backtest:strangle -- --from 2026-06-20 --days 3 --no-mongo --out-dir backtest/runs --trace
 ```
 
 ### 17.5 Reading the outputs
 
-Each run in `backtest/runs/<run_id>/` contains:
+**DB-first (default)**: query via `/api/v1/strangle-backtests` or the skills — run detail, equity/day
+series, trades, walk-forward folds, sweep leaderboard, and the every-minute decision trace
+(`/backtest:explain`, or `GET /runs/{id}/decisions?date=&full=`) are all served from Mongo. Promotion
+rationale (stitched-OOS metrics, per-threshold PASS/actual, operator note) is at
+`GET /runs/{id}/promotion`.
+
+**Legacy local mode** (`--out-dir` explicitly passed): each run in `backtest/runs/<run_id>/` contains:
 
 | File | Contents |
 |------|---------|
@@ -1265,6 +1311,10 @@ Each run in `backtest/runs/<run_id>/` contains:
 | `days/<date>/status.log` | Every-minute BarStatus: score, votes, legs, actions |
 | `days/<date>/trades.csv` | Every fill: time, side, strike, qty, price, leg/day P&L |
 | `days/<date>/legs.csv` | Closed-leg records: entry/exit/lots/pnl/reason |
+
+Legacy local runs are migrated into the warehouse via `/backtest:ingest` (or
+`scripts/ingest_backtest_run.py --bulk-dir backtest/runs --remove`), which verifies each run landed in
+Mongo before deleting its local folder — never removes an unverified run.
 
 ### 17.6 Data prerequisites for backtest
 
@@ -1732,15 +1782,18 @@ task search:init
 | `pdp-strangle-events-*` | strategy | Per-bar events: bias evaluations, leg open/close/stop |
 | `pdp-trades-*` | journal | Individual fills / order executions |
 | `pdp-journal-*` | journal | Daily stats: realized P&L, win/loss counts, premium sold/bought |
-| `pdp-backtest-runs-*` | backtest | Per-run metrics (net, PF, Sharpe, MaxDD, verdict) |
+| `pdp-backtest-runs-*` | backtest | Per-run metrics (net, PF, Sharpe, MaxDD, verdict); sweep combos carry `sweep_id`/`param_grid` |
 | `pdp-backtest-days-*` | backtest | Per-day equity curve within a run |
 | `pdp-backtest-trades-*` | backtest | Simulated fills inside a backtest |
+| `pdp-backtest-decisions-*` | backtest | Why-entry/why-exit decision events (reason codes: `st_flip`, `entry`, `scale_in`, `rollup`, `exit`, `reentry`) |
+| `pdp-backtest-promotions-*` | backtest | Promotion events: stitched-OOS metrics + per-threshold PASS/actual breakdown |
+| `pdp-data-coverage-*` | warehouse | Market-data coverage snapshots per index/family: gaps, coverage %, min/max dates |
 
 All indices are monthly date-suffixed (`pdp-logs-2026.06`) and use `dynamic: false` mappings.
 
 ### 18.4 Dashboards
 
-Open `http://localhost:5601` after `task search:up && task search:init`. Eight dashboards
+Open `http://localhost:5601` after `task search:up && task search:init`. Nine dashboards
 are pre-imported:
 
 | # | Dashboard | Key question |
@@ -1753,6 +1806,7 @@ are pre-imported:
 | 6 | Bias Effectiveness | Is the bucket signal actually predictive? |
 | 7 | Live ↔ Backtest Parity | Does live performance match backtest expectations? |
 | 8 | UI Health | Are there Flutter errors spiking on a specific screen? |
+| 9 | Data Coverage | Which market-data families are complete/gapped per index/date? |
 
 ### 18.5 Claude session review
 

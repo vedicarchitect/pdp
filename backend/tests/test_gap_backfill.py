@@ -10,6 +10,7 @@ from datetime import date, datetime
 import pdp.options.gap_backfill as gb
 from pdp.options.gap_backfill import (
     backfill_gaps,
+    collapse_date_ranges,
     days_missing,
     expected_contracts,
     labels,
@@ -75,6 +76,20 @@ def test_backfill_gaps_only_targets_missing_days(monkeypatch):
     assert summary["gaps"] == 2
     assert summary["days_filled"] == 2
     assert summary["total_inserted"] == 10
+
+
+def test_collapse_date_ranges_merges_consecutive_and_near_gaps():
+    days = [
+        date(2026, 4, 6), date(2026, 4, 7),  # consecutive -> one range
+        date(2026, 4, 20),                    # isolated
+        date(2026, 4, 22), date(2026, 4, 23),  # within 3 days of 4/20 and each other -> merges in
+    ]
+    ranges = collapse_date_ranges(days)
+    assert ranges == ["2026-04-06..2026-04-07", "2026-04-20..2026-04-23"]
+
+
+def test_collapse_date_ranges_empty():
+    assert collapse_date_ranges([]) == []
 
 
 def test_backfill_gaps_only_missing_false_scans_all(monkeypatch):

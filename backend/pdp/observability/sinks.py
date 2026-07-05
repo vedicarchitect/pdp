@@ -16,6 +16,9 @@ JOURNAL = "journal"
 BACKTEST_RUNS = "backtest-runs"
 BACKTEST_DAYS = "backtest-days"
 BACKTEST_TRADES = "backtest-trades"
+BACKTEST_DECISIONS = "backtest-decisions"
+BACKTEST_PROMOTIONS = "backtest-promotions"
+DATA_COVERAGE = "data-coverage"
 
 _EVENT_FIELDS = (
     "event_type", "strategy_id", "account_id", "snapshot_date", "ist_time",
@@ -86,6 +89,8 @@ def backtest_run_doc(run: dict[str, Any]) -> tuple[dict[str, Any], str]:
         "git_sha": run.get("git_sha"),
         "created_at": created_iso,
         "config": run.get("config"),
+        "sweep_id": run.get("sweep_id"),
+        "param_grid": run.get("param_grid"),
     }
     return doc, str(run.get("run_id"))
 
@@ -98,6 +103,52 @@ def backtest_day_doc(day: dict[str, Any]) -> tuple[dict[str, Any], str]:
 def backtest_trade_doc(trade: dict[str, Any]) -> tuple[dict[str, Any], str]:
     doc = {"@timestamp": trade.get("date"), **trade}
     return doc, f"{trade.get('run_id')}:{trade.get('date')}"
+
+
+def backtest_decision_doc(event: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Map a `build_decision_docs` result → backtest-decisions doc + id."""
+    ts_ist = event.get("ts_ist")
+    ts_iso = ts_ist.isoformat() if hasattr(ts_ist, "isoformat") else ts_ist
+    doc = {"@timestamp": ts_iso, **event, "ts_ist": ts_iso}
+    return doc, f"{event.get('run_id')}:{ts_iso}:{event.get('event')}"
+
+
+def backtest_promotion_doc(promo: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Map a `build_promotion_doc` result → backtest-promotions doc + id (run_id)."""
+    promoted_at = promo.get("promoted_at")
+    promoted_iso = promoted_at.isoformat() if hasattr(promoted_at, "isoformat") else promoted_at
+    doc = {
+        "@timestamp": promoted_iso,
+        "run_id": promo.get("run_id"),
+        "source_run_id": promo.get("source_run_id"),
+        "strategy_id": promo.get("strategy_id"),
+        "verdict": promo.get("verdict"),
+        "yaml_path": promo.get("yaml_path"),
+        "note": promo.get("note"),
+        "promoted_at": promoted_iso,
+        "stitched_oos": promo.get("stitched_oos"),
+        "verdict_breakdown": promo.get("verdict_breakdown"),
+    }
+    return doc, str(promo.get("run_id"))
+
+
+def data_coverage_doc(underlying: str, family: str, summary: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Map one (underlying, family) coverage summary (from `pdp.warehouse.coverage`) → a
+    `data-coverage` doc + id. One doc per (underlying, family, snapshot day)."""
+    now = datetime.now(UTC)
+    doc = {
+        "@timestamp": now.isoformat(),
+        "underlying": underlying,
+        "family": family,
+        "min_date": summary.get("min_date"),
+        "max_date": summary.get("max_date"),
+        "covered_days": _int(summary.get("covered_days")),
+        "total_days": _int(summary.get("total_days")),
+        "coverage_pct": _float(summary.get("coverage_pct")),
+        "gap_days": _int(summary.get("total_days")) - _int(summary.get("covered_days")),
+        "gap_ranges": summary.get("gap_ranges") or [],
+    }
+    return doc, f"{underlying}:{family}:{now.date().isoformat()}"
 
 
 def _float(v: Any) -> float | None:

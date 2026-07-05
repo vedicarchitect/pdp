@@ -70,7 +70,6 @@ task audit:coverage      Audit option_bars coverage by date+strike
 task validate:warehouse  Validate warehouse integrity
 task validate:migration  Verify Abi → MongoDB migration
 
-task backtest:compare    Backtest vs paper journal (single day)
 task backtest:sweep      Multi-config parameter sweep
 
 task openspec:list       List all changes
@@ -82,7 +81,6 @@ task openspec:archive    Archive a completed change
 Pass args to parameterised tasks with `--`:
 ```powershell
 task backfill:nifty -- --from 2026-02-09 --to 2026-06-12 --only-missing
-task backtest:compare -- --date 2026-06-10
 task openspec:validate -- configurable-strategy-backtest-sweep --strict
 ```
 
@@ -99,7 +97,7 @@ PDP/
 │   ├── pdp/                    #   package (import pdp.*): main.py, settings.py, market/,
 │   │                          #   orders/, strategy/, signals/, indicators/, options/,
 │   │                          #   warehouse/, portfolio/, journal/, risk/, alerts/, db/, …
-│   ├── backtest/              #   run.py · strangle_run.py · compare.py · configs/*.yaml
+│   ├── backtest/              #   run.py · strangle_run.py · configs/*.yaml
 │   ├── strategies/            #   strategy YAML configs (auto-loaded)
 │   ├── scripts/               #   ops scripts (scripts/oneoff/ = run-once)
 │   ├── tests/  alembic/  alembic.ini  data/

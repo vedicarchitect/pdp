@@ -24,7 +24,7 @@ See [README.md](README.md) for full arg reference.
 | `task oi:track` | `expiry_analysis.py --track` | OI snapshot tracker, ATM±N vs morning baseline → JSONL (always) + Mongo `oi_snapshots` TS + Redis `oi:{sym}`/`oi.events.{sym}`. `--strikes --interval --event-threshold-pct --store mongo,redis\|none` |
 | `task monitor` | `monitor.pl` | Perl live monitor (read-only Redis+API) |
 | `task reset-paper` | `reset_paper.py` | ⚠️ Clears paper orders/trades/positions from PG |
-| `task backtest:ingest` | `ingest_backtest_run.py` | Ingest a `backtest/runs/<id>/` folder into the Mongo backtest warehouse. `--run-dir` or `--wf-csv + --run-id` |
+| `task backtest:ingest` | `ingest_backtest_run.py` | Ingest a `backtest/runs/<id>/` folder into the Mongo backtest warehouse. `--run-dir` or `--wf-csv + --run-id`; `--bulk-dir backtest/runs [--remove]` ingests every folder, verifies each against Mongo, and only removes local folders confirmed present |
 
 ## Data pipeline order
 
@@ -36,4 +36,6 @@ See [README.md](README.md) for full arg reference.
 ## Archive
 
 `archive/` — archived scripts. Do not use as templates.
-Backtest runners moved to `backtest/` (repo root): use `task backtest` / `task backtest:sweep` / `task backtest:compare`.
+Backtest runners moved to `backtest/` (repo root): use `task backtest` / `task backtest:sweep`. Backtest-vs-paper
+comparison is now `GET /api/v1/strangle-backtests/runs/{id}/vs-paper` (or the `/backtest:vs-paper` skill), not a
+Taskfile task — the old single-day `backtest:compare` CLI is retired.

@@ -244,12 +244,6 @@ tasks:
 
   # ── Backtest utilities ───────────────────────────────────────────────────────
 
-  backtest:compare:
-    desc: "Backtest vs paper journal for a date. Args: -- [--date YYYY-MM-DD]"
-    dir: backend
-    cmds:
-      - uv run python backtest/compare.py {{.CLI_ARGS}}
-
   backtest:strangle:
     desc: "Directional-strangle backtest. Args: -- [--config-file PATH] [--days N | --from --to] [--hedge/--no-hedge] [--trace] [--out-dir backtest/runs] [--vix-sid 21]"
     dir: backend

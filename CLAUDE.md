@@ -44,11 +44,33 @@ Each dev activity loads **only** the files it needs:
 
 Foundation **1** `repo-restructure-and-claude-arch` (✓ done). Then:
 **2** `broker-account-sync` (✓ done) · **3** `broker-reports-vault` · **4** `strangle-execution-console` (42/43 — owner paper-run pending) ·
-**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) · **6** `flutter-dashboard` · **7** `flutter-screener` ·
-**8** `flutter-backtest-console` · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
+**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) ·
+**6** `flutter-dashboard` (✓ done, archived 2026-07-05 — canonical home screen: indices w/ vs-prev-close
+change math + sparkline, global markets via yfinance, MCX commodities via Dhan feed, India VIX,
+FII/DII via nsepython, blended sentiment (news+internals) via feedparser/vaderSentiment, portfolio
+snapshot, strategy chips, editable watchlist w/ live-quote resolution; single composed
+`GET /api/v1/dashboard` + existing WS sockets; new `dashboard-market-feeds` capability) · **7** `flutter-screener` ·
+**8** `flutter-backtest-console` (✓ done, archived 2026-07-04 — see Backtest console program below) · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
 **11** `flutter-portfolio-advisory` · **12** `flutter-market-intel` · **13** `flutter-event-feed` ·
 **14** `flutter-management-hub` · **15** `multi-broker-kite` · **16** `cloud-deploy-aws`.
 In-flight strangle work: `live-directional-strangle-paper`. `backtest-multi-index-strangle` ✓ done — BANKNIFTY +₹35.1L PF 4.89, SENSEX +₹24.7L PF 6.21 (3yr), archived 2026-06-29.
+
+### Backtest console program (5 changes, backend-first) — ✓ all done
+
+Made the backtest console enterprise-grade + DB-first (no local result files). Order:
+**1** `backtest-results-warehouse` (✓ done, archived 2026-07-04 — real sweeps+leaderboard, strategy-agnostic
+decision-trace, promotion evidence snapshot, DB-first cutover, legacy runs ingested) · **2** `market-data-coverage`
+(✓ done, archived 2026-07-04 — per-index/family coverage API, gap radar, delta-fill jobs, multi-index self-heal, OpenSearch dashboard) ·
+**3** `backtest-paper-comparison` (✓ done, archived 2026-07-04 — per-strategy paper P&L from the PG ledger,
+`GET /runs/{id}/vs-paper` day+minute alignment, gap-radar divergence root-causing, ST-only `compare.py` retired) ·
+**4** `strategy-registry-unification` (✓ done, archived 2026-07-04 — canonical-id registry spanning live
+`strategies/*.yaml` + backtest `backtest/configs/*.yaml`, `GET /api/v1/strategies` with editable param
+schema, `POST /register`, `canonical_id()` wired into run identity + vs-paper; `/strategy:add` skill) ·
+**5** `flutter-backtest-console` (✓ done, archived 2026-07-04 — Flutter console rebuilt to house
+convention: run history/leaderboard, run-detail drill-downs incl. decision trace + walk-forward folds,
+schema-driven launch flow, coverage/gap-radar panel, promotion rationale, backtest-vs-paper view,
+CSV/JSON export, OpenSearch dashboard links; `flutter analyze && flutter test` green). See
+`openspec/changes/archive/2026-07-04-<id>/` for each.
 
 ## Key Commands (run from repo root)
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, date, datetime
 from typing import Any
 
 import msgspec
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from pdp.strategy import unified_registry
 from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost
 from pdp.strategy.schemas import strategy_info_from_dict
 
@@ -51,9 +53,58 @@ def _serialise(obj: Any) -> Any:
 
 @router.get("")
 async def list_strategies(request: Request) -> JSONResponse:
+    """List every registered strategy — live-host state merged with the unified registry.
+
+    Each entry carries the canonical id, engine/kind, underlying, and editable param schema
+    (name/type/default/bounds) from `pdp.strategy.unified_registry`, plus live-host status for
+    strategies that also have a `strategies/*.yaml` config. Backtest-only strategies (no live
+    counterpart) get `status: "BACKTEST_ONLY"`.
+    """
     host = _host(request)
-    items = [strategy_info_from_dict(d) for d in host.list_all()]
-    return JSONResponse(content={"strategies": msgspec.to_builtins(items)})
+    live_by_id = {d["id"]: d for d in host.list_all()}
+    strategies: list[dict[str, Any]] = []
+    for entry in unified_registry.load_all(strategies_dir=host.strategies_dir):
+        live = live_by_id.get(entry.id)
+        strategies.append({
+            "id": entry.id,
+            "kind": entry.kind,
+            "underlying": entry.underlying,
+            "source": entry.source,
+            "status": str(live["status"]) if live else "BACKTEST_ONLY",
+            "dropped_ticks": live["dropped_ticks"] if live else 0,
+            "watchlist": live["watchlist"] if live else [],
+            "params_schema": [dataclasses.asdict(p) for p in entry.params_schema],
+            "defaults": entry.defaults,
+        })
+    return JSONResponse(content={"strategies": strategies})
+
+
+class RegisterStrategyRequest(BaseModel):
+    strategy_id: str
+    kind: str  # "strangle" | "supertrend"
+    params: dict[str, Any]
+
+
+@router.post("/register")
+async def register_strategy(body: RegisterStrategyRequest) -> JSONResponse:
+    """Register a new strategy config, immediately visible in `GET /api/v1/strategies` and
+    usable as a `POST /api/v1/strangle-backtests/runs` launch target — no code change needed.
+    """
+    try:
+        entry = unified_registry.register_strategy(body.strategy_id, body.kind, body.params)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return JSONResponse(status_code=201, content={
+        "id": entry.id,
+        "kind": entry.kind,
+        "underlying": entry.underlying,
+        "source": entry.source,
+        "params_schema": [dataclasses.asdict(p) for p in entry.params_schema],
+        "defaults": entry.defaults,
+    })
 
 
 @router.post("/{strategy_id}/start")

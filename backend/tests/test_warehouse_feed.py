@@ -289,6 +289,58 @@ def test_banknifty_option_bar_routes_to_banknifty_writer() -> None:
     assert len(nifty_opt_col.bulk_write_calls) == 0  # not cross-contaminated
 
 
+def _make_service(tmp_path, underlyings: list[str], *, existing_paths: set[str]):
+    """Build a WarehouseService offline (no Dhan/Mongo I/O touched by __init__)."""
+    import pdp.warehouse.service as service_mod
+
+    path_settings = {
+        "NIFTY": "EXPIRY_CACHE_PATH",
+        "BANKNIFTY": "BANKNIFTY_EXPIRY_CACHE_PATH",
+        "SENSEX": "SENSEX_EXPIRY_CACHE_PATH",
+    }
+    fake_settings = MagicMock()
+    fake_settings.WAREHOUSE_UNDERLYINGS = underlyings
+    fake_settings.DHAN_CLIENT_ID = "x"
+    fake_settings.DHAN_ACCESS_TOKEN = "x"
+    fake_settings.WAREHOUSE_GAP_LOOKBACK_DAYS = 30
+    fake_settings.WAREHOUSE_STRIKE_BAND = 10
+
+    for name, attr in path_settings.items():
+        p = tmp_path / f"{name.lower()}_expiries.json"
+        if name in existing_paths:
+            p.write_text("{}")
+        setattr(fake_settings, attr, str(p))
+
+    fake_mongo_db = MagicMock()
+    fake_mongo_db.__getitem__ = MagicMock(return_value=MagicMock())
+    fake_session_maker = MagicMock()
+
+    return service_mod.WarehouseService(
+        settings=fake_settings, mongo_db=fake_mongo_db, session_maker=fake_session_maker
+    )
+
+
+def test_run_gap_backfill_heals_every_underlying_with_expiry_cache(tmp_path, monkeypatch) -> None:
+    """5.1/5.2: every configured underlying with a present expiry cache is backfilled; only a
+    missing cache is skipped (with a warning naming the file), not a non-NIFTY name."""
+    import pdp.options.gap_backfill as gap_backfill_mod
+
+    svc = _make_service(tmp_path, ["NIFTY", "BANKNIFTY", "SENSEX"], existing_paths={"NIFTY", "BANKNIFTY"})
+
+    calls: list[str] = []
+
+    def _fake_run_gap_backfill(*, underlying, **_kwargs):
+        calls.append(underlying)
+        return {"scanned": 0, "gaps": 0, "days_filled": 0, "total_inserted": 0, "gap_days": []}
+
+    monkeypatch.setattr(gap_backfill_mod, "run_gap_backfill", _fake_run_gap_backfill)
+
+    asyncio.run(svc._run_gap_backfill())
+
+    # NIFTY + BANKNIFTY have caches -> healed. SENSEX's cache is missing -> skipped, not healed.
+    assert set(calls) == {"NIFTY", "BANKNIFTY"}
+
+
 def test_unsupported_underlying_raises_value_error_at_startup() -> None:
     """WarehouseService raises ValueError for unrecognised underlyings before any I/O."""
     from pdp.warehouse.service import WarehouseService

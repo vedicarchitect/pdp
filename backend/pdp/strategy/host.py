@@ -130,6 +130,10 @@ class StrategyHost:
         """Wire the OptionsHub so strategies can read live PCR via ctx.chain_hub."""
         self._options_hub = hub
 
+    @property
+    def strategies_dir(self) -> Path:
+        return self._strategies_dir
+
     # ------------------------------------------------------------------ #
     # Registry                                                             #
     # ------------------------------------------------------------------ #
