@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI):
 
     ws_hub = WSHub()
     app.state.ws_hub = ws_hub
+    ws_hub_task = asyncio.create_task(ws_hub.run_broadcast_loop(), name="ws-hub-broadcast")
     orders_hub = OrdersHub()
     app.state.orders_hub = orders_hub
     options_hub = OptionsHub()
@@ -584,6 +585,8 @@ async def lifespan(app: FastAPI):
         if dhan_broker is not None:
             await dhan_broker.stop()
         await paper_broker.stop()
+        ws_hub.stop()
+        ws_hub_task.cancel()
         if app.state.opensearch_indexer is not None:
             from pdp.observability import close_opensearch, set_active_indexer
 
