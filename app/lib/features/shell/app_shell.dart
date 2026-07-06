@@ -103,6 +103,7 @@ class AppShell extends ConsumerWidget {
           Builder(
             builder: (context) => IconButton(
               icon: const Icon(Icons.notifications_outlined),
+              tooltip: 'Notifications',
               onPressed: () => Scaffold.of(context).openEndDrawer(),
             ),
           ),

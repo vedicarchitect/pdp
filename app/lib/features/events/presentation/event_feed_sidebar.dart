@@ -35,6 +35,7 @@ class EventFeedSidebar extends ConsumerWidget {
                 const Spacer(),
                 IconButton(
                   icon: const Icon(Icons.settings, color: AppColors.textMuted, size: 20),
+                  tooltip: 'Event feed settings',
                   onPressed: () {
                     showDialog(
                       context: context,

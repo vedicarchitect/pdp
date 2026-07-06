@@ -587,6 +587,7 @@ class _WatchlistSectionState extends ConsumerState<_WatchlistSection> {
             ),
             IconButton(
               icon: const Icon(Icons.add, color: AppColors.info),
+              tooltip: 'Add symbol to watchlist',
               onPressed: () {
                 ref.read(watchlistProvider.notifier).add(_controller.text);
                 _controller.clear();
