@@ -17,6 +17,7 @@ class ScreenerScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh screener results',
             onPressed: () => ref.invalidate(screenerResultsProvider),
           ),
           const SizedBox(width: 8),
