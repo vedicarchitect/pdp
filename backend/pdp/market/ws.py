@@ -55,6 +55,50 @@ class WSHub:
 
     def __init__(self) -> None:
         self._clients: set[_Client] = set()
+        self._dirty_ticks: dict[str, Tick] = {}
+        self._needs_broadcast: bool = False
+        self._stop_event = asyncio.Event()
+
+    async def run_broadcast_loop(self) -> None:
+        """Broadcast latest ticks every 100ms to debounce high-frequency updates."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            if self._stop_event.is_set():
+                break
+            self.flush()
+
+    def flush(self) -> None:
+        """Flush batched ticks to connected clients."""
+        if not self._needs_broadcast:
+            return
+        self._needs_broadcast = False
+        dirty = self._dirty_ticks
+        self._dirty_ticks = {}
+        if not self._clients or not dirty:
+            return
+
+        now = time.time()
+        for tick in dirty.values():
+            payload = json.dumps(
+                {
+                    "type": "tick",
+                    "security_id": tick.security_id,
+                    "ltp": str(tick.ltp),
+                    "ltt": tick.ltt.isoformat(),
+                    "volume": tick.volume,
+                    "ts": now,
+                }
+            )
+            for client in self._clients:
+                if tick.security_id in client.security_ids:
+                    client.push(payload)
+
+    def stop(self) -> None:
+        """Signal the broadcast loop to stop."""
+        self._stop_event.set()
 
     def _add(self, client: _Client) -> None:
         self._clients.add(client)
@@ -67,19 +111,8 @@ class WSHub:
     def publish_tick(self, tick: Tick) -> None:
         if not self._clients:
             return
-        payload = json.dumps(
-            {
-                "type": "tick",
-                "security_id": tick.security_id,
-                "ltp": str(tick.ltp),
-                "ltt": tick.ltt.isoformat(),
-                "volume": tick.volume,
-                "ts": time.time(),
-            }
-        )
-        for client in self._clients:
-            if tick.security_id in client.security_ids:
-                client.push(payload)
+        self._dirty_ticks[tick.security_id] = tick
+        self._needs_broadcast = True
 
     def publish_bar(self, bar: BarClosed) -> None:
         if not self._clients:

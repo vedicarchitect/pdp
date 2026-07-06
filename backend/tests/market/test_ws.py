@@ -60,6 +60,7 @@ class TestWSHub:
         hub._clients.add(client)
 
         hub.publish_tick(_tick("13"))
+        hub.flush()
         assert client.queue.qsize() == 1
 
     def test_publish_tick_skips_unsubscribed_client(self) -> None:
@@ -69,6 +70,7 @@ class TestWSHub:
         hub._clients.add(client)
 
         hub.publish_tick(_tick("13"))
+        hub.flush()
         assert client.queue.empty()
 
     def test_publish_bar_delivers_matching_timeframe(self) -> None:
@@ -92,18 +94,15 @@ class TestWSHub:
         assert client.queue.empty()
 
     def test_drop_oldest_when_queue_full(self) -> None:
-        hub = WSHub()
         client = _make_client()
-        client.security_ids = {"13"}
-        hub._clients.add(client)
 
         # Fill queue to max
         for _ in range(_CLIENT_QUEUE_SIZE):
-            hub.publish_tick(_tick("13"))
+            client.push("tick")
         assert client.queue.full()
 
         # One more — should drop oldest, queue stays at max
-        hub.publish_tick(_tick("13"))
+        client.push("tick2")
         assert client.queue.qsize() == _CLIENT_QUEUE_SIZE
 
     @pytest.mark.asyncio
