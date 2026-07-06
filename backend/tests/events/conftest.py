@@ -58,6 +58,7 @@ def make_ctx(
     supertrend=None,
     ml_signal=None,
     oi_levels=(),
+    warehouse_levels=(),
     bar_time: datetime | None = None,
 ) -> BarContext:
     return BarContext(
@@ -65,7 +66,7 @@ def make_ctx(
         open=o, high=h, low=low, close=c, volume=volume,
         bar_time=bar_time or datetime(2026, 6, 17, 5, 0, tzinfo=UTC),
         snapshot=snapshot, supertrend=supertrend, ml_signal=ml_signal,
-        cfg=cfg, oi_levels=list(oi_levels),
+        cfg=cfg, oi_levels=list(oi_levels), warehouse_levels=list(warehouse_levels),
     )
 
 

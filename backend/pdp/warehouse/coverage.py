@@ -186,6 +186,59 @@ def _futures_family(days: list[date]) -> tuple[dict[str, Any], set[date]]:
     return summary, set(days)
 
 
+async def per_expiry_coverage(
+    mongo_db: AsyncIOMotorDatabase,
+    underlying: str,
+    *,
+    window_from: date,
+    window_to: date,
+    min_strikes_complete: int = 1,
+) -> list[dict[str, Any]]:
+    """Per-``(underlying, expiry_date)`` option-chain coverage within the window.
+
+    Groups ``option_bars`` by ``expiry_date`` and reports, for each expiry that has any stored
+    chain, the distinct-strike count, CE/PE contract counts, the trade-day span covered, and a
+    ``status`` of ``complete`` vs ``partial``. An expiry claimed upstream but with **no** stored
+    chain never appears here — so a caller comparing this list against the claimed/upcoming
+    expiries can flag a phantom expiry (claimed, absent) or a partial chain (present, thin).
+    """
+    lo, _ = _day_bounds(window_from)
+    _, hi = _day_bounds(window_to)
+    col = mongo_db["option_bars"]
+    pipeline: list[dict[str, Any]] = [
+        {"$match": {"underlying": underlying, "timeframe": "1m", "ts": {"$gte": lo, "$lt": hi}}},
+        {"$group": {
+            "_id": "$expiry_date",
+            "strikes": {"$addToSet": "$strike"},
+            "ce": {"$addToSet": {"$cond": [{"$eq": ["$option_type", "CE"]}, "$strike", "$$REMOVE"]}},
+            "pe": {"$addToSet": {"$cond": [{"$eq": ["$option_type", "PE"]}, "$strike", "$$REMOVE"]}},
+            "first_ts": {"$min": "$ts"},
+            "last_ts": {"$max": "$ts"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    out: list[dict[str, Any]] = []
+    async for doc in col.aggregate(pipeline):
+        expiry = doc["_id"]
+        n_strikes = len(doc.get("strikes") or [])
+        n_ce = len(doc.get("ce") or [])
+        n_pe = len(doc.get("pe") or [])
+        # "complete" = both sides present with enough strikes; else partial. A stricter
+        # expected-strike-band check can layer on top, but presence of both legs across the
+        # band is the primary "is there a usable chain" signal.
+        complete = n_ce >= min_strikes_complete and n_pe >= min_strikes_complete and n_ce == n_pe
+        out.append({
+            "expiry_date": str(expiry),
+            "strikes": n_strikes,
+            "ce_contracts": n_ce,
+            "pe_contracts": n_pe,
+            "first_ts": doc["first_ts"].isoformat() if doc.get("first_ts") else None,
+            "last_ts": doc["last_ts"].isoformat() if doc.get("last_ts") else None,
+            "status": "complete" if complete else "partial",
+        })
+    return out
+
+
 async def underlying_coverage(
     mongo_db: AsyncIOMotorDatabase,
     settings: Any,
@@ -215,6 +268,10 @@ async def underlying_coverage(
         levels_weekly=camarilla_gaps, futures=futures_gaps,
     )
 
+    by_expiry = await per_expiry_coverage(
+        mongo_db, underlying, window_from=window_from, window_to=window_to
+    )
+
     return {
         "underlying": underlying,
         "window": {"from": str(window_from), "to": str(window_to)},
@@ -226,6 +283,7 @@ async def underlying_coverage(
             "levels_weekly": levels_weekly_summary,
             "futures": futures_summary,
         },
+        "by_expiry": by_expiry,
         "radar": radar_window(gaps, days),
     }
 

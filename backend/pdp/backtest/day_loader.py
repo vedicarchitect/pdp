@@ -15,10 +15,10 @@ from pdp.backtest.chain_loader import load_expiry_chain
 from pdp.backtest.completeness import spot_completeness
 from pdp.backtest.resample import resample_ohlcv
 from pdp.backtest.sim import DayData
+from pdp.instruments.expiry_calendar import nearest_real_expiry, real_expiries_from_option_bars
 
 _IST = timedelta(hours=5, minutes=30)
 NIFTY_SID = "13"
-NIFTY_EXPIRY_WEEKDAY = 1  # Tuesday
 
 
 def biz_days(end: date, n: int) -> list[date]:
@@ -31,16 +31,14 @@ def biz_days(end: date, n: int) -> list[date]:
     return list(reversed(days))
 
 
-def _next_weekly_expiry(d: date, expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY) -> date:
-    return d + timedelta(days=(expiry_weekday - d.weekday()) % 7)
-
-
-def _resolve_expiry(cal: Any, d: date, expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY) -> date:
+def _resolve_expiry(cal: Any, d: date) -> date | None:
+    """Legacy JSON-calendar fallback, used only when ``option_bars`` has no chain at all
+    for the underlying (pre-ingest). See ``pdp.instruments.expiry_calendar`` for the
+    generic, cadence-agnostic historical-expiry lookup used everywhere else.
+    """
     if cal is not None:
-        e = cal.resolve_expiry(d, "WEEK", 1)
-        if e is not None:
-            return e
-    return _next_weekly_expiry(d, expiry_weekday)
+        return cal.resolve_expiry(d, "WEEK", 1)
+    return None
 
 
 @dataclass
@@ -61,7 +59,6 @@ def load_window(
     *,
     security_id: str = NIFTY_SID,
     underlying: str = "NIFTY",
-    expiry_weekday: int = NIFTY_EXPIRY_WEEKDAY,
 ) -> WindowData:
     """Load raw 1-minute spot + option chains for ``days`` and run the completeness gate."""
     # ── Spot: one query for the whole range, bucketed by IST trade-date. ──
@@ -76,7 +73,24 @@ def load_window(
             spot_by_day.setdefault((ts + _IST).date(), []).append(b)
 
     # ── Expiry per day, then one chain query per expiry (1-minute bars). ──
-    expiry_by_day = {d: _resolve_expiry(cal, d, expiry_weekday) for d in days}
+    # Expiries come dynamically from the real chains stored in option_bars (the scrip-master
+    # truth, via pdp.instruments.expiry_calendar — the one shared expiry source) —
+    # cadence-agnostic, correct for BANKNIFTY monthly / SENSEX Thursday / any regime change,
+    # with NO hardcoded weekday. Days with no real expiry on or after them are simply not
+    # traded (they fall out as no-chain skips); the legacy JSON-calendar fallback is used ONLY
+    # when option_bars has no chain at all for the underlying (pre-ingest / legacy callers).
+    real_expiries = real_expiries_from_option_bars(mdb, underlying)
+    expiry_by_day: dict[date, date] = {}
+    for d in days:
+        if real_expiries:
+            real = nearest_real_expiry(real_expiries, d)
+            if real is not None:
+                expiry_by_day[d] = real
+            # else: no real expiry on/after this day → leave unmapped (day skipped, not faked)
+        else:
+            e = _resolve_expiry(cal, d)
+            if e is not None:
+                expiry_by_day[d] = e
     by_exp: dict[date, list[date]] = {}
     for d, e in expiry_by_day.items():
         by_exp.setdefault(e, []).append(d)
@@ -85,9 +99,13 @@ def load_window(
         store, _ = load_expiry_chain(mdb["option_bars"], exp, tds, tf_min=1, underlying=underlying)
         chain_1m.update(store)
 
-    # ── Completeness gate (on the raw 1m spot series). ──
+    # ── Completeness gate (on the raw 1m spot series). A day is only tradeable if it has
+    # BOTH complete spot data AND a resolved expiry — no expiry means no chain to trade. ──
     valid, skipped = [], {}
     for d in days:
+        if d not in expiry_by_day:
+            skipped[d] = "no_expiry"
+            continue
         comp = spot_completeness(spot_by_day.get(d, []))
         if comp["ok"]:
             valid.append(d)

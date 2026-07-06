@@ -4,12 +4,9 @@ endpoint (`pdp/intel/dashboard_routes.py`) so the two never drift out of sync.
 """
 from __future__ import annotations
 
-import datetime
-
 import structlog
 from fastapi import Request
 
-from pdp.instruments.expiry_calendar import load_expiry_calendar
 from pdp.settings import get_settings
 
 log = structlog.get_logger()
@@ -22,11 +19,9 @@ _MCX_COMMODITIES: list[tuple[str, str, str]] = [
     ("NATGAS", "Natural Gas", "MCX_NATGAS_SECURITY_ID"),
 ]
 
-_EXPIRY_CACHE_PATHS: dict[str, str] = {
-    "NIFTY": "EXPIRY_CACHE_PATH",
-    "BANKNIFTY": "BANKNIFTY_EXPIRY_CACHE_PATH",
-    "SENSEX": "SENSEX_EXPIRY_CACHE_PATH",
-}
+# Indices whose next expiry the dashboard resolves — from the instruments table (real Dhan
+# scrip master), NOT a projected weekday calendar.
+_EXPIRY_UNDERLYINGS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
 
 
 async def read_poller_cache(request: Request, key: str) -> dict | None:
@@ -95,16 +90,21 @@ async def compute_vix(request: Request) -> dict:
 
 
 async def compute_next_expiry() -> dict:
-    settings = get_settings()
-    today = datetime.date.today()
+    """Next tradeable expiry per index, resolved from the instruments table (real Dhan scrip
+    master) — never a projected weekday calendar. Each index degrades to ``None`` (→
+    ``available: false``) when the table has no upcoming expiry, rather than fabricating a date.
+    """
+    from pdp.db.session import get_session_maker
+    from pdp.strategy.strikes import nearest_expiry
+
     result: dict[str, str | None] = {}
-    for underlying, path_attr in _EXPIRY_CACHE_PATHS.items():
-        path = getattr(settings, path_attr)
-        try:
-            calendar = load_expiry_calendar(underlying, path)
-            expiry = calendar.resolve_expiry(today, "WEEK", 1)
-            result[underlying] = expiry.isoformat() if expiry else None
-        except Exception as exc:
-            log.warning("next_expiry_resolve_failed", underlying=underlying, exc=str(exc))
-            result[underlying] = None
+    session_maker = get_session_maker()
+    async with session_maker() as session:
+        for underlying in _EXPIRY_UNDERLYINGS:
+            try:
+                expiry = await nearest_expiry(session, underlying)
+                result[underlying] = expiry.isoformat() if expiry else None
+            except Exception as exc:
+                log.warning("next_expiry_resolve_failed", underlying=underlying, exc=str(exc))
+                result[underlying] = None
     return {"available": any(v is not None for v in result.values()), "expiries": result}

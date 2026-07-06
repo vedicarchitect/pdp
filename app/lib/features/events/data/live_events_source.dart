@@ -34,7 +34,10 @@ class LiveEventsSource implements EventsSource {
 
       ws.connect();
       _wsSub = ws.stream.listen((msg) {
-        if (msg['type'] == 'event') {
+        // Backend EventsHub.publish sends Event.to_dict() directly — there is no
+        // `type` envelope. Accept any frame carrying an `event_type` (and skip the
+        // hub's control frames, e.g. heartbeats).
+        if (msg['event_type'] != null) {
           final evt = AppEvent.fromJson(msg);
           _events.insert(0, evt);
           if (_events.length > 100) _events.removeLast();

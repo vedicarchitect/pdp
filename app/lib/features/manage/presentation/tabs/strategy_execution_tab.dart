@@ -116,10 +116,9 @@ class _MonitorBody extends StatelessWidget {
         const _SectionHeader(title: 'Indicator Matrix'),
         _IndicatorMatrix(indicators: snap.indicators),
         const SizedBox(height: 8),
-        if (snap.recentEvents.isNotEmpty) ...[
-          const _SectionHeader(title: 'Recent Events'),
-          _EventLog(events: snap.recentEvents),
-        ],
+        // Meaningful market-structure events (EMA cross / SuperTrend flip / Camarilla
+        // + level breaks) stream in the Live Events sidebar. The strategy heartbeat
+        // log (bias_evaluated / leg_status) is intentionally not shown here.
       ],
     );
   }
@@ -523,23 +522,12 @@ class _SidMatrix extends StatelessWidget {
                         .labelMedium
                         ?.copyWith(fontWeight: FontWeight.bold)),
                 const Spacer(),
-                if (ind.camarillaDaily != null)
-                  _LevelPill(
-                    label: 'Cam R4',
-                    value: ind.camarillaDaily!.r4,
-                    color: Colors.red,
-                  ),
-                const SizedBox(width: 4),
-                if (ind.camarillaDaily != null)
-                  _LevelPill(
-                    label: 'Cam S4',
-                    value: ind.camarillaDaily!.s4,
-                    color: Colors.green,
-                  ),
+                const Text('Cam: 5-15m daily · 30m/1H weekly · 1D monthly',
+                    style: TextStyle(fontSize: 9, color: Colors.grey)),
               ],
             ),
             const SizedBox(height: 6),
-            // TF grid
+            // TF grid — Camarilla per-TF (daily/weekly/monthly) + VWAP/VWMA (futures)
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: DataTable(
@@ -554,39 +542,38 @@ class _SidMatrix extends StatelessWidget {
                   DataColumn(label: Text('EMA20'), numeric: true),
                   DataColumn(label: Text('EMA50'), numeric: true),
                   DataColumn(label: Text('EMA100'), numeric: true),
+                  DataColumn(label: Text('EMA200'), numeric: true),
                   DataColumn(label: Text('PSAR'), numeric: true),
+                  DataColumn(label: Text('RSI'), numeric: true),
+                  DataColumn(label: Text('VWAP'), numeric: true),
+                  DataColumn(label: Text('VWMA'), numeric: true),
+                  DataColumn(label: Text('CamR4'), numeric: true),
+                  DataColumn(label: Text('CamS4'), numeric: true),
                 ],
                 rows: _matrixTfs
-                    .map((tf) => _tfRow(context, tf, ind.tf[tf]))
+                    .map((tf) => _tfRow(context, tf, ind.tf[tf], ind.camForTf(tf)))
                     .toList(),
               ),
             ),
-            // PDH / PDL / PWH / PWL
-            if (ind.pdh != null || ind.pwh != null) ...[
+            // PDH/PDL/PWH/PWL/PMH/PML
+            if (ind.pdh != null || ind.pwh != null || ind.pmh != null) ...[
               const SizedBox(height: 4),
               Wrap(
                 spacing: 8,
+                runSpacing: 4,
                 children: [
                   if (ind.pdh != null)
-                    _LevelPill(
-                        label: 'PDH',
-                        value: ind.pdh,
-                        color: Colors.blue),
+                    _LevelPill(label: 'PDH', value: ind.pdh, color: Colors.blue),
                   if (ind.pdl != null)
-                    _LevelPill(
-                        label: 'PDL',
-                        value: ind.pdl,
-                        color: Colors.blueGrey),
+                    _LevelPill(label: 'PDL', value: ind.pdl, color: Colors.blueGrey),
                   if (ind.pwh != null)
-                    _LevelPill(
-                        label: 'PWH',
-                        value: ind.pwh,
-                        color: Colors.purple),
+                    _LevelPill(label: 'PWH', value: ind.pwh, color: Colors.purple),
                   if (ind.pwl != null)
-                    _LevelPill(
-                        label: 'PWL',
-                        value: ind.pwl,
-                        color: Colors.deepPurple),
+                    _LevelPill(label: 'PWL', value: ind.pwl, color: Colors.deepPurple),
+                  if (ind.pmh != null)
+                    _LevelPill(label: 'PMH', value: ind.pmh, color: Colors.teal),
+                  if (ind.pml != null)
+                    _LevelPill(label: 'PML', value: ind.pml, color: Colors.tealAccent),
                 ],
               ),
             ],
@@ -596,7 +583,8 @@ class _SidMatrix extends StatelessWidget {
     );
   }
 
-  DataRow _tfRow(BuildContext context, String tf, IndicatorCell? cell) {
+  DataRow _tfRow(
+      BuildContext context, String tf, IndicatorCell? cell, CamarillaLevels? cam) {
     final stDir = cell?.stDir;
     final stIcon = stDir == 'up'
         ? '▲'
@@ -609,6 +597,15 @@ class _SidMatrix extends StatelessWidget {
             ? Colors.red
             : null;
 
+    // RSI coloured vs its signal (rsi > signal = bullish).
+    Color? rsiColor;
+    if (cell?.rsi != null && cell?.rsiMa != null) {
+      rsiColor = cell!.rsi! >= cell.rsiMa! ? Colors.green : Colors.red;
+    }
+    final rsiText = cell?.rsi != null
+        ? '${cell!.rsi!.toStringAsFixed(0)}/${_fmtOpt(cell.rsiMa)}'
+        : '--';
+
     return DataRow(cells: [
       DataCell(Text(tf,
           style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11))),
@@ -617,7 +614,16 @@ class _SidMatrix extends StatelessWidget {
       DataCell(Text(_fmtOpt(cell?.ema20))),
       DataCell(Text(_fmtOpt(cell?.ema50))),
       DataCell(Text(_fmtOpt(cell?.ema100))),
+      DataCell(Text(_fmtOpt(cell?.ema200))),
       DataCell(Text(_fmtOpt(cell?.psar))),
+      DataCell(Text(rsiText,
+          style: TextStyle(color: rsiColor, fontSize: 11))),
+      DataCell(Text(_fmtOpt(cell?.vwap))),
+      DataCell(Text(_fmtOpt(cell?.vwma))),
+      DataCell(Text(_fmtOpt(cam?.r4),
+          style: const TextStyle(color: Colors.redAccent, fontSize: 11))),
+      DataCell(Text(_fmtOpt(cam?.s4),
+          style: const TextStyle(color: Colors.greenAccent, fontSize: 11))),
     ]);
   }
 
@@ -646,66 +652,6 @@ class _LevelPill extends StatelessWidget {
         style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
       ),
     );
-  }
-}
-
-// ─── Event log ────────────────────────────────────────────────────────────────
-
-class _EventLog extends StatelessWidget {
-  final List<Map<String, dynamic>> events;
-
-  const _EventLog({required this.events});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: ListView.separated(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        itemCount: events.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
-        itemBuilder: (context, i) {
-          final ev = events[i];
-          final type = ev['event_type'] as String? ?? ev['type'] as String? ?? '?';
-          final ts = ev['ts'] as String? ?? ev['timestamp'] as String? ?? '';
-          return ListTile(
-            dense: true,
-            leading: _eventIcon(type),
-            title: Text(type,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-            subtitle: Text(_evSummary(ev), style: const TextStyle(fontSize: 11)),
-            trailing: Text(
-              ts.length > 19 ? ts.substring(11, 19) : ts,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _eventIcon(String type) {
-    final lower = type.toLowerCase();
-    if (lower.contains('close') || lower.contains('stop')) {
-      return const Icon(Icons.remove_circle_outline, color: Colors.red, size: 18);
-    }
-    if (lower.contains('open')) {
-      return const Icon(Icons.add_circle_outline, color: Colors.green, size: 18);
-    }
-    if (lower.contains('profit')) {
-      return const Icon(Icons.emoji_events, color: Colors.amber, size: 18);
-    }
-    return const Icon(Icons.info_outline, size: 18);
-  }
-
-  String _evSummary(Map<String, dynamic> ev) {
-    final parts = <String>[];
-    if (ev['opt_type'] != null) parts.add(ev['opt_type'] as String);
-    if (ev['strike'] != null) parts.add('@ ${ev['strike']}');
-    if (ev['lots'] != null) parts.add('${ev['lots']} lots');
-    if (ev['exit_reason'] != null) parts.add('(${ev['exit_reason']})');
-    if (ev['reason'] != null) parts.add('(${ev['reason']})');
-    return parts.isEmpty ? '--' : parts.join(' ');
   }
 }
 

@@ -271,6 +271,25 @@ class WarehouseService:
     # Band roll (per-underlying)                                           #
     # ------------------------------------------------------------------ #
 
+    async def _upcoming_expiries(self, underlying: str, today: date, limit: int) -> list[date]:
+        """The next ``limit`` distinct real expiries for ``underlying`` from the instruments
+        table (Dhan scrip master) — cadence-agnostic (weekly/monthly/weekday-shifted), never a
+        projected weekday. Empty when the table has no upcoming expiry.
+        """
+        async with self._session_maker() as session:
+            rows = await session.execute(
+                select(Instrument.expiry)
+                .where(
+                    Instrument.underlying == underlying,
+                    Instrument.option_type.in_(["CE", "PE"]),
+                    Instrument.expiry >= today,
+                )
+                .distinct()
+                .order_by(Instrument.expiry)
+                .limit(limit)
+            )
+        return [e for (e,) in rows.all() if e is not None]
+
     async def _roll_band(self, state: _UnderlyingState) -> None:
         """Compute current+next-week band for one underlying; subscribe/unsubscribe diffs."""
         today = _ist_today()
@@ -284,32 +303,24 @@ class WarehouseService:
             return
 
         atm = atm_strike(float(spot), state.step)
-        exp1 = state.calendar.resolve_expiry(today, "WEEK", 1)
-        exp2 = state.calendar.resolve_expiry(today, "WEEK", 2)
-        if exp1 is None:
-            log.warning("warehouse_roll_no_expiry", underlying=state.name, code=1, today=str(today))
+        # Real upcoming expiries from the instruments table — the front two, plus a third when
+        # WAREHOUSE_INCLUDE_MONTHLY is set (captures the monthly for monthly-only underlyings).
+        n_expiries = 3 if self._settings.WAREHOUSE_INCLUDE_MONTHLY else 2
+        expiries = await self._upcoming_expiries(state.name, today, n_expiries)
+        if not expiries:
+            log.warning("warehouse_roll_no_expiry", underlying=state.name, today=str(today))
             return
-
-        expiries = [exp1]
-        if exp2 is not None:
-            expiries.append(exp2)
-
-        exp_month = None
-        if self._settings.WAREHOUSE_INCLUDE_MONTHLY:
-            exp_month = state.calendar.resolve_expiry(today, "MONTH", 1)
-            if exp_month is not None and exp_month not in expiries:
-                expiries.append(exp_month)
 
         band = self._settings.WAREHOUSE_STRIKE_BAND
         step = state.step
 
+        # The last (furthest) expiry is treated as the "monthly" flag when monthly inclusion is
+        # on; otherwise every stored expiry is flagged WEEK. (Flag is metadata only.)
+        exp_month = expiries[-1] if self._settings.WAREHOUSE_INCLUDE_MONTHLY else None
+
         desired_contracts: list[tuple[date, int, str, str]] = []
         for expiry in expiries:
-            flag = (
-                "MONTH"
-                if (self._settings.WAREHOUSE_INCLUDE_MONTHLY and expiry == exp_month)
-                else "WEEK"
-            )
+            flag = "MONTH" if expiry == exp_month else "WEEK"
             for offset in range(-band, band + 1):
                 strike = atm + offset * step
                 for opt in ("CE", "PE"):
@@ -360,14 +371,13 @@ class WarehouseService:
 
         state.writer.set_band(new_band)
         state.current_atm = atm
-        state.current_expiry = exp1
+        state.current_expiry = expiries[0]
 
         log.info(
             "warehouse_band_rolled",
             underlying=state.name,
             atm=atm,
-            expiry1=str(exp1),
-            expiry2=str(exp2) if exp2 else None,
+            expiries=[str(e) for e in expiries],
             contracts=len(new_band),
             subscribed=len(new_sids - old_sids),
             unsubscribed=len(old_sids - new_sids),
@@ -485,8 +495,9 @@ class WarehouseService:
         today = _ist_today()
         for state in self._states.values():
             try:
-                exp1 = state.calendar.resolve_expiry(today, "WEEK", 1)
-                if exp1 != state.current_expiry:
+                upcoming = await self._upcoming_expiries(state.name, today, 1)
+                exp1 = upcoming[0] if upcoming else None
+                if exp1 is not None and exp1 != state.current_expiry:
                     log.info(
                         "warehouse_expiry_rolled",
                         underlying=state.name,

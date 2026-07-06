@@ -157,7 +157,7 @@ def run_strangle_sweep(
     for ci, chunk in enumerate(chunks, 1):
         window = load_window(
             mdb, cal, chunk, security_id=base_cfg.security_id,
-            underlying=base_cfg.underlying, expiry_weekday=3,
+            underlying=base_cfg.underlying,
         )
         vix_by_day = load_vix_window(mdb, vix_sid, chunk)
         pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk,

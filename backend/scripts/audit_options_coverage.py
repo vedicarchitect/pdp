@@ -8,6 +8,11 @@ Answers "what do we actually have, and where are the holes?" before any gap-fill
      `--min-fraction` of the expected contract band — reusing the same `days_missing` detector the
      gap-fill uses, so the audit and the fill agree on what "missing" means. Consecutive gap days
      are collapsed into ranges for readability.
+  4. Per-expiry chain check: every distinct `expiry_date` actually stored in the audited range,
+     with CE/PE contract counts and a complete/partial verdict — catches a chain that is present
+     but thin, distinct from a day-level gap. A claimed/upcoming expiry with **no** row here at
+     all is a phantom expiry (see `pdp.warehouse.coverage.per_expiry_coverage`, the same check
+     the coverage API surfaces).
 
 Usage:
   python scripts/audit_options_coverage.py
@@ -122,12 +127,41 @@ def main() -> int:
             f"--from {dfrom} --to {dto} --only-missing"
         )
 
+    # ── Per-expiry chain check (same shape as pdp.warehouse.coverage.per_expiry_coverage,
+    # sync/pymongo here since this script has no event loop) ──────────────────────────────
+    lo = datetime.combine(dfrom, datetime.min.time(), tzinfo=UTC) - IST
+    hi = datetime.combine(dto + timedelta(days=1), datetime.min.time(), tzinfo=UTC) - IST
+    by_expiry = list(col.aggregate([
+        {"$match": {"underlying": a.symbol, "timeframe": "1m", "ts": {"$gte": lo, "$lt": hi}}},
+        {"$group": {
+            "_id": "$expiry_date",
+            "ce": {"$addToSet": {"$cond": [{"$eq": ["$option_type", "CE"]}, "$strike", "$$REMOVE"]}},
+            "pe": {"$addToSet": {"$cond": [{"$eq": ["$option_type", "PE"]}, "$strike", "$$REMOVE"]}},
+        }},
+        {"$sort": {"_id": 1}},
+    ], allowDiskUse=True))
+
+    print(f"\n  Per-expiry chain check {dfrom}..{dto}")
+    print(f"  {'Expiry':<12} {'CE':>5} {'PE':>5} {'Status':>10}")
+    print(f"  {'-'*12} {'-'*5} {'-'*5} {'-'*10}")
+    expiry_rows = []
+    for doc in by_expiry:
+        expiry = doc["_id"]
+        n_ce, n_pe = len(doc.get("ce") or []), len(doc.get("pe") or [])
+        status = "complete" if n_ce and n_pe and n_ce == n_pe else "partial"
+        expiry_str = expiry.isoformat() if hasattr(expiry, "isoformat") else str(expiry)
+        print(f"  {expiry_str:<12} {n_ce:>5} {n_pe:>5} {status:>10}")
+        expiry_rows.append({
+            "expiry_date": expiry_str, "ce_contracts": n_ce, "pe_contracts": n_pe, "status": status,
+        })
+
     summary = {
         "symbol": a.symbol, "total_docs": total, "ist_range": [str(data_lo), str(data_hi)], "source": src,
         "docs_by_month": by_month, "trade_days_by_month": days_per_month,
         "gap_scan": {"from": str(dfrom), "to": str(dto), "codes": codes, "band": band,
                      "min_fraction": a.min_fraction, "trading_days": len(tdays),
                      "gap_days": len(gaps), "gap_ranges": gap_ranges},
+        "by_expiry": expiry_rows,
     }
     if a.out:
         with open(a.out, "w") as fh:

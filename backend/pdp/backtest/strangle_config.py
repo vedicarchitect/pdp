@@ -49,14 +49,6 @@ SECURITY_IDS: dict[str, str] = {
     "SENSEX": "51",
 }
 
-# Weekly expiry weekday per underlying (Python weekday: Mon=0 … Fri=4).
-EXPIRY_WEEKDAY: dict[str, int] = {
-    "NIFTY": 1,      # Tuesday
-    "BANKNIFTY": 3,  # Thursday
-    "SENSEX": 4,     # Friday
-}
-
-
 def lot_size_for_date(underlying: str, trade_date: date) -> int:
     """Return the exchange-mandated lot size for *underlying* on *trade_date*."""
     history = _LOT_HISTORY.get(underlying, _LOT_HISTORY["NIFTY"])

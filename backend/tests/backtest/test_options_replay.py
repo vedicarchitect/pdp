@@ -10,7 +10,7 @@ from pdp.backtest.options_replay import (
     OptionsReplayEngine,
     _atm,
     _biz_days_in_range,
-    _resolve_expiry,
+    _resolve_expiry_synthetic,
     _strike_step,
 )
 from pdp.backtest.options_strategy import OptionsStrategyConfig
@@ -76,6 +76,9 @@ def _make_engine(spot_docs: list[dict], opt_docs: list[dict]) -> OptionsReplayEn
 
     opt_col = MagicMock()
     opt_col.find.side_effect = lambda q, p=None: iter(opt_docs)
+    # No real stored expiries in these mock-data tests — the engine falls back to the
+    # synthetic weekday projection, matching `_resolve_expiry_synthetic` below.
+    opt_col.distinct.side_effect = lambda field, query=None: []
 
     mongo_db.__getitem__.side_effect = lambda k: market_col if k == "market_bars" else opt_col
     return OptionsReplayEngine(mongo_db)
@@ -108,7 +111,7 @@ def test_biz_days():
 def test_resolve_expiry_weekly():
     # 2026-01-06 is a Tuesday — next Tuesday = 2026-01-13
     d = date(2026, 1, 6)
-    exp = _resolve_expiry(d, "weekly")
+    exp = _resolve_expiry_synthetic(d, "weekly")
     assert exp == date(2026, 1, 13)
 
 
@@ -136,7 +139,7 @@ def _run_one_day(
     ]
 
     atm = _atm(spot_close, 50)
-    expiry = _resolve_expiry(d, "weekly")
+    expiry = _resolve_expiry_synthetic(d, "weekly")
     expiry_dt = datetime(expiry.year, expiry.month, expiry.day, tzinfo=UTC)
 
     ce_docs = [
@@ -189,7 +192,7 @@ def test_combined_sl_triggers_exit():
     d = date(2026, 1, 6)
     spot = 24000.0
     atm = _atm(spot, 50)
-    expiry = _resolve_expiry(d, "weekly")
+    expiry = _resolve_expiry_synthetic(d, "weekly")
 
     entry_t = time(9, 20)
     sl_t = time(10, 0)

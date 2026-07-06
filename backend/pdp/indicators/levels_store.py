@@ -151,6 +151,34 @@ class LevelsStore:
             session_date=session_date.isoformat(),
         )
 
+    async def compute_monthly(
+        self,
+        security_id: str,
+        session_date: date,
+        month_h: float,
+        month_l: float,
+        month_c: float,
+        month_start: date,
+        month_end: date,
+    ) -> None:
+        """Compute and upsert monthly levels for one index from prior-month HLC."""
+        doc = _pivot_state_to_doc(
+            security_id=security_id,
+            period="monthly",
+            session_date=session_date,
+            source_h=month_h,
+            source_l=month_l,
+            source_c=month_c,
+            window_start=month_start,
+            window_end=month_end,
+        )
+        await self.upsert(doc)
+        log.debug(
+            "levels_store_monthly_upserted",
+            security_id=security_id,
+            session_date=session_date.isoformat(),
+        )
+
     # ── Reads ────────────────────────────────────────────────────────────────────
 
     async def get(
@@ -223,6 +251,9 @@ class LevelsStore:
             elif period == "weekly":
                 flat["pwh"] = src.get("h")
                 flat["pwl"] = src.get("l")
+            elif period == "monthly":
+                flat["pmh"] = src.get("h")
+                flat["pml"] = src.get("l")
             rows.append(flat)
         return rows
 
@@ -266,11 +297,13 @@ async def compute_session_levels(
         except Exception as exc:
             log.warning("levels_daily_compute_error", security_id=sid, exc=str(exc))
 
-    # ── Weekly levels (Monday only — recompute every Monday) ──────────────────
-    if today.weekday() == 0:  # 0 = Monday
+    # ── Weekly levels (Monday, or when the current session's weekly doc is missing) ──
+    if today.weekday() == 0 or not await _has_period_doc(store, security_ids, "weekly", today):
         # Prior ISO week: Monday of last week to Friday (or last trading day)
-        prior_monday = today - timedelta(days=7)
-        prior_week_days = [d for d in trading_days(prior_monday, today - timedelta(days=1), holiday_set)]
+        prior_monday = today - timedelta(days=today.weekday() + 7)
+        prior_week_days = [
+            d for d in trading_days(prior_monday, prior_monday + timedelta(days=6), holiday_set)
+        ]
         if prior_week_days:
             week_start = prior_week_days[0]
             week_end = prior_week_days[-1]
@@ -288,12 +321,53 @@ async def compute_session_levels(
                 except Exception as exc:
                     log.warning("levels_weekly_compute_error", security_id=sid, exc=str(exc))
 
+    # ── Monthly levels (first trading day of month, or when the doc is missing) ──
+    first_td_of_month = _first_trading_day_of_month(today, holiday_set)
+    if today == first_td_of_month or not await _has_period_doc(store, security_ids, "monthly", today):
+        # Prior calendar month: first→last day of the month before `today`.
+        prior_month_end = today.replace(day=1) - timedelta(days=1)
+        prior_month_start = prior_month_end.replace(day=1)
+        for sid in security_ids:
+            try:
+                h, lo, c = await _fetch_month_hlc(db, sid, prior_month_start, prior_month_end)
+                if h is not None:
+                    await store.compute_monthly(
+                        security_id=sid,
+                        session_date=today,
+                        month_h=h, month_l=lo, month_c=c,  # type: ignore[arg-type]
+                        month_start=prior_month_start,
+                        month_end=prior_month_end,
+                    )
+            except Exception as exc:
+                log.warning("levels_monthly_compute_error", security_id=sid, exc=str(exc))
+
 
 def _prior_trading_day(today: date, holiday_set: set[date]) -> date:
     d = today - timedelta(days=1)
     while d.weekday() >= 5 or d in holiday_set:
         d -= timedelta(days=1)
     return d
+
+
+def _first_trading_day_of_month(day: date, holiday_set: set[date]) -> date:
+    """Return the first trading day on/after the 1st of ``day``'s calendar month."""
+    d = day.replace(day=1)
+    while d.weekday() >= 5 or d in holiday_set:
+        d += timedelta(days=1)
+    return d
+
+
+async def _has_period_doc(
+    store: LevelsStore,
+    security_ids: list[str],
+    period: str,
+    session_date: date,
+) -> bool:
+    """True only if every security already has a ``period`` doc for ``session_date``."""
+    for sid in security_ids:
+        if await store.get(sid, period, session_date) is None:
+            return False
+    return True
 
 
 async def _fetch_1d_hlc(
@@ -362,6 +436,35 @@ async def _fetch_week_hlc(
             "metadata.security_id": security_id,
             "metadata.timeframe": {"$in": ["1D", "1m"]},
             "ts": {"$gte": ws, "$lt": we},
+        }},
+        {"$group": {
+            "_id": None,
+            "h": {"$max": "$high"},
+            "l": {"$min": "$low"},
+            "c": {"$last": "$close"},
+        }},
+    ]
+    async for agg in col.aggregate(pipeline):
+        return float(agg["h"]), float(agg["l"]), float(agg["c"])
+    return None, None, None
+
+
+async def _fetch_month_hlc(
+    db: Any,
+    security_id: str,
+    month_start: date,
+    month_end: date,
+) -> tuple[float | None, float | None, float | None]:
+    """Fetch aggregated HLC for a security across a full calendar month from market_bars."""
+
+    ms = datetime(month_start.year, month_start.month, month_start.day, tzinfo=UTC) - timedelta(hours=6)
+    me = datetime(month_end.year, month_end.month, month_end.day, tzinfo=UTC) + timedelta(hours=24)
+    col = db["market_bars"]
+    pipeline = [
+        {"$match": {
+            "metadata.security_id": security_id,
+            "metadata.timeframe": {"$in": ["1D", "1m"]},
+            "ts": {"$gte": ms, "$lt": me},
         }},
         {"$group": {
             "_id": None,

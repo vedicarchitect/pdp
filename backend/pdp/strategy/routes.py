@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import msgspec
@@ -292,21 +292,27 @@ async def _get_greeks_for_strike(
     return result
 
 
-def _build_indicator_cell(engine: Any, sid: str, tf: str) -> dict[str, Any]:
-    """Build one indicator cell for (sid, tf)."""
+def _build_indicator_cell(engine: Any, sid: str, tf: str, fut_sid: str | None = None) -> dict[str, Any]:
+    """Build one indicator cell for (sid, tf).
+
+    Price-based indicators (EMA/ST/PSAR/RSI) are read from the spot ``sid``; the
+    volume-anchored VWAP/VWMA are read from ``fut_sid`` (the index futures contract)
+    when provided, since spot indices carry no tradeable volume.
+    """
     cell: dict[str, Any] = {}
     if engine is None:
         return cell
 
-    # EMA
+    # EMA (9/20/50/100/200)
     ema_state = engine.get_ema(sid, tf)
     if ema_state:
         cell["ema9"] = ema_state.values.get(9)
         cell["ema20"] = ema_state.values.get(20)
         cell["ema50"] = ema_state.values.get(50)
         cell["ema100"] = ema_state.values.get(100)
+        cell["ema200"] = ema_state.values.get(200)
 
-    # SuperTrend
+    # SuperTrend (engine-wide ST(10,2))
     st_state = engine.get(sid, tf)
     if st_state:
         cell["st_val"] = float(st_state.value) if st_state.value else None
@@ -317,38 +323,64 @@ def _build_indicator_cell(engine: Any, sid: str, tf: str) -> dict[str, Any]:
     if psar_state:
         cell["psar"] = psar_state.sar
 
+    # RSI + SMA signal
+    rsi_state = engine.get_rsi(sid, tf)
+    if rsi_state:
+        cell["rsi"] = rsi_state.rsi
+        cell["rsi_ma"] = rsi_state.ma
+
+    # VWAP / VWMA — from the futures contract (volume-anchored)
+    vwap_src = fut_sid or sid
+    vwap_state = engine.get_vwap(vwap_src, tf)
+    if vwap_state:
+        cell["vwap"] = vwap_state.vwap
+    vwma_state = engine.get_vwma(vwap_src, tf)
+    if vwma_state:
+        cell["vwma"] = vwma_state.vwma
+
     return cell
 
 
-def _build_pivot_cells(engine: Any, sid: str) -> dict[str, Any]:
-    """Build per-session Camarilla + period level constants for one security_id."""
+async def _build_levels_cells(store: Any, sid: str, session_date: date) -> dict[str, Any]:
+    """Build Camarilla + period levels for one security_id from the persisted warehouse.
+
+    Reads daily / weekly / monthly docs from ``index_levels`` (LevelsStore) — the
+    single correct source computed once per session/week/month — instead of the
+    drifting live indicator-engine snapshot. TF→period mapping (5m/15m→daily,
+    30m/1H→weekly, 1D→monthly) is applied client-side.
+    """
     result: dict[str, Any] = {}
-    if engine is None:
+    if store is None:
         return result
 
-    # Daily Camarilla (from 5m pivot snapshot — pivots computed once per session)
-    daily_pivot = engine.get_pivots(sid, "5m")
-    if daily_pivot:
-        result["camarilla_daily"] = {
-            "pp": daily_pivot.cam_pp, "r3": daily_pivot.cam_r3, "r4": daily_pivot.cam_r4,
-            "s3": daily_pivot.cam_s3, "s4": daily_pivot.cam_s4,
+    def _cam(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not doc:
+            return None
+        c = doc.get("camarilla") or {}
+        return {
+            "pp": c.get("pp"), "r3": c.get("r3"), "r4": c.get("r4"),
+            "s3": c.get("s3"), "s4": c.get("s4"),
         }
 
-    # Weekly Camarilla (from 1w pivot snapshot)
-    weekly_pivot = engine.get_pivots(sid, "1w")
-    if weekly_pivot:
-        result["camarilla_weekly"] = {
-            "pp": weekly_pivot.cam_pp, "r3": weekly_pivot.cam_r3, "r4": weekly_pivot.cam_r4,
-            "s3": weekly_pivot.cam_s3, "s4": weekly_pivot.cam_s4,
-        }
+    daily = await store.get(sid, "daily", session_date)
+    weekly = await store.get(sid, "weekly", session_date)
+    monthly = await store.get(sid, "monthly", session_date)
 
-    # Period levels (PDH/PDL/PWH/PWL)
-    pl = engine.get_period_levels(sid, "5m")
-    if pl:
-        result["period"] = {
-            "pdh": pl.pdh, "pdl": pl.pdl,
-            "pwh": pl.pwh, "pwl": pl.pwl,
-        }
+    if (cam := _cam(daily)) is not None:
+        result["camarilla_daily"] = cam
+    if (cam := _cam(weekly)) is not None:
+        result["camarilla_weekly"] = cam
+    if (cam := _cam(monthly)) is not None:
+        result["camarilla_monthly"] = cam
+
+    d_src = (daily or {}).get("source") or {}
+    w_src = (weekly or {}).get("source") or {}
+    m_src = (monthly or {}).get("source") or {}
+    result["period"] = {
+        "pdh": d_src.get("h"), "pdl": d_src.get("l"),
+        "pwh": w_src.get("h"), "pwl": w_src.get("l"),
+        "pmh": m_src.get("h"), "pml": m_src.get("l"),
+    }
 
     return result
 
@@ -410,7 +442,6 @@ async def strangle_monitor(
 
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
     unrealized_by_underlying: dict[str, float] = {}
-    active_strike_sids = set()
 
     for strategy, state in zip(strategies, states, strict=False):
         und = strategy.underlying  # all legs under same underlying for now
@@ -419,7 +450,6 @@ async def strangle_monitor(
 
             # Greeks/OI/PCR only for active non-hedge strikes
             if not leg["is_hedge"] and not leg["is_momentum"]:
-                active_strike_sids.add(leg["security_id"])
                 greeks = await _get_greeks_for_strike(
                     chains_col,
                     underlying=und,
@@ -492,19 +522,31 @@ async def strangle_monitor(
     recent_events = all_events[:n_events]
 
     # ── Indicator matrix ────────────────────────────────────────────────────
-    # Covers 3 index sids + active non-hedge strike sids
-    matrix_sids = list(_INDEX_SIDS.values()) + [
-        s for s in active_strike_sids if s not in _INDEX_SIDS.values()
-    ]
+    # Index sids only — EMA/PSAR/RSI/SuperTrend suites are configured for the 3
+    # spot indices (+ their futures for VWAP/VWMA), never for option strikes, so
+    # a strike sid here would only ever render `--` rows.
+    matrix_sids = list(_INDEX_SIDS.values())
+
+    from pdp.indicators.levels_store import LevelsStore
+    levels_store = (
+        LevelsStore(request.app.state.mongo_db["index_levels"])
+        if hasattr(request.app.state, "mongo_db")
+        else None
+    )
+    session_date_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+
+    fut_sids: dict[str, str] = getattr(engine, "matrix_futures_sids", {}) or {}
 
     indicators: dict[str, Any] = {}
     for sid in matrix_sids:
         sid_data: dict[str, Any] = {}
         tf_data: dict[str, Any] = {}
+        fut_sid = fut_sids.get(sid)
         for tf in _MATRIX_TFS:
-            tf_data[tf] = _build_indicator_cell(engine, sid, tf)
+            tf_data[tf] = _build_indicator_cell(engine, sid, tf, fut_sid)
         sid_data["tf"] = tf_data
-        sid_data.update(_build_pivot_cells(engine, sid))
+        if levels_store is not None:
+            sid_data.update(await _build_levels_cells(levels_store, sid, session_date_ist))
         indicators[sid] = sid_data
 
     payload = {
@@ -526,7 +568,7 @@ async def strangle_monitor(
 async def get_levels(
     request: Request,
     underlying: str,
-    period: str = Query(default="daily", pattern="^(daily|weekly)$"),
+    period: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     date: str | None = Query(default=None, description="YYYY-MM-DD (single doc)"),
     start: str | None = Query(default=None, description="YYYY-MM-DD range start"),
     end: str | None = Query(default=None, description="YYYY-MM-DD range end"),

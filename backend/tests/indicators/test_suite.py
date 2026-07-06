@@ -176,6 +176,25 @@ class TestRSITracker:
         expected_ma_next = alpha * s2.rsi + (1 - alpha) * expected_ma_seed
         assert abs(s2.ma - expected_ma_next) < 1e-9
 
+    def test_ma_kind_sma_is_rolling_simple_average(self):
+        # Kite "RSI 14 SMA 14": signal is a rolling SMA of RSI, not an EMA.
+        t = RSITracker(period=3, ma_period=3, ma_kind="sma")
+        closes = [10.0, 12.0, 11.0, 13.0, 14.0, 12.0, 15.0, 16.0]
+        rsi_vals: list[float] = []
+        last = None
+        for c in closes:
+            s = t.update(*_bar(c)[:5])
+            if s is not None:
+                rsi_vals.append(s.rsi)
+                last = s
+        # SMA equals the mean of the last ma_period RSI values (rolling window).
+        assert last is not None and last.ma is not None
+        assert abs(last.ma - sum(rsi_vals[-3:]) / 3) < 1e-9
+
+    def test_ma_kind_invalid_raises(self):
+        with pytest.raises(ValueError):
+            RSITracker(period=3, ma_period=3, ma_kind="bogus")
+
     def test_ma_in_valid_rsi_range(self):
         t = RSITracker(period=5, ma_period=3)
         closes = [float(100 + i % 7) for i in range(20)]

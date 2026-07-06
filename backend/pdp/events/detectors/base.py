@@ -33,6 +33,11 @@ class BarContext:
     # (label, price) OI walls for the underlying, injected by EventService from the
     # latest option-chain analysis; used by the confluence detector.
     oi_levels: list[tuple[str, float]] = ()  # type: ignore[assignment]
+    # (label, price) Camarilla + period levels from the persisted `index_levels`
+    # warehouse (daily/weekly/monthly), injected off the hot path by EventService.
+    # When present, these are the authoritative CAM_*/PDH/PDL/PWH/PWL/PMH/PML values
+    # (same source as the Execution-tab matrix), overriding the drifting live snapshot.
+    warehouse_levels: list[tuple[str, float]] = ()  # type: ignore[assignment]
 
 
 class PrevStore:

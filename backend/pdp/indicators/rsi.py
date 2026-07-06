@@ -23,24 +23,27 @@ class RSITracker:
     """
 
     __slots__ = (
-        "_avg_gain", "_avg_loss", "_ma_alpha", "_ma_history", "_ma_period",
+        "_avg_gain", "_avg_loss", "_ma_alpha", "_ma_history", "_ma_kind", "_ma_period",
         "_ma_value", "_period", "_prev_close", "_seed_changes",
     )
 
-    def __init__(self, period: int = 14, ma_period: int = 9) -> None:
+    def __init__(self, period: int = 14, ma_period: int = 9, ma_kind: str = "ema") -> None:
         if period < 1:
             raise ValueError("period must be >= 1")
         if ma_period < 1:
             raise ValueError("ma_period must be >= 1")
+        if ma_kind not in ("ema", "sma"):
+            raise ValueError("ma_kind must be 'ema' or 'sma'")
         self._period = period
         self._prev_close: float | None = None
         self._seed_changes: list[tuple[float, float]] = []  # (gain, loss) pairs
         self._avg_gain: float | None = None
         self._avg_loss: float | None = None
         self._ma_period = ma_period
+        self._ma_kind = ma_kind
         self._ma_alpha = 2.0 / (ma_period + 1)
         self._ma_value: float | None = None
-        self._ma_history: list[float] = []  # RSI accumulator until MA is seeded
+        self._ma_history: list[float] = []  # rolling RSI window (sma) / seed accumulator (ema)
 
     def update(
         self,
@@ -76,8 +79,15 @@ class RSITracker:
             rs = self._avg_gain / self._avg_loss  # type: ignore[operator]
             rsi = 100.0 - 100.0 / (1.0 + rs)
 
-        # Update EMA signal line of RSI
-        if self._ma_value is None:
+        # Update signal line of RSI (EMA or SMA per ma_kind)
+        if self._ma_kind == "sma":
+            # Simple moving average over the last ma_period RSI values (Kite "RSI 14 SMA 14").
+            self._ma_history.append(rsi)
+            if len(self._ma_history) > self._ma_period:
+                self._ma_history.pop(0)
+            if len(self._ma_history) >= self._ma_period:
+                self._ma_value = sum(self._ma_history) / self._ma_period
+        elif self._ma_value is None:
             self._ma_history.append(rsi)
             if len(self._ma_history) >= self._ma_period:
                 self._ma_value = sum(self._ma_history) / self._ma_period

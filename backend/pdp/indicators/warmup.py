@@ -35,6 +35,7 @@ _TF_SESSION_BARS: dict[str, int] = {
     "5m": 75,
     "15m": 25,
     "25m": 15,
+    "30m": 13,
     "1H": 7,
     "1h": 7,
     "1D": 1,
@@ -42,18 +43,20 @@ _TF_SESSION_BARS: dict[str, int] = {
 }
 _DEFAULT_SESSION_BARS = 75
 
-# Calendar days to look back per timeframe so EMA(50) is seeded on startup.
-# EMA(50) needs 50 bars; sessions per calendar day ~ _TF_SESSION_BARS value.
-# We go back ceil(50 / session_bars) sessions + 4 days padding for weekends/holidays.
+# Calendar days to look back per timeframe so EMA(200) is fully seeded on startup
+# (Kite matrix parity). EMA(200) needs >=200 bars; sessions/calendar-day ~
+# _TF_SESSION_BARS. Windows sized to seed well beyond 200 bars (padding for
+# weekends/holidays).
 _TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
-    "1m": 1,
-    "5m": 1,
-    "15m": 6,   # ceil(50/25)=2 sessions + 4 padding
-    "25m": 8,   # ceil(50/15)=4 sessions + 4 padding
-    "1H": 14,   # ceil(50/7)=8 sessions + 6 padding
-    "1h": 14,
-    "1D": 30,   # 1 bar/day; 30 days for EMA(20)
-    "1w": 30,   # 1 bar/week; 30 days covers ~4 weeks (enough for pivot seed)
+    "1m": 2,
+    "5m": 10,    # 75 bars/session x ~7 sessions >> 200
+    "15m": 40,   # 25 bars/session x ~28 sessions >> 200
+    "25m": 40,
+    "30m": 45,   # 13 bars/session x ~32 sessions >> 200
+    "1H": 90,    # 7 bars/session x ~64 sessions >> 200
+    "1h": 90,
+    "1D": 400,   # 1 bar/session x ~280 sessions >> 200
+    "1w": 700,   # ~100 weeks; enough for weekly EMA200 + pivot seed
 }
 _DEFAULT_WARMUP_CALENDAR_DAYS = 1
 
@@ -63,6 +66,7 @@ _TF_TO_DHAN_INTERVAL: dict[str, int] = {
     "5m": 5,
     "15m": 15,
     "25m": 25,
+    "30m": 30,
     "1H": 60,
     "1h": 60,
 }
@@ -136,9 +140,10 @@ async def _warm_one(
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
 
     # Minimum bars expected across the full lookback window (not just one session).
+    # Demand at least 200 bars so EMA(200) fully seeds (Kite parity).
     lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(timeframe, _DEFAULT_WARMUP_CALENDAR_DAYS)
     session_bars = _TF_SESSION_BARS.get(timeframe, _DEFAULT_SESSION_BARS)
-    target_bars = session_bars * max(1, lookback_days // 2)
+    target_bars = max(200, session_bars * max(1, lookback_days // 2))
     if len(bars) < target_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
@@ -337,8 +342,9 @@ def _fetch_from_dhan(
     """Blocking — call via run_in_executor."""
     from dhanhq import dhanhq as DhanClient  # noqa: N812
 
+    is_daily = timeframe in ("1D", "1w", "1M")
     interval = _TF_TO_DHAN_INTERVAL.get(timeframe)
-    if interval is None:
+    if interval is None and not is_daily:
         log.warning("indicator_warmup_unsupported_tf", timeframe=timeframe)
         return []
 
@@ -351,14 +357,24 @@ def _fetch_from_dhan(
     from dhanhq import DhanContext
     ctx = DhanContext(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
     client = DhanClient(ctx)
-    resp = client.intraday_minute_data(
-        security_id=security_id,
-        exchange_segment=segment,
-        instrument_type=instrument,
-        from_date=from_date,
-        to_date=to_date,
-        interval=interval,
-    )
+    if is_daily:
+        # Intraday endpoint does not serve daily candles — use the daily-candles API.
+        resp = client.historical_daily_data(
+            security_id=security_id,
+            exchange_segment=segment,
+            instrument_type=instrument,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    else:
+        resp = client.intraday_minute_data(
+            security_id=security_id,
+            exchange_segment=segment,
+            instrument_type=instrument,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+        )
 
     if not isinstance(resp, dict) or resp.get("status") == "failure":
         log.warning("indicator_warmup_api_error", resp=str(resp)[:200])
@@ -402,6 +418,71 @@ def _fetch_from_dhan(
 
     bars.sort(key=lambda b: b.bar_time)
     return bars
+
+
+# ── Monitor indicator-matrix bootstrap ─────────────────────────────────────────
+
+# Spot index SIDs shown in the Execution-tab matrix.
+_MATRIX_INDEX_SIDS: dict[str, str] = {"NIFTY": "13", "BANKNIFTY": "25", "SENSEX": "51"}
+_MATRIX_TFS: list[str] = ["5m", "15m", "30m", "1H", "1D"]
+
+# Price-based families on the spot index (EMA200 + RSI(14) with SMA(14) signal to
+# match Kite "RSI 14 SMA 14"; PSAR already registry-default 0.02/0.2).
+_MATRIX_SPOT_INDICATORS: list[dict] = [
+    {"family": "ema", "periods": [9, 20, 50, 100, 200]},
+    {"family": "psar"},
+    {"family": "rsi", "period": 14, "ma_period": 14, "ma_kind": "sma"},
+]
+# Volume-anchored families computed on the index FUTURES contract (spot has no volume).
+_MATRIX_FUT_INDICATORS: list[dict] = [
+    {"family": "vwap"},
+    {"family": "vwma", "period": 20},
+]
+
+
+async def configure_matrix_suites(
+    engine: IndicatorEngine,
+    session_maker: object,
+) -> list[dict]:
+    """Configure the Execution-tab indicator matrix suites and return warmup entries.
+
+    Ensures the three spot index SIDs carry EMA(9..200)/PSAR/RSI on every matrix
+    timeframe, and each index's current-month futures contract carries VWAP/VWMA
+    (volume-anchored — meaningless on spot). Returns the additional warmup watchlist
+    entries (spot + futures) so ``warm_up_indicator_engine`` seeds them.
+    """
+    from pdp.strategies.directional_strangle import _resolve_front_month_futures_sid
+
+    entries: list[dict] = []
+
+    # Spot index price indicators.
+    for sid in _MATRIX_INDEX_SIDS.values():
+        for tf in _MATRIX_TFS:
+            engine.configure_suite(sid, tf, _MATRIX_SPOT_INDICATORS)
+        entries.append(
+            {"security_id": sid, "exchange_segment": "IDX_I", "timeframes": list(_MATRIX_TFS)}
+        )
+
+    # Futures volume indicators — resolve the front-month FUTIDX per index.
+    fut_map: dict[str, str] = {}
+    for name, sid in _MATRIX_INDEX_SIDS.items():
+        try:
+            fut_sid = await _resolve_front_month_futures_sid(name, session_maker)
+        except Exception:
+            fut_sid = None
+        if not fut_sid:
+            log.warning("matrix_futures_unresolved", underlying=name)
+            continue
+        fut_map[sid] = fut_sid
+        for tf in _MATRIX_TFS:
+            engine.configure_suite(fut_sid, tf, _MATRIX_FUT_INDICATORS)
+        entries.append(
+            {"security_id": fut_sid, "exchange_segment": "NSE_FNO", "timeframes": list(_MATRIX_TFS)}
+        )
+
+    engine.matrix_futures_sids = fut_map  # type: ignore[attr-defined]
+    log.info("matrix_suites_configured", spot=list(_MATRIX_INDEX_SIDS.values()), futures=fut_map)
+    return entries
 
 
 async def _persist_bars(col, bars: list[BarClosed]) -> None:

@@ -492,11 +492,17 @@ uv run python scripts/validate_options_warehouse.py
 
 The warehouse runs **self-healing gap backfill** automatically while the API is running (`WAREHOUSE_GAP_BACKFILL_ENABLED=True`), scanning every `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS=4.0` hours.
 
-To manually trigger a gap fill for a specific range:
+Everyday manual top-up (spot+options+vix+levels, all 3 indices, `--only-missing`, last 7 days):
 
 ```powershell
-# Gap-fill options from Dhan API
-task backfill:options -- --from 2026-06-01 --to 2026-06-25 --only-missing
+task backfill:daily
+```
+
+To manually trigger a gap fill for a specific range/index:
+
+```powershell
+# Gap-fill NIFTY options from Dhan API
+task backfill:options:nifty -- --from 2026-06-01 --to 2026-06-25 --only-missing
 ```
 
 ---

@@ -98,18 +98,28 @@ class IndicatorCell {
   final double? ema20;
   final double? ema50;
   final double? ema100;
+  final double? ema200;
   final double? stVal;
   final String? stDir; // "up" | "down"
   final double? psar;
+  final double? rsi;
+  final double? rsiMa; // SMA(14) signal line — Kite "RSI 14 SMA 14"
+  final double? vwap; // sourced from futures contract
+  final double? vwma; // sourced from futures contract
 
   const IndicatorCell({
     this.ema9,
     this.ema20,
     this.ema50,
     this.ema100,
+    this.ema200,
     this.stVal,
     this.stDir,
     this.psar,
+    this.rsi,
+    this.rsiMa,
+    this.vwap,
+    this.vwma,
   });
 
   factory IndicatorCell.fromJson(Map<String, dynamic>? json) {
@@ -119,9 +129,14 @@ class IndicatorCell {
       ema20: (json['ema20'] as num?)?.toDouble(),
       ema50: (json['ema50'] as num?)?.toDouble(),
       ema100: (json['ema100'] as num?)?.toDouble(),
+      ema200: (json['ema200'] as num?)?.toDouble(),
       stVal: (json['st_val'] as num?)?.toDouble(),
       stDir: json['st_dir'] as String?,
       psar: (json['psar'] as num?)?.toDouble(),
+      rsi: (json['rsi'] as num?)?.toDouble(),
+      rsiMa: (json['rsi_ma'] as num?)?.toDouble(),
+      vwap: (json['vwap'] as num?)?.toDouble(),
+      vwma: (json['vwma'] as num?)?.toDouble(),
     );
   }
 }
@@ -152,18 +167,38 @@ class SidIndicators {
   final Map<String, IndicatorCell> tf; // timeframe → cell
   final CamarillaLevels? camarillaDaily;
   final CamarillaLevels? camarillaWeekly;
-  final double? pdh, pdl, pwh, pwl;
+  final CamarillaLevels? camarillaMonthly;
+  final double? pdh, pdl, pwh, pwl, pmh, pml;
 
   const SidIndicators({
     required this.sid,
     required this.tf,
     this.camarillaDaily,
     this.camarillaWeekly,
+    this.camarillaMonthly,
     this.pdh,
     this.pdl,
     this.pwh,
     this.pwl,
+    this.pmh,
+    this.pml,
   });
+
+  /// Camarilla set for a timeframe: 5m/15m → daily, 30m/1H → weekly, 1D → monthly.
+  CamarillaLevels? camForTf(String tf) {
+    switch (tf) {
+      case '5m':
+      case '15m':
+        return camarillaDaily;
+      case '30m':
+      case '1H':
+        return camarillaWeekly;
+      case '1D':
+        return camarillaMonthly;
+      default:
+        return camarillaDaily;
+    }
+  }
 
   factory SidIndicators.fromJson(String sid, Map<String, dynamic> json) {
     final tfRaw = json['tf'] as Map<String, dynamic>? ?? {};
@@ -180,10 +215,15 @@ class SidIndicators {
       camarillaWeekly: CamarillaLevels.fromJson(
         json['camarilla_weekly'] as Map<String, dynamic>?,
       ),
+      camarillaMonthly: CamarillaLevels.fromJson(
+        json['camarilla_monthly'] as Map<String, dynamic>?,
+      ),
       pdh: (period?['pdh'] as num?)?.toDouble(),
       pdl: (period?['pdl'] as num?)?.toDouble(),
       pwh: (period?['pwh'] as num?)?.toDouble(),
       pwl: (period?['pwl'] as num?)?.toDouble(),
+      pmh: (period?['pmh'] as num?)?.toDouble(),
+      pml: (period?['pml'] as num?)?.toDouble(),
     );
   }
 }

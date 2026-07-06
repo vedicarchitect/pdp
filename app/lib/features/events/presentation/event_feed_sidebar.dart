@@ -84,12 +84,20 @@ class _EventTile extends StatelessWidget {
 
   final AppEvent event;
 
+  static String _headerLabel(AppEvent e) {
+    final name = e.underlying ?? e.securityId ?? 'SYSTEM';
+    return e.timeframe != null ? '$name · ${e.timeframe}' : name;
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Severities are normalised lowercase from the backend enum
+    // (INFO/WARNING/ERROR/CRITICAL) in AppEvent.fromJson.
     Color color;
     IconData icon;
     switch (event.severity) {
-      case 'alert':
+      case 'critical':
+      case 'error':
         color = AppColors.loss;
         icon = Icons.warning_rounded;
         break;
@@ -121,7 +129,7 @@ class _EventTile extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      event.securityId ?? 'SYSTEM',
+                      _headerLabel(event),
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,

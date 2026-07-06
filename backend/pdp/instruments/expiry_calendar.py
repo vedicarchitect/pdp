@@ -1,26 +1,84 @@
-"""NIFTY expiry calendar — resolve (trade_date, expiry_flag, expiry_code) → real expiry_date.
+"""Expiry resolution — the one place every module resolves an option expiry or DTE.
 
 The expiry list is derived **empirically** (no hardcoded weekday/holiday rules) so it survives
-the NIFTY weekly-expiry weekday regime changes (Thursday → Wednesday → Tuesday) and holiday
-shifts automatically. The calendar is built once by a script and cached to JSON
-(``settings.EXPIRY_CACHE_PATH``). Runtime consumers only read the cache.
+weekly-expiry weekday regime changes (e.g. NIFTY's Thursday → Wednesday → Tuesday history,
+BANKNIFTY going monthly-only, SENSEX being Thursday not Tuesday) and holiday shifts
+automatically. Never hardcode a weekday anywhere else — add a caller here instead.
 
-``resolve_expiry`` uses effective-window arithmetic: for a ``trade_date`` the ``code``-th expiry of
-a flag is the ``code``-th entry of the sorted expiry list on or after ``trade_date`` (the expiry day
-itself still counts as code 1).
+Two lookup families, both generic/cadence-agnostic:
+
+- **Live/dashboard/warehouse** (forward-looking): ``pdp.strategy.strikes.nearest_expiry`` reads
+  the Dhan scrip master (``instruments`` table) — the authoritative source for "what expiries
+  exist right now and in the future".
+- **Backtest** (historical): ``real_expiries_from_option_bars`` / ``nearest_real_expiry`` (below)
+  read the expiries actually stored in ``option_bars`` for a trade date — the authoritative
+  source for "what expiry actually traded on this historical date".
+
+``dte`` is the one shared calendar-days-to-expiry calculation used by every DTE filter.
+
+The legacy ``NiftyExpiryCalendar`` (JSON-cache, weekday-projected) remains for any pre-existing
+synthetic cache reads, but new code should prefer the two functions above.
 """
 from __future__ import annotations
 
 import bisect
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
 log = structlog.get_logger()
 
 _FLAGS = ("WEEK", "MONTH")
+
+
+def dte(trade_date: date, expiry: date) -> int:
+    """Calendar days from ``trade_date`` to ``expiry`` (0 = expiry day itself)."""
+    return (expiry - trade_date).days
+
+
+def within_dte(trade_date: date, expiry: date | None, dte_max: int | None) -> bool:
+    """Whether ``trade_date`` is within ``dte_max`` calendar days of ``expiry``.
+
+    ``dte_max=None`` means no filter (always True). An unresolved ``expiry`` (``None``) also
+    passes through — a missing expiry is a data gap the caller's own gating handles elsewhere,
+    not a DTE-filter decision.
+    """
+    if dte_max is None or expiry is None:
+        return True
+    return dte(trade_date, expiry) <= dte_max
+
+
+def real_expiries_from_option_bars(mdb: Any, underlying: str) -> list[date]:
+    """Distinct real expiries actually stored in ``option_bars`` for ``underlying``, sorted.
+
+    This is the historically-correct expiry source for a backtest: the chain that truly
+    existed per date, cadence-agnostic (weekly / monthly-only / weekday-shifted / regime
+    change). Empty when the collection has no chain for the underlying.
+    """
+    vals = mdb["option_bars"].distinct("expiry_date", {"underlying": underlying})
+    out: list[date] = []
+    for v in vals:
+        if isinstance(v, datetime):
+            out.append(v.date())
+        elif isinstance(v, date):
+            out.append(v)
+        elif isinstance(v, str):
+            try:
+                out.append(date.fromisoformat(v[:10]))
+            except ValueError:
+                continue
+    return sorted(set(out))
+
+
+def nearest_real_expiry(real_expiries: list[date], d: date) -> date | None:
+    """The first real expiry on or after ``d`` (expiry day itself counts), else ``None``."""
+    for e in real_expiries:
+        if e >= d:
+            return e
+    return None
 
 
 # ── Runtime calendar (reads cache) ───────────────────────────────────────────

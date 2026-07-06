@@ -31,11 +31,11 @@ from pymongo import MongoClient  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
 from pdp.backtest.day_loader import biz_days, load_window  # noqa: E402
-from pdp.backtest.strangle_config import EXPIRY_WEEKDAY, SECURITY_IDS, StrangleConfig, lot_size_for_date  # noqa: E402
+from pdp.backtest.strangle_config import SECURITY_IDS, StrangleConfig, lot_size_for_date  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_report import RunWriter  # noqa: E402
 from pdp.backtest.strangle_sim import BarStatus, format_status_line, simulate_strangle_day  # noqa: E402
-from pdp.instruments.expiry_calendar import NiftyExpiryCalendar  # noqa: E402
+from pdp.instruments.expiry_calendar import NiftyExpiryCalendar, within_dte  # noqa: E402
 from pdp.settings import get_settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -265,7 +265,6 @@ def main() -> int:
             mdb, cal, chunk,
             security_id=cfg.security_id,
             underlying=cfg.underlying,
-            expiry_weekday=3, # hardcoded for testing since the DB has 2026-07-02
         )
         vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
@@ -279,12 +278,9 @@ def main() -> int:
         if writer:
             writer.log(msg)
         for d in window.valid_days:
-            # DTE filter: skip days where calendar days to expiry exceed dte_max.
-            if cfg.dte_max is not None:
-                expiry = window.expiry_by_day.get(d)
-                if expiry is not None and (expiry - d).days > cfg.dte_max:
-                    skipped += 1
-                    continue
+            if not within_dte(d, window.expiry_by_day.get(d), cfg.dte_max):
+                skipped += 1
+                continue
             # Apply correct lot size for this trade date (changes over time per underlying).
             day_lot = lot_size_for_date(cfg.underlying, d)
             day_cfg = (cfg if day_lot == cfg.lot_size
