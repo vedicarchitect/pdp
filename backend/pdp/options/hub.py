@@ -75,6 +75,10 @@ class OptionsHub:
                 log.warning("options_hub_listener_error", exc=str(exc))
         if not self._clients:
             return
+        u_upper = underlying.upper()
+        target_clients = [c for c in self._clients if c.underlying == u_upper and c.expiry == expiry]
+        if not target_clients:
+            return
         # Serialise datetime fields for JSON
         serialisable = {
             k: (v.isoformat() if isinstance(v, datetime) else v)
@@ -82,9 +86,8 @@ class OptionsHub:
             if k != "_id"
         }
         payload = json.dumps({"type": "snapshot", **serialisable})
-        for client in self._clients:
-            if client.underlying == underlying.upper() and client.expiry == expiry:
-                client.push(payload)
+        for client in target_clients:
+            client.push(payload)
 
     def make_client(self, ws, underlying: str, expiry: str) -> _OptionsClient:  # type: ignore[no-untyped-def]
         return _OptionsClient(ws, underlying, expiry)
