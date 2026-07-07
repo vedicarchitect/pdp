@@ -202,7 +202,7 @@ class _OverallStatusBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final pnlColor = snap.dayPnl >= 0 ? Colors.green : Colors.red;
+    final pnlColor = snap.dayPnl >= 0 ? AppColors.profit : AppColors.loss;
     final bkt = snap.bucket ?? '--';
     return Card(
       child: Padding(
@@ -264,7 +264,7 @@ class _UnderlyingSection extends ConsumerWidget {
       }
     });
 
-    final pnlColor = displayPnl >= 0 ? Colors.green : Colors.red;
+    final pnlColor = displayPnl >= 0 ? AppColors.profit : AppColors.loss;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -447,7 +447,7 @@ class _LegsTable extends StatelessWidget {
   DataRow _legRow(BuildContext context, LegRow leg) {
     final isCall = leg.optType == 'CE';
     final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
-    final mtmColor = (leg.mtm ?? 0) >= 0 ? Colors.green : Colors.red;
+    final mtmColor = (leg.mtm ?? 0) >= 0 ? AppColors.profit : AppColors.loss;
     final tag = leg.isHedge
         ? 'H'
         : leg.isMomentum

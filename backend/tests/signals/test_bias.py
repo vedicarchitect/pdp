@@ -34,7 +34,6 @@ def _all_bull_inputs() -> BiasInputs:
         cam_daily=CamLevels(r3=99.0, r4=99.5, s3=90.0, s4=89.5),
         cam_weekly=CamLevels(r3=98.0, r4=98.5, s3=88.0, s4=87.5),
         pdh=95.0, pdl=85.0, pwh=94.0, pwl=84.0,
-        vwap=96.0,
         orb_high=97.5, orb_low=93.0,
         pcr=1.3,
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0,
@@ -78,12 +77,10 @@ def test_pcr_thresholds():
     assert score_bias(BiasInputs(spot=100.0, pcr=1.0)).votes["pcr"] == 0
 
 
-def test_vwap_and_orb_votes():
-    r = score_bias(BiasInputs(spot=100.0, vwap=98.0, orb_high=99.0, orb_low=95.0))
-    assert r.votes["vwap"] == 1
+def test_orb_votes():
+    r = score_bias(BiasInputs(spot=100.0, orb_high=99.0, orb_low=95.0))
     assert r.votes["orb"] == 1
-    r2 = score_bias(BiasInputs(spot=94.0, vwap=98.0, orb_high=99.0, orb_low=95.0))
-    assert r2.votes["vwap"] == -1
+    r2 = score_bias(BiasInputs(spot=94.0, orb_high=99.0, orb_low=95.0))
     assert r2.votes["orb"] == -1
 
 
@@ -106,7 +103,7 @@ def test_all_bear_is_complete_bear_ratio():
         cam_daily=CamLevels(r3=95, r4=96, s3=85, s4=84),
         cam_weekly=CamLevels(r3=94, r4=95, s3=84, s4=83),
         pdh=90, pdl=86, pwh=91, pwl=85,
-        vwap=88, orb_high=89, orb_low=86, pcr=0.7,
+        orb_high=89, orb_low=86, pcr=0.7,
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0,
         vix_recent=[13.0, 12.5, 12.0],
     )
@@ -117,11 +114,11 @@ def test_all_bear_is_complete_bear_ratio():
 
 
 def test_conflicting_inputs_are_neutral():
-    # Two equal-weight signals that cancel: VWAP bullish (spot>vwap, +1*1.0) and
+    # Two equal-weight signals that cancel: PCR bullish (pcr>1.1, +1*1.0) and
     # ORB bearish (spot<orb_low, -1*1.0) -> net score 0 -> neutral.
-    inp = BiasInputs(spot=100.0, vwap=99.0, orb_high=102.0, orb_low=101.0)
+    inp = BiasInputs(spot=100.0, pcr=1.3, orb_high=102.0, orb_low=101.0)
     r = score_bias(inp)
-    assert r.votes == {"vwap": 1, "orb": -1}
+    assert r.votes == {"pcr": 1, "orb": -1}
     assert r.score == 0.0
     assert r.bucket is BiasBucket.NEUTRAL
     assert (r.pe_lots, r.ce_lots) == (1, 1)

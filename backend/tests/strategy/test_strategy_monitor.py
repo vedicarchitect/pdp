@@ -16,7 +16,6 @@ def mock_strategy():
     # Use spec=DirectionalStrangle so the endpoint's isinstance() check passes.
     strategy = MagicMock(spec=DirectionalStrangle)
     strategy.underlying = "NIFTY"
-    strategy._futures_sid = "13_FUT"
     strategy.state = AsyncMock(return_value={
         "legs": [
             {
@@ -75,6 +74,7 @@ def test_app(mock_strategy):
 
     app.state.redis = AsyncMock()
     app.state.indicator_engine = MagicMock()
+    app.state.indicator_engine.matrix_futures_sids = {"13": "13_FUT"}
     app.state.indicator_engine.get_ema.return_value = None
     app.state.indicator_engine.get.return_value = None
     app.state.indicator_engine.get_psar.return_value = None

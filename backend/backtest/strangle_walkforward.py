@@ -140,13 +140,13 @@ def objective(m: Metrics, kind: str) -> float:
 _WEIGHT_PROFILES: dict[str, dict[str, float]] = {
     "trend": {"w_ema_1h": 2.5, "w_ema_15m": 2.0, "w_ema_5m": 1.5,
               "w_cam_daily": 1.0, "w_cam_weekly": 1.0, "w_swing": 1.0,
-              "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.0},
+              "w_orb": 1.0, "w_pcr": 1.0},
     "balanced": {"w_ema_1h": 2.0, "w_ema_15m": 1.5, "w_ema_5m": 1.0,
                  "w_cam_daily": 1.5, "w_cam_weekly": 1.5, "w_swing": 1.0,
-                 "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.0},
+                 "w_orb": 1.0, "w_pcr": 1.0},
     "levels": {"w_ema_1h": 1.0, "w_ema_15m": 1.0, "w_ema_5m": 0.5,
                "w_cam_daily": 2.0, "w_cam_weekly": 2.0, "w_swing": 1.5,
-               "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.5},
+               "w_orb": 1.0, "w_pcr": 1.5},
 }
 
 # Aggressiveness — how strong a lean must be to size up (bucket thresholds).

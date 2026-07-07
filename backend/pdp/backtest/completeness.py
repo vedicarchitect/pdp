@@ -21,16 +21,14 @@ MAX_GAP_MIN = 20.0               # largest tolerated intraday gap, minutes
 
 # Backtest input families the gap radar assesses per (underlying, trade-date), and the
 # human-readable label shown when a family is missing for that date. "levels_weekly" covers
-# the prior-week-spot-or-index_levels weekly-Camarilla input; "futures" has no source yet
-# (see FamilyGaps.futures) so it is always reported missing until a source is wired up.
-RADAR_FAMILIES = ("spot", "options", "vix", "levels_weekly", "futures")
+# the prior-week-spot-or-index_levels weekly-Camarilla input.
+RADAR_FAMILIES = ("spot", "options", "vix", "levels_weekly")
 
 FAMILY_LABELS: dict[str, str] = {
     "spot": "spot/VWAP missing",
     "options": "options missing",
     "vix": "VIX missing",
     "levels_weekly": "weekly Camarilla missing",
-    "futures": "futures missing",
 }
 
 
@@ -86,7 +84,7 @@ class FamilyGaps:
     `option_bars`, and `index_levels`.
     """
 
-    __slots__ = ("spot", "options", "vix", "levels_weekly", "futures")
+    __slots__ = ("spot", "options", "vix", "levels_weekly")
 
     def __init__(
         self,
@@ -95,13 +93,11 @@ class FamilyGaps:
         options: set[date],
         vix: set[date],
         levels_weekly: set[date],
-        futures: set[date],
     ) -> None:
         self.spot = spot
         self.options = options
         self.vix = vix
         self.levels_weekly = levels_weekly
-        self.futures = futures
 
     def _gap_set(self, family: str) -> set[date]:
         return getattr(self, family)  # type: ignore[no-any-return]

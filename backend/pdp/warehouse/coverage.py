@@ -178,14 +178,6 @@ async def _levels_family(
     return summary, gap_days
 
 
-def _futures_family(days: list[date]) -> tuple[dict[str, Any], set[date]]:
-    """Futures has no ingested source yet — always reported missing (see design non-goals)."""
-    summary = _empty_family(len(days))
-    summary["status"] = "unavailable"
-    summary["note"] = "futures source not yet ingested"
-    return summary, set(days)
-
-
 async def per_expiry_coverage(
     mongo_db: AsyncIOMotorDatabase,
     underlying: str,
@@ -260,12 +252,11 @@ async def underlying_coverage(
     vix_summary, vix_gaps = await _spot_gaps(mongo_db, SID_MAP["VIX"], days)
     levels_daily_summary, _ = await _levels_family(mongo_db, underlying, "daily", days)
     levels_weekly_summary, levels_weekly_gaps = await _levels_family(mongo_db, underlying, "weekly", days)
-    futures_summary, futures_gaps = _futures_family(days)
 
     camarilla_gaps = weekly_camarilla_gap_days(spot_gaps, levels_weekly_gaps, days)
     gaps = FamilyGaps(
         spot=spot_gaps, options=options_gaps, vix=vix_gaps,
-        levels_weekly=camarilla_gaps, futures=futures_gaps,
+        levels_weekly=camarilla_gaps,
     )
 
     by_expiry = await per_expiry_coverage(
@@ -281,7 +272,6 @@ async def underlying_coverage(
             "vix": vix_summary,
             "levels_daily": levels_daily_summary,
             "levels_weekly": levels_weekly_summary,
-            "futures": futures_summary,
         },
         "by_expiry": by_expiry,
         "radar": radar_window(gaps, days),

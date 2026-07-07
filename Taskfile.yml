@@ -43,6 +43,11 @@ tasks:
     cmds:
       - perl scripts/monitor.pl
 
+  monitor:convergence:
+    desc: "Check cumulative backtest-vs-paper convergence for a run. Args: -- <run_id>"
+    cmds:
+      - curl -s http://localhost:8000/api/v1/strangle-backtests/runs/{{.CLI_ARGS}}/vs-paper/convergence
+
   reset-paper:
     desc: "⚠️  Clear paper orders/trades/positions and reset ID sequences"
     dir: backend

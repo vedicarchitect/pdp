@@ -3,7 +3,7 @@
 Codifies ``strategies/MultiTimeFrameSelling.txt``: combine many timeframe/level
 signals into a single bias *score* in [-1, +1], map it to one of seven bias
 *buckets*, and from the bucket derive a PE:CE sell-lot *ratio* for a directional
-strangle. VIX is a hard entry **gate**; PCR/EMA/pivots/swing/VWAP/ORB are votes.
+strangle. VIX is a hard entry **gate**; PCR/EMA/pivots/swing/ORB are votes.
 
 Design goals:
 - **Pure**: no I/O, no globals, deterministic. Identical inputs -> identical
@@ -67,8 +67,6 @@ class BiasInputs:
     pdl: float | None = None
     pwh: float | None = None
     pwl: float | None = None
-    # VWAP (single line; price vs VWAP)
-    vwap: float | None = None
     # 15m opening range
     orb_high: float | None = None
     orb_low: float | None = None
@@ -97,7 +95,6 @@ class BiasWeights:
     w_cam_daily: float = 1.5
     w_cam_weekly: float = 1.5
     w_swing: float = 1.0
-    w_vwap: float = 1.0
     w_orb: float = 1.0
     w_pcr: float = 1.0
 
@@ -214,16 +211,6 @@ def _swing_vote(
     return 0
 
 
-def _vwap_vote(spot: float, vwap: float | None) -> int | None:
-    if vwap is None:
-        return None
-    if spot > vwap:
-        return 1
-    if spot < vwap:
-        return -1
-    return 0
-
-
 def _orb_vote(spot: float, hi: float | None, lo: float | None) -> int | None:
     if hi is None or lo is None:
         return None
@@ -309,7 +296,6 @@ def score_bias(
         (_cam_vote(inp.spot, inp.cam_daily), w.w_cam_daily, "cam_daily"),
         (_cam_vote(inp.spot, inp.cam_weekly), w.w_cam_weekly, "cam_weekly"),
         (_swing_vote(inp.spot, inp.pdh, inp.pdl, inp.pwh, inp.pwl), w.w_swing, "swing"),
-        (_vwap_vote(inp.spot, inp.vwap), w.w_vwap, "vwap"),
         (_orb_vote(inp.spot, inp.orb_high, inp.orb_low), w.w_orb, "orb"),
         (_pcr_vote(inp.pcr, w), w.w_pcr, "pcr"),
     ]

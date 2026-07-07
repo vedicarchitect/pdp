@@ -95,14 +95,6 @@ async def test_levels_family_gap_days_from_index_levels():
     assert summary["covered_days"] == 1
 
 
-def test_futures_family_always_reports_unavailable():
-    days = [date(2026, 1, 5), date(2026, 1, 6)]
-    summary, gaps = cov._futures_family(days)
-    assert summary["status"] == "unavailable"
-    assert gaps == set(days)
-    assert summary["covered_days"] == 0
-
-
 async def test_underlying_coverage_rejects_unsupported_underlying():
     mongo_db = _FakeMongoDb()
     settings = object()
@@ -138,6 +130,7 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
             docs=[{"ts": _ist_ts(day)}],
         ),
         index_levels=_FakeCollection(docs=[]),
+        option_bars=_FakeCollection(agg_rows=[]),
     )
 
     result = await cov.underlying_coverage(
@@ -146,4 +139,3 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
 
     assert result["radar"]["2026-01-06"]["spot"] == "ready"
     assert result["radar"]["2026-01-06"]["levels_weekly"] == "ready"
-    assert result["radar"]["2026-01-06"]["futures"] == "futures missing"

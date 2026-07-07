@@ -440,6 +440,34 @@ _MATRIX_FUT_INDICATORS: list[dict] = [
 ]
 
 
+async def _resolve_front_month_futures_sid(underlying: str, session_maker: object) -> str | None:
+    """Query the instruments table for the nearest-expiry FUTIDX for this underlying.
+
+    Sole consumer is the matrix's futures VWAP/VWMA display (spot has no volume) —
+    bias-scoring dropped its own futures-SID path in ``backtest-paper-parity``.
+    """
+    from sqlalchemy import select
+
+    from pdp.instruments.models import Instrument
+
+    try:
+        async with session_maker() as session:  # type: ignore[operator]
+            result = await session.execute(
+                select(Instrument.security_id)
+                .where(
+                    Instrument.instrument_type == "FUTIDX",
+                    Instrument.underlying == underlying,
+                    Instrument.expiry >= date.today(),
+                )
+                .order_by(Instrument.expiry)
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return str(row) if row else None
+    except Exception:
+        return None
+
+
 async def configure_matrix_suites(
     engine: IndicatorEngine,
     session_maker: object,
@@ -451,8 +479,6 @@ async def configure_matrix_suites(
     (volume-anchored — meaningless on spot). Returns the additional warmup watchlist
     entries (spot + futures) so ``warm_up_indicator_engine`` seeds them.
     """
-    from pdp.strategies.directional_strangle import _resolve_front_month_futures_sid
-
     entries: list[dict] = []
 
     # Spot index price indicators.

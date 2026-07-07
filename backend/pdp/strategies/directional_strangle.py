@@ -40,6 +40,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from pdp.instruments.symbols import symbol_for
 from pdp.settings import get_settings
 from pdp.signals.bias import (
     BiasBucket,
@@ -56,38 +57,10 @@ from pdp.strategy.strikes import (
     nearest_weekly_expiry,
     resolve_otm_option,
 )
-from pdp.instruments.symbols import symbol_for
 
 if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
     from pdp.strategy.context import StrategyContext
-
-from sqlalchemy import select
-
-
-async def _resolve_front_month_futures_sid(
-    underlying: str,
-    session_maker: Any,
-) -> str | None:
-    """Query instruments table for the nearest-expiry FUTIDX for this underlying."""
-    from pdp.instruments.models import Instrument
-
-    try:
-        async with session_maker() as session:
-            result = await session.execute(
-                select(Instrument.security_id)
-                .where(
-                    Instrument.instrument_type == "FUTIDX",
-                    Instrument.underlying == underlying,
-                    Instrument.expiry >= date.today(),
-                )
-                .order_by(Instrument.expiry)
-                .limit(1)
-            )
-            row = result.scalar_one_or_none()
-            return str(row) if row else None
-    except Exception:
-        return None
 
 _IST = ZoneInfo("Asia/Kolkata")
 _VIX_RECENT_WINDOW = 3
@@ -162,17 +135,6 @@ class DirectionalStrangle(Strategy):
         self.index_segment: str = p.get("index_segment", "IDX_I")
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self._vix_sid: str = str(p.get("vix_security_id", "21"))
-        # Front-month futures SID for VWAP (real volume vs zero-volume index spot).
-        # Resolved automatically from the instruments table; YAML override still accepted.
-        _futs = p.get("futures_security_id")
-        if _futs:
-            self._futures_sid: str | None = str(_futs)
-        elif ctx.session_maker is not None:
-            self._futures_sid = await _resolve_front_month_futures_sid(
-                self.underlying, ctx.session_maker
-            )
-        else:
-            self._futures_sid = None
 
         self._lot_size: int = int(p.get("lot_size", 65))
         self._scale_lots: int = int(p.get("scale_lots", 2))
@@ -217,7 +179,6 @@ class DirectionalStrangle(Strategy):
             w_cam_daily=float(p.get("w_cam_daily", 1.0)),
             w_cam_weekly=float(p.get("w_cam_weekly", 1.0)),
             w_swing=float(p.get("w_swing", 1.0)),
-            w_vwap=float(p.get("w_vwap", 1.0)),
             w_orb=float(p.get("w_orb", 1.0)),
             w_pcr=float(p.get("w_pcr", 1.0)),
             th_complete=float(p.get("th_complete", 0.85)),
@@ -302,7 +263,6 @@ class DirectionalStrangle(Strategy):
             squareoff=self._squareoff_ist.isoformat(),
             roll_trigger_prem=self._roll_trigger_prem,
             roll_target_min_prem=self._roll_target_min_prem,
-            futures_sid=self._futures_sid,
         )
 
         # Timeframe key audit: check which indicator timeframes are warmed
@@ -360,6 +320,8 @@ class DirectionalStrangle(Strategy):
         if now >= self._squareoff_ist:
             if self._short_legs or self._hedge_legs or self._momentum_legs:
                 await self._close_all("square_off")
+            day_pnl = await self._day_realized()
+            self._emit_event(StrangleEventType.SQUARE_OFF, reason="square_off", day_pnl=float(day_pnl))
             self._done_for_day = True
             return
         if self._done_for_day:
@@ -372,11 +334,12 @@ class DirectionalStrangle(Strategy):
         # Update stop-gate counters on each 5m bar
         self._update_stop_gates()
 
-        day_pnl = await self._day_realized()
-        if day_pnl <= -self._day_loss_limit:
+        day_realized = await self._day_realized()
+        if day_realized <= -self._day_loss_limit:
             if self._short_legs or self._hedge_legs or self._momentum_legs:
                 await self._close_all("day_loss_cap")
-            self._emit_event(StrangleEventType.DAY_LOSS_CAP, day_pnl=float(day_pnl))
+            day_pnl = await self._day_realized()
+            self._emit_event(StrangleEventType.DAY_LOSS_CAP, reason="day_loss_cap", day_pnl=float(day_pnl))
             self._done_for_day = True
             # Persist halt so a same-day restart stays halted (cleared by day rollover).
             if self._day_key is not None and self.ctx.market is not None:
@@ -641,9 +604,6 @@ class DirectionalStrangle(Strategy):
         cam_weekly = _to_cam(weekly_pivot)
 
         pl = ind.period_levels(self.sid, "5m") if ind else None
-        # VWAP: prefer futures SID (has real volume); fall back to spot (returns None for index)
-        vwap_sid = self._futures_sid if self._futures_sid else self.sid
-        vwap_s = ind.vwap(vwap_sid, "5m") if ind else None
 
         # PCR: read from chain hub if wired (only available during live chain polling)
         pcr: float | None = None
@@ -661,7 +621,6 @@ class DirectionalStrangle(Strategy):
             pdl=pl.pdl if pl else None,
             pwh=pl.pwh if pl else None,
             pwl=pl.pwl if pl else None,
-            vwap=vwap_s.vwap if vwap_s else None,
             orb_high=self._orb_high,
             orb_low=self._orb_low,
             pcr=pcr,
@@ -994,6 +953,11 @@ class DirectionalStrangle(Strategy):
         }
 
     async def _close_all(self, reason: str) -> None:
+        """Close every open leg. Per-leg terminal events are emitted by
+        `_close_short_leg`/`_close_hedge_leg`/`_close_momentum_leg`; the caller
+        (`on_bar`) emits the single day summary event (SQUARE_OFF/DAY_LOSS_CAP)
+        with the day's final realized total, whether or not any legs were open.
+        """
         for leg in list(self._short_legs):
             await self._close_short_leg(leg, reason)
         for leg in list(self._hedge_legs):
@@ -1005,11 +969,6 @@ class DirectionalStrangle(Strategy):
         self._momentum_legs.clear()
         self._current_bucket = None
         self._stop_gate.clear()
-        if reason in ("square_off", "day_loss_cap"):
-            event_type = StrangleEventType.SQUARE_OFF if reason == "square_off" else StrangleEventType.DAY_LOSS_CAP
-            self._emit_event(event_type, reason=reason)
-        else:
-            self._emit_event(StrangleEventType.LEG_CLOSE, reason=reason, all_legs=True)
 
     async def _close_shorts_and_hedges(self, reason: str) -> None:
         for leg in list(self._short_legs):

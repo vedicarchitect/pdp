@@ -14,6 +14,7 @@ Read routes (tasks 2.2, 2.3, 2.4):
   GET  /runs/{id}/decisions          decision trace (events by default; ?full=true for per-minute)
   GET  /runs/{id}/promotion          promotion rationale/evidence
   GET  /runs/{id}/vs-paper           backtest-vs-paper alignment (per-day; ?date=&granularity=minute)
+  GET  /runs/{id}/vs-paper/convergence  cumulative divergence + top causes (backtest-paper-parity)
 
 Multi-run comparison (task 2.4):
   POST /compare                      aligned equity + headline metrics for N run ids
@@ -29,6 +30,7 @@ Promotion (task 5.2):
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import date as _date
 from typing import Any
 
@@ -499,4 +501,68 @@ async def get_run_vs_paper(
         "granularity": "day",
         "paper_data_available": bool(paper_days),
         "days": aligned,
+    }
+
+
+@router.get("/runs/{run_id}/vs-paper/convergence")
+async def get_run_vs_paper_convergence(
+    request: Request,
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Cumulative backtest-vs-paper convergence for a run's index (daily convergence check).
+
+    Tracks whether paper is walking toward the run's proven trajectory as paper accumulates:
+    cumulative net on each side plus the most frequent divergence causes, computed from the
+    same per-day alignment rows as ``/vs-paper`` (no new store). A day only counts toward the
+    cumulative totals once both sides have traded it (see `align_days`).
+    """
+    run = await _col(request, "backtest_runs").find_one(
+        {"run_id": run_id}, {"_id": 0, "config": 1, "window": 1})
+    if run is None:
+        raise HTTPException(404, detail=f"Run not found: {run_id}")
+
+    live_strategy_id = resolve_live_strategy_id(run)
+    if live_strategy_id is None:
+        raise HTTPException(422, detail=f"Cannot resolve a live strategy_id for run: {run_id}")
+
+    window = run.get("window") or {}
+    if not window.get("from") or not window.get("to"):
+        raise HTTPException(422, detail=f"Run {run_id} has no window to compare against.")
+    win_from = _date.fromisoformat(str(window["from"])[:10])
+    win_to = _date.fromisoformat(str(window["to"])[:10])
+    underlying = str((run.get("config") or {}).get("underlying", "NIFTY"))
+
+    backtest_days = await _col(request, "backtest_days").find(
+        {"run_id": run_id}, {"_id": 0, "date": 1, "net": 1}).sort("date", 1).to_list(length=2000)
+
+    paper_by_strategy = await paper_pnl_by_strategy(db, win_from, win_to, live_strategy_id)
+    paper_days = paper_by_strategy.get(live_strategy_id, [])
+
+    aligned = align_days(backtest_days, paper_days)
+    radar = await _gap_radar(request, underlying, win_from, win_to)
+    aligned = annotate_day_divergence(aligned, radar)
+
+    backtest_cumulative_net = round(
+        sum(d["backtest_net"] for d in aligned if d["backtest_net"] is not None), 2)
+    paper_cumulative_net = round(
+        sum(d["paper_net"] for d in aligned if d["paper_net"] is not None), 2)
+    divergence = round(backtest_cumulative_net - paper_cumulative_net, 2)
+
+    cause_counts: Counter[str] = Counter(
+        d["cause"] for d in aligned if d.get("diverges") and d.get("cause")
+    )
+    top_causes = [{"cause": cause, "count": count} for cause, count in cause_counts.most_common(5)]
+
+    return {
+        "run_id": run_id,
+        "strategy_id": live_strategy_id,
+        "index": underlying,
+        "paper_data_available": bool(paper_days),
+        "aligned_days": len(aligned),
+        "diverging_days": sum(1 for d in aligned if d.get("diverges")),
+        "backtest_cumulative_net": backtest_cumulative_net,
+        "paper_cumulative_net": paper_cumulative_net,
+        "divergence": divergence,
+        "top_causes": top_causes,
     }

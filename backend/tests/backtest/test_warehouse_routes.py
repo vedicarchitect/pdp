@@ -474,7 +474,10 @@ def test_vs_paper_run_not_found(client, _no_gap_radar):
 
 
 def test_vs_paper_unresolvable_strategy_id(client, _no_gap_radar):
-    run = {**_RUN, "config": {}}
+    # "strangle" family + no underlying deliberately defaults to NIFTY (canonical_id's
+    # documented interim heuristic) — use a family with no live registry entry at all to
+    # exercise the genuinely-unresolvable path.
+    run = {**_RUN, "strategy_id": "no_such_family", "config": {}}
     client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=run)
     client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
     try:
@@ -525,3 +528,76 @@ def test_vs_paper_minute_diff_flags_mismatch(client, _no_gap_radar, monkeypatch)
     assert data["granularity"] == "minute"
     assert len(data["minutes"]) == 1
     assert data["minutes"][0]["mismatch"] is True
+
+
+# ── vs-paper/convergence (backtest-paper-parity task 6) ────────────────────────
+
+
+def test_vs_paper_convergence_cumulative_sums(client, _no_gap_radar):
+    days = [_DAY, {**_DAY, "date": "2026-01-03", "net": 1000.0}]
+    client.app.state.mongo_db._cols["backtest_days"].find.return_value = _cursor(days)
+
+    rows = [
+        ("directional_strangle_nifty", "1001", "SELL", 50, Decimal("100"), Decimal("5"),
+         datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1001", "BUY", 50, Decimal("60"), Decimal("5"),
+         datetime(2026, 1, 2, 6, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1002", "SELL", 50, Decimal("50"), Decimal("5"),
+         datetime(2026, 1, 3, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1002", "BUY", 50, Decimal("50"), Decimal("5"),
+         datetime(2026, 1, 3, 6, 0, tzinfo=UTC)),
+    ]
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session(rows)
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["index"] == "NIFTY"
+    assert data["aligned_days"] == 2
+    assert data["backtest_cumulative_net"] == pytest.approx(3000.0)
+    assert data["paper_cumulative_net"] == pytest.approx(1980.0)
+    assert data["divergence"] == pytest.approx(
+        data["backtest_cumulative_net"] - data["paper_cumulative_net"]
+    )
+
+
+def test_vs_paper_convergence_top_causes(client, monkeypatch):
+    monkeypatch.setattr(
+        "pdp.backtest.warehouse_routes.underlying_coverage",
+        AsyncMock(return_value={"radar": {"2026-01-02": {"spot": "spot/VWAP missing"}}}),
+    )
+    rows = [
+        ("directional_strangle_nifty", "1001", "SELL", 50, Decimal("100"), Decimal("5"),
+         datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1001", "BUY", 50, Decimal("60"), Decimal("5"),
+         datetime(2026, 1, 2, 6, 0, tzinfo=UTC)),
+    ]
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session(rows)
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["diverging_days"] == 1
+    assert data["top_causes"] == [{"cause": "spot/VWAP missing", "count": 1}]
+
+
+def test_vs_paper_convergence_run_not_found(client, _no_gap_radar):
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=None)
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/nope/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 404

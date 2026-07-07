@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/theme/app_colors.dart';
 import '../../../shared/format.dart';
 import '../application/journal_providers.dart';
 import '../domain/journal_models.dart';
@@ -149,7 +150,7 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
               children: [
                 _StatText('Trades', '${s.totalTrades}'),
                 _StatText('Realized P&L', formatInr(s.realizedPnl),
-                    color: s.realizedPnl >= 0 ? Colors.green : Colors.red),
+                    color: s.realizedPnl >= 0 ? AppColors.profit : AppColors.loss),
                 _StatText('Win Rate', '${(s.winRate * 100).toStringAsFixed(1)}%'),
                 _StatText('Charges', formatInr(s.totalCharges, showSign: false)),
               ],
@@ -279,7 +280,7 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
                           : Text(
                               t.pnl != null ? formatInr(t.pnl!) : '',
                               style: TextStyle(
-                                color: isPositive ? Colors.green : Colors.red,
+                                color: isPositive ? AppColors.profit : AppColors.loss,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),

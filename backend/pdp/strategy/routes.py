@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import msgspec
+import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -12,6 +13,8 @@ from pydantic import BaseModel, ValidationError
 from pdp.strategy import unified_registry
 from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost
 from pdp.strategy.schemas import strategy_info_from_dict
+
+log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/strategies", tags=["strategies"])
 strangle_router = APIRouter(prefix="/api/v1/strangle", tags=["strangle"])
@@ -23,8 +26,6 @@ _INDEX_SIDS: dict[str, str] = {
     "BANKNIFTY": "25",
     "SENSEX": "51",
 }
-# Reverse map
-_SID_TO_INDEX: dict[str, str] = {v: k for k, v in _INDEX_SIDS.items()}
 
 # Indicator timeframes for the matrix
 _MATRIX_TFS: list[str] = ["5m", "15m", "30m", "1H", "1D"]
@@ -284,6 +285,7 @@ async def strangle_trades(
     from datetime import date as date_type
     from zoneinfo import ZoneInfo
 
+    from pdp.instruments.symbols import symbol_for
     from pdp.strategies.directional_strangle import DirectionalStrangle
     from pdp.strategy.trade_ledger import (
         compute_totals,
@@ -291,7 +293,6 @@ async def strangle_trades(
         pair_trades,
         read_day_events,
     )
-    from pdp.instruments.symbols import symbol_for
 
     _ist = ZoneInfo("Asia/Kolkata")
     query_date = date_type.fromisoformat(date) if date else datetime.now(_ist).date()
@@ -311,13 +312,21 @@ async def strangle_trades(
         # Lazy symbol resolution for rows with symbol=null
         for row in rows:
             if row.get("symbol") is None and row.get("expiry") and row.get("strike"):
+                raw_expiry = row["expiry"]
+                exp = (
+                    date_type.fromisoformat(raw_expiry)
+                    if isinstance(raw_expiry, str)
+                    else raw_expiry
+                )
+                und = row.get("underlying") or strategy.underlying
+                ot = row.get("opt_type", "PE")
                 try:
-                    exp = date_type.fromisoformat(row["expiry"]) if isinstance(row["expiry"], str) else row["expiry"]
-                    und = row.get("underlying") or strategy.underlying
-                    ot = row.get("opt_type", "PE")
                     row["symbol"] = symbol_for(und, exp, row["strike"], ot)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning(
+                        "strangle_trades_symbol_resolve_failed",
+                        sid=row.get("security_id"), exc=str(exc),
+                    )
         all_rows.extend(rows)
 
     by_index = group_by_index(all_rows)
@@ -544,16 +553,14 @@ async def strangle_monitor(
     states = [await s.state() for s in strategies]
 
     # ── Indices spot + future LTPs ──────────────────────────────────────────
+    # Futures SID comes from the matrix's startup-resolved map (configure_matrix_suites),
+    # not the strategy (bias-scoring dropped its own futures-SID path in backtest-paper-parity).
+    matrix_fut_sids: dict[str, str] = getattr(engine, "matrix_futures_sids", {}) or {}
     indices: dict[str, dict[str, Any]] = {}
     for idx_name, idx_sid in _INDEX_SIDS.items():
         spot_ltp = await _get_ltp_redis(redis, idx_sid)
-        # Try to resolve futures SID from strategy (only works for the strategy's underlying)
-        future_ltp = None
-        for s in strategies:
-            futures_sid = getattr(s, "_futures_sid", None)
-            if futures_sid and _SID_TO_INDEX.get(idx_sid) == s.underlying:
-                future_ltp = await _get_ltp_redis(redis, futures_sid)
-                break
+        futures_sid = matrix_fut_sids.get(idx_sid)
+        future_ltp = await _get_ltp_redis(redis, futures_sid) if futures_sid else None
         indices[idx_name] = {"spot": spot_ltp or 0.0, "future": future_ltp}
 
     # ── Legs grouped by underlying ──────────────────────────────────────────

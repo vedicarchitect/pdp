@@ -32,7 +32,6 @@ def _host_with_strangle() -> MagicMock:
 
     strategy = MagicMock(spec=DirectionalStrangle)
     strategy.underlying = "NIFTY"
-    strategy._futures_sid = None
     strategy._activity = []
     strategy.state = AsyncMock(return_value={
         "legs": [],
@@ -132,7 +131,6 @@ def test_monitor_status_sums_across_strategies() -> None:
     def _make_strategy(underlying: str, done: bool) -> MagicMock:
         s = MagicMock(spec=DirectionalStrangle)
         s.underlying = underlying
-        s._futures_sid = None
         s._activity = []
         s.state = AsyncMock(return_value={
             "legs": [], "day_realized": 0.0, "day_unrealized": 0.0, "day_pnl": 0.0,

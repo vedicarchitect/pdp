@@ -281,6 +281,30 @@ async def test_take_profit_emits_exactly_one_terminal_event():
     assert terminal[0]["pnl"] == (100 - 40) * 2 * s._lot_size
 
 
+def test_leg_pnl_sign_convention_short_vs_hedge():
+    """Short legs profit on a price fall; hedge/momentum longs profit on a price rise."""
+    from pdp.strategies.directional_strangle import _leg_pnl
+
+    lot_size = 65
+    short_leg = OpenLeg(
+        security_id="700", segment="NSE_FNO", opt_type="CE",
+        strike=24200.0, lots=2, entry_price=Decimal("100"),
+    )
+    assert _leg_pnl(short_leg, 40.0, 2, lot_size) == (100 - 40) * 2 * lot_size
+
+    hedge_leg = OpenLeg(
+        security_id="701", segment="NSE_FNO", opt_type="CE",
+        strike=24500.0, lots=2, entry_price=Decimal("5"), is_hedge=True,
+    )
+    assert _leg_pnl(hedge_leg, 2.0, 2, lot_size) == (2.0 - 5) * 2 * lot_size
+
+    momentum_leg = OpenLeg(
+        security_id="702", segment="NSE_FNO", opt_type="CE",
+        strike=23900.0, lots=1, entry_price=Decimal("150"), is_momentum=True,
+    )
+    assert _leg_pnl(momentum_leg, 180.0, 1, lot_size) == (180.0 - 150) * 1 * lot_size
+
+
 @pytest.mark.asyncio
 async def test_stop_all_emits_exactly_one_terminal_event():
     s = await _build_strategy(params={"pct_stop_half": 0.30, "pct_stop_all": 0.40})
@@ -649,7 +673,7 @@ async def test_day_loss_cap_writes_halt_marker_to_redis():
 
 
 # ---------------------------------------------------------------------------
-# R3 — Full bias signal set (PCR from chain hub, VWAP from futures config)
+# R3 — Full bias signal set (PCR from chain hub)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -677,40 +701,3 @@ async def test_pcr_is_none_when_chain_hub_not_wired():
     inputs = s._build_bias_inputs(24000.0)
 
     assert inputs.pcr is None
-
-
-@pytest.mark.asyncio
-async def test_vwap_uses_futures_sid_when_configured():
-    """When futures_security_id is set, VWAP is read from the futures SID, not spot."""
-    from pdp.indicators.vwap import VWAPState
-
-    futures_sid = "NIFTY_FUT_SID"
-    s = await _build_strategy(params={"futures_security_id": futures_sid})
-
-    # Futures SID returns a VWAP; spot SID returns None (as in production)
-    futures_vwap = VWAPState(vwap=23950.5, session_date=None)  # type: ignore[arg-type]
-    def _vwap_side_effect(sid, tf):
-        if sid == futures_sid:
-            return futures_vwap
-        return None
-
-    s.ctx.indicators.vwap.side_effect = _vwap_side_effect
-
-    inputs = s._build_bias_inputs(24000.0)
-
-    assert inputs.vwap == pytest.approx(23950.5)
-
-
-@pytest.mark.asyncio
-async def test_vwap_falls_back_to_spot_sid_when_no_futures_configured():
-    """Without futures_security_id, VWAP call uses the spot SID (may return None for index)."""
-    s = await _build_strategy()  # no futures_security_id in params
-
-    # Spot SID returns None (no volume on index), futures SID never called
-    s.ctx.indicators.vwap.return_value = None
-
-    inputs = s._build_bias_inputs(24000.0)
-
-    assert inputs.vwap is None
-    # Confirm it called with spot SID, not some unknown futures SID
-    s.ctx.indicators.vwap.assert_called_with(s.sid, "5m")
