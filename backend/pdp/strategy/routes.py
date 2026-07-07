@@ -209,6 +209,127 @@ async def strangle_stats(
     })
 
 
+@strangle_router.get("/pnl")
+async def strangle_pnl(request: Request) -> JSONResponse:
+    """Per-index live P&L breakdown — the ONLY P&L source for dashboard + Execution tab.
+
+    Returns one row per running strangle strategy (grouped by underlying) plus a
+    totals object summing across indices.  `squared_off_at` is the IST time of
+    the terminal square_off/day_loss_cap event for that index today.
+    """
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+    host: StrategyHost = request.app.state.strategy_host
+    strategies = [
+        state.instance
+        for state in host._running.values()
+        if isinstance(state.instance, DirectionalStrangle)
+    ]
+    if not strategies:
+        raise HTTPException(status_code=404, detail="No DirectionalStrangle running")
+
+    rows: list[dict[str, Any]] = []
+    total_realized = 0.0
+    total_unrealized = 0.0
+    total_pnl = 0.0
+    total_open = 0
+
+    for strategy in strategies:
+        data = await strategy.state()
+        # Resolve squared_off_at from the activity ring buffer
+        squared_off_at: str | None = None
+        for evt in reversed(list(strategy._activity)):
+            if evt.get("event_type") in ("square_off", "day_loss_cap"):
+                squared_off_at = evt.get("ist_time")
+                break
+
+        row = {
+            "underlying": data.get("underlying", strategy.underlying),
+            "strategy_id": data["strategy_id"],
+            "day_realized": data["day_realized"],
+            "day_unrealized": data["day_unrealized"],
+            "day_pnl": data["day_pnl"],
+            "n_open_legs": data["n_open_legs"],
+            "done_for_day": data["done_for_day"],
+            "squared_off_at": squared_off_at,
+        }
+        rows.append(row)
+        total_realized += data["day_realized"]
+        total_unrealized += data["day_unrealized"]
+        total_pnl += data["day_pnl"]
+        total_open += data["n_open_legs"]
+
+    return JSONResponse(content={
+        "by_index": rows,
+        "totals": {
+            "day_realized": round(total_realized, 2),
+            "day_unrealized": round(total_unrealized, 2),
+            "day_pnl": round(total_pnl, 2),
+            "n_open_legs": total_open,
+        },
+    })
+
+
+@strangle_router.get("/trades")
+async def strangle_trades(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+    date: str | None = Query(default=None, description="YYYY-MM-DD; defaults to today IST"),
+) -> JSONResponse:
+    """Per-day entry→exit trade ledger grouped by index.
+
+    Pairs each leg_open with its terminal close event from the persisted daily
+    JSONL log.  Returns round-trip rows with full economics; open legs have null
+    exit fields.  Unresolved symbols are lazily resolved before returning.
+    """
+    from datetime import date as date_type
+    from zoneinfo import ZoneInfo
+
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+    from pdp.strategy.trade_ledger import (
+        compute_totals,
+        group_by_index,
+        pair_trades,
+        read_day_events,
+    )
+    from pdp.instruments.symbols import symbol_for
+
+    _ist = ZoneInfo("Asia/Kolkata")
+    query_date = date_type.fromisoformat(date) if date else datetime.now(_ist).date()
+
+    host: StrategyHost = request.app.state.strategy_host
+    strategies = [
+        (sid, state.instance)
+        for sid, state in host._running.items()
+        if isinstance(state.instance, DirectionalStrangle)
+        and (strategy_id is None or sid == strategy_id)
+    ]
+
+    all_rows: list[dict[str, Any]] = []
+    for sid, strategy in strategies:
+        events = read_day_events(sid, query_date)
+        rows = pair_trades(events)
+        # Lazy symbol resolution for rows with symbol=null
+        for row in rows:
+            if row.get("symbol") is None and row.get("expiry") and row.get("strike"):
+                try:
+                    exp = date_type.fromisoformat(row["expiry"]) if isinstance(row["expiry"], str) else row["expiry"]
+                    und = row.get("underlying") or strategy.underlying
+                    ot = row.get("opt_type", "PE")
+                    row["symbol"] = symbol_for(und, exp, row["strike"], ot)
+                except Exception:
+                    pass
+        all_rows.extend(rows)
+
+    by_index = group_by_index(all_rows)
+    totals = compute_totals(all_rows)
+
+    return JSONResponse(content=_serialise({
+        "date": query_date.isoformat(),
+        "by_index": by_index,
+        "totals": totals,
+    }))
+
+
 # ------------------------------------------------------------------ #
 # Strangle realtime monitor — GET /api/v1/strangle/monitor            #
 # ------------------------------------------------------------------ #

@@ -110,8 +110,11 @@ class _EventTile extends StatelessWidget {
         icon = Icons.bolt;
     }
 
-    final hr = event.timestamp.hour.toString().padLeft(2, '0');
-    final mn = event.timestamp.minute.toString().padLeft(2, '0');
+    // Backend emits `ts` as UTC (datetime.now(UTC)); render in IST (UTC+5:30) to
+    // match the user preference + backend `Event.ist_str`. Device-independent.
+    final ist = event.timestamp.toUtc().add(const Duration(hours: 5, minutes: 30));
+    final hr = ist.hour.toString().padLeft(2, '0');
+    final mn = ist.minute.toString().padLeft(2, '0');
     final timeStr = '$hr:$mn';
 
     return Padding(

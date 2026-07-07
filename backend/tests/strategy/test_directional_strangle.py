@@ -11,7 +11,7 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -105,6 +105,7 @@ def _make_instrument(sid: str, strike: float, opt_type: str = "CE"):
         exchange_segment="NSE_FNO",
         strike=Decimal(str(strike)),
         option_type=opt_type,
+        expiry=date(2026, 7, 9),
     )
 
 
@@ -242,6 +243,97 @@ async def test_roll_leg_fires_on_low_premium():
 
     rolled_events = [e for e in s._activity if e.get("event_type") == StrangleEventType.ROLLED]
     assert rolled_events, "Expected a rolled event after ltp < roll_trigger_prem"
+
+
+# ---------------------------------------------------------------------------
+# Regression: exactly ONE terminal close event per physical leg close
+# (previously TAKE_PROFIT/STOP_ALL pre-emitted a P&L event, then
+# _close_short_leg emitted a second LEG_CLOSE for the same leg — the ledger
+# then double-counted realized P&L for every closed leg).
+# ---------------------------------------------------------------------------
+
+_TERMINAL_CLOSE_TYPES = {
+    StrangleEventType.LEG_CLOSE,
+    StrangleEventType.TAKE_PROFIT,
+    StrangleEventType.STOP_ALL,
+}
+
+
+@pytest.mark.asyncio
+async def test_take_profit_emits_exactly_one_terminal_event():
+    s = await _build_strategy(params={"take_profit_pct": 0.5})
+
+    fake_leg = OpenLeg(
+        security_id="700", segment="NSE_FNO", opt_type="CE",
+        strike=24200.0, lots=2, entry_price=Decimal("100"),
+    )
+    s._short_legs.append(fake_leg)
+    s._ltp_cache["700"] = 100.0
+    s.ctx.orders._pos["700"] = {"net": -130, "avg": Decimal("100"), "realized": Decimal("0")}
+
+    # ltp <= entry * take_profit_pct (100 * 0.5 = 50) triggers take-profit
+    await s.on_tick(_make_tick("700", ltp=40.0))
+
+    terminal = [e for e in s._activity if e.get("event_type") in _TERMINAL_CLOSE_TYPES
+                and e.get("sid") == "700"]
+    assert len(terminal) == 1, f"Expected exactly 1 terminal event, got {len(terminal)}: {terminal}"
+    assert terminal[0]["event_type"] == StrangleEventType.TAKE_PROFIT
+    assert terminal[0]["pnl"] == (100 - 40) * 2 * s._lot_size
+
+
+@pytest.mark.asyncio
+async def test_stop_all_emits_exactly_one_terminal_event():
+    s = await _build_strategy(params={"pct_stop_half": 0.30, "pct_stop_all": 0.40})
+
+    # Leg already half-stopped on a prior tick (half_stopped=True) — this is the
+    # realistic path to STOP_ALL, since pct_stop_all > pct_stop_half always, so
+    # a fresh leg always hits the stop-half branch first (see the same-tick test).
+    fake_leg = OpenLeg(
+        security_id="701", segment="NSE_FNO", opt_type="CE",
+        strike=24200.0, lots=1, entry_price=Decimal("100"), half_stopped=True,
+    )
+    s._short_legs.append(fake_leg)
+    s._ltp_cache["701"] = 100.0
+    s.ctx.orders._pos["701"] = {"net": -65, "avg": Decimal("100"), "realized": Decimal("0")}
+
+    # ltp >= entry * (1 + pct_stop_all) = 140 triggers stop-all
+    await s.on_tick(_make_tick("701", ltp=145.0))
+
+    terminal = [e for e in s._activity if e.get("event_type") in _TERMINAL_CLOSE_TYPES
+                and e.get("sid") == "701"]
+    assert len(terminal) == 1, f"Expected exactly 1 terminal event, got {len(terminal)}: {terminal}"
+    assert terminal[0]["event_type"] == StrangleEventType.STOP_ALL
+
+
+@pytest.mark.asyncio
+async def test_stop_half_then_stop_all_same_tick_does_not_double_close():
+    """A single tick that crosses BOTH stop-half and stop-all thresholds must
+    only emit the stop_half partial this tick — stop-all re-checks on the
+    NEXT tick against the now-halved leg, never firing twice in one tick."""
+    s = await _build_strategy(params={"pct_stop_half": 0.30, "pct_stop_all": 0.40})
+
+    fake_leg = OpenLeg(
+        security_id="702", segment="NSE_FNO", opt_type="CE",
+        strike=24200.0, lots=4, entry_price=Decimal("100"),
+    )
+    s._short_legs.append(fake_leg)
+    s._ltp_cache["702"] = 100.0
+    s.ctx.orders._pos["702"] = {"net": -260, "avg": Decimal("100"), "realized": Decimal("0")}
+
+    # ltp = 160 crosses both entry*1.30=130 (stop-half) and entry*1.40=140 (stop-all)
+    await s.on_tick(_make_tick("702", ltp=160.0))
+
+    events = [e for e in s._activity if e.get("sid") == "702"]
+    terminal = [e for e in events if e.get("event_type") in _TERMINAL_CLOSE_TYPES]
+    partial = [e for e in events if e.get("event_type") == StrangleEventType.STOP_HALF]
+
+    assert len(partial) == 1, f"Expected exactly 1 stop_half event, got {len(partial)}"
+    assert len(terminal) == 0, (
+        f"Expected NO terminal close in the same tick as stop_half, got {terminal}"
+    )
+    # The leg must still be open (half-closed), not fully removed
+    assert any(l.security_id == "702" for l in s._short_legs)
+    assert fake_leg.lots == 2
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +540,6 @@ async def test_bucket_revert_before_confirmation_resets_counter():
 
     bar1 = _make_bar(ist_hhmm="10:20")
     bar2 = _make_bar(ist_hhmm="10:25")
-    bar3 = _make_bar(ist_hhmm="10:30")
 
     with patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(return_value=None)):
         with patch("pdp.strategies.directional_strangle.score_bias", return_value=bear_result):
@@ -469,12 +560,8 @@ async def test_bucket_revert_before_confirmation_resets_counter():
 @pytest.mark.asyncio
 async def test_halt_marker_blocks_reentry_on_same_day_restart():
     """After day_loss_cap fires, a simulated restart on the same day must stay halted."""
-    from datetime import date
-
     s = await _build_strategy(params={"day_loss_limit": 1})  # very low cap
     # Simulate the halt marker already being set for today (simulates post-halt restart).
-    today = date(2026, 6, 28)  # matches _make_bar default date
-    expected_key = f"halt:{s.strategy_id}:{today.isoformat()}"
     s.ctx.market.cache_get = AsyncMock(return_value="1")  # marker exists
 
     # Force _day_key=None so _maybe_reset_day will trigger on first bar
@@ -510,11 +597,11 @@ async def test_halt_marker_clears_on_next_day():
 
     bar_day2 = _make_bar(ist_hhmm="10:20")
     # Reuse same bar but with date June 29
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
     bar_day2 = BarClosed(
         security_id="13",
         timeframe="5m",
-        bar_time=datetime(2026, 6, 29, 4, 50, tzinfo=timezone.utc),  # 10:20 IST
+        bar_time=datetime(2026, 6, 29, 4, 50, tzinfo=UTC),  # 10:20 IST
         open=Decimal("24000"),
         high=Decimal("24050"),
         low=Decimal("23950"),
@@ -537,7 +624,6 @@ async def test_halt_marker_clears_on_next_day():
 async def test_day_loss_cap_writes_halt_marker_to_redis():
     """When day_loss_cap fires, the halt marker must be written to Redis cache."""
     from datetime import date
-    from unittest.mock import call
 
     # Set day_loss_limit very low so it fires immediately
     s = await _build_strategy(params={"day_loss_limit": 1})
@@ -596,7 +682,6 @@ async def test_pcr_is_none_when_chain_hub_not_wired():
 @pytest.mark.asyncio
 async def test_vwap_uses_futures_sid_when_configured():
     """When futures_security_id is set, VWAP is read from the futures SID, not spot."""
-    from pdp.indicators.engine import IndicatorEngine
     from pdp.indicators.vwap import VWAPState
 
     futures_sid = "NIFTY_FUT_SID"

@@ -56,6 +56,7 @@ from pdp.strategy.strikes import (
     nearest_weekly_expiry,
     resolve_otm_option,
 )
+from pdp.instruments.symbols import symbol_for
 
 if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
@@ -130,6 +131,20 @@ class OpenLeg:
     half_stopped: bool = False  # True after pct_stop_half partial close (shorts only)
     entry_time: datetime | None = None   # IST-aware open timestamp
     entry_reason: str = ""               # bucket@score at entry (e.g. "NEUTRAL@0.10")
+    expiry: date | None = None           # resolved at open time; reused at close (no re-query)
+
+
+def _leg_pnl(leg: OpenLeg, price: float, lots: int, lot_size: int) -> float:
+    """Single source of truth for the short/hedge/momentum P&L sign convention.
+
+    Short legs profit when price falls (entry - price); hedge/momentum longs
+    profit when price rises (price - entry). Used for both unrealized MTM
+    (price = live LTP) and realized P&L at close (price = exit price).
+    """
+    entry = float(leg.entry_price)
+    if leg.is_hedge or leg.is_momentum:
+        return (price - entry) * lots * lot_size
+    return (entry - price) * lots * lot_size
 
 
 class DirectionalStrangle(Strategy):
@@ -465,34 +480,38 @@ class DirectionalStrangle(Strategy):
                 return
 
             if ltp <= entry * self._take_profit_pct:
-                self._emit_event(StrangleEventType.TAKE_PROFIT,
-                    sid=sid, ltp=ltp, entry=entry,
-                    opt_type=leg.opt_type, strike=leg.strike)
-                await self._close_short_leg(leg, "take_profit")
+                await self._close_short_leg(
+                    leg, "take_profit", event_type=StrangleEventType.TAKE_PROFIT,
+                )
                 await self._close_matching_hedge(leg)
                 return
             if not leg.half_stopped and ltp >= entry * (1 + self._pct_stop_half):
                 close_lots = leg.lots // 2
                 if close_lots > 0:
+                    # Capture exit fields BEFORE mutating leg.lots
+                    exit_fields = self._leg_exit_fields(leg, ltp, "stop_half", close_lots=close_lots)
                     await self._place(sid, leg.segment, "BUY", close_lots)
                     leg.lots -= close_lots
                     leg.half_stopped = True
                     self._emit_event(StrangleEventType.STOP_HALF,
                         sid=sid, ltp=ltp, remaining=leg.lots,
-                        opt_type=leg.opt_type, strike=leg.strike)
+                        partial=True, **exit_fields)
                     # Record stop gate for this side
                     self._stop_gate[leg.opt_type] = {
                         "exit_px": ltp, "sid": sid, "n_below": 0,
                     }
+                    # leg.lots just changed (halved) — re-check stop-all against the
+                    # now-smaller remaining position on the NEXT tick, not this one,
+                    # so we never emit two terminal closes for one tick.
+                    continue
             if ltp >= entry * (1 + self._pct_stop_all):
-                self._emit_event(StrangleEventType.STOP_ALL,
-                    sid=sid, ltp=ltp, entry=entry,
-                    opt_type=leg.opt_type, strike=leg.strike)
                 # Record stop gate before closing
                 self._stop_gate[leg.opt_type] = {
                     "exit_px": ltp, "sid": sid, "n_below": 0,
                 }
-                await self._close_short_leg(leg, "premium_stop")
+                await self._close_short_leg(
+                    leg, "premium_stop", event_type=StrangleEventType.STOP_ALL,
+                )
                 await self._close_matching_hedge(leg)
 
     # ------------------------------------------------------------------ #
@@ -556,11 +575,7 @@ class DirectionalStrangle(Strategy):
             ltp = self._ltp_cache.get(lg.security_id)
             mtm: float | None = None
             if ltp is not None:
-                entry = float(lg.entry_price)
-                mtm = round(
-                    (ltp - entry if lg.is_hedge else entry - ltp) * lg.lots * self._lot_size,
-                    2,
-                )
+                mtm = round(_leg_pnl(lg, ltp, lg.lots, self._lot_size), 2)
             legs.append({
                 "security_id": lg.security_id,
                 "opt_type": lg.opt_type,
@@ -729,10 +744,12 @@ class DirectionalStrangle(Strategy):
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px,
             entry_time=datetime.now(tz=_IST), entry_reason=_reason,
+            expiry=inst.expiry,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
-            lots=lots, entry_price=float(avg_px), is_hedge=False)
+            lots=lots, entry_price=float(avg_px), is_hedge=False,
+            expiry=inst.expiry.isoformat() if inst.expiry else None)
 
         if self._hedge_enabled:
             await self._open_hedge(opt_type, spot, lots, segment)
@@ -793,10 +810,12 @@ class DirectionalStrangle(Strategy):
             security_id=h_sid, segment=segment, opt_type=opt_type,
             strike=h_strike, lots=lots, entry_price=avg_px, is_hedge=True,
             entry_time=datetime.now(tz=_IST), entry_reason=_reason,
+            expiry=target.expiry,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=h_sid, opt_type=opt_type, strike=h_strike,
-            lots=lots, entry_price=float(avg_px), is_hedge=True)
+            lots=lots, entry_price=float(avg_px), is_hedge=True,
+            expiry=target.expiry.isoformat() if target.expiry else None)
 
     # ------------------------------------------------------------------ #
     # Momentum long — ITM+1 on COMPLETE_BULL / COMPLETE_BEAR             #
@@ -850,11 +869,13 @@ class DirectionalStrangle(Strategy):
             security_id=sid, segment=segment, opt_type=opt_type,
             strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,
             entry_time=datetime.now(tz=_IST), entry_reason=_reason,
+            expiry=inst.expiry,
         ))
         self._emit_event(StrangleEventType.LEG_OPEN,
             sid=sid, opt_type=opt_type, strike=strike,
             lots=lots, entry_price=float(avg_px), is_momentum=True,
-            premium=premium, target=self._momentum_premium_target)
+            premium=premium, target=self._momentum_premium_target,
+            expiry=inst.expiry.isoformat() if inst.expiry else None)
 
     async def _maybe_close_momentum(self, score: float) -> None:
         """Close all momentum longs when |score| falls below threshold."""
@@ -873,9 +894,11 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
         self._emit_event(StrangleEventType.LEG_CLOSE,
-            sid=leg.security_id, opt_type=leg.opt_type, reason=reason, is_momentum=True)
+            sid=leg.security_id, reason=reason, is_momentum=True,
+            **self._leg_exit_fields(leg, exit_px, reason))
 
     # ------------------------------------------------------------------ #
     # Rollup                                                               #
@@ -939,6 +962,37 @@ class DirectionalStrangle(Strategy):
     # Leg close                                                            #
     # ------------------------------------------------------------------ #
 
+    def _leg_exit_fields(
+        self, leg: OpenLeg, exit_px: float, reason: str, *, close_lots: int | None = None,
+    ) -> dict[str, Any]:
+        """Full round-trip economics for a terminal (or partial) leg close.
+
+        P&L sign convention is the single shared `_leg_pnl` helper (also used by
+        `state()`/`_compute_unrealized`/`_emit_leg_status` for unrealized MTM) so
+        realized and unrealized P&L can never silently diverge for the same leg.
+        `close_lots` overrides `leg.lots` for a partial close (e.g. stop_half).
+        """
+        lots = close_lots if close_lots is not None else leg.lots
+        pnl = _leg_pnl(leg, exit_px, lots, self._lot_size)
+
+        symbol: str | None = None
+        if leg.expiry is not None:
+            symbol = symbol_for(self.underlying, leg.expiry, leg.strike, leg.opt_type)
+
+        return {
+            "entry_price": float(leg.entry_price),
+            "exit_price": exit_px,
+            "lots": lots,
+            "entry_time": leg.entry_time.isoformat() if leg.entry_time else None,
+            "exit_time": datetime.now(tz=_IST).isoformat(),
+            "pnl": round(pnl, 2),
+            "opt_type": leg.opt_type,
+            "strike": leg.strike,
+            "is_hedge": leg.is_hedge,
+            "expiry": leg.expiry.isoformat() if leg.expiry else None,
+            "symbol": symbol,
+        }
+
     async def _close_all(self, reason: str) -> None:
         for leg in list(self._short_legs):
             await self._close_short_leg(leg, reason)
@@ -966,7 +1020,15 @@ class DirectionalStrangle(Strategy):
         self._hedge_legs.clear()
         self._current_bucket = None
 
-    async def _close_short_leg(self, leg: OpenLeg, reason: str) -> None:
+    async def _close_short_leg(
+        self, leg: OpenLeg, reason: str, *, event_type: str = StrangleEventType.LEG_CLOSE,
+    ) -> None:
+        """Close a short leg and emit exactly one terminal event for it.
+
+        `event_type` lets a caller tag the close with its specific reason
+        (TAKE_PROFIT/STOP_ALL) instead of the generic LEG_CLOSE — callers must
+        NOT also emit their own terminal event, or the ledger double-counts.
+        """
         await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
         net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
         if net_qty == 0:
@@ -975,13 +1037,18 @@ class DirectionalStrangle(Strategy):
         close_lots = abs(net_qty) // self._lot_size
         if close_lots > 0:
             await self._place(leg.security_id, leg.segment, "BUY", close_lots)
+        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(StrangleEventType.LEG_CLOSE,
-            sid=leg.security_id, opt_type=leg.opt_type,
-            strike=leg.strike, reason=reason)
+        self._emit_event(event_type,
+            sid=leg.security_id, reason=reason,
+            **self._leg_exit_fields(leg, exit_px, reason))
         self._short_legs = [l for l in self._short_legs if l is not leg]
 
-    async def _close_hedge_leg(self, leg: OpenLeg, reason: str) -> None:
+    async def _close_hedge_leg(
+        self, leg: OpenLeg, reason: str, *, event_type: str = StrangleEventType.LEG_CLOSE,
+    ) -> None:
+        """Close a hedge leg and emit exactly one terminal event for it (see
+        `_close_short_leg` docstring for the `event_type` contract)."""
         await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
         net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
         if net_qty == 0:
@@ -990,10 +1057,11 @@ class DirectionalStrangle(Strategy):
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
             await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(StrangleEventType.LEG_CLOSE,
-            sid=leg.security_id, opt_type=leg.opt_type,
-            strike=leg.strike, reason=reason, is_hedge=True)
+        self._emit_event(event_type,
+            sid=leg.security_id, reason=reason,
+            **self._leg_exit_fields(leg, exit_px, reason))
         self._hedge_legs = [l for l in self._hedge_legs if l is not leg]
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
@@ -1014,11 +1082,7 @@ class DirectionalStrangle(Strategy):
             ltp = self._ltp_cache.get(lg.security_id)
             mtm: float | None = None
             if ltp is not None:
-                entry = float(lg.entry_price)
-                if lg.is_hedge or lg.is_momentum:
-                    mtm = round((ltp - entry) * lg.lots * self._lot_size, 2)
-                else:
-                    mtm = round((entry - ltp) * lg.lots * self._lot_size, 2)
+                mtm = round(_leg_pnl(lg, ltp, lg.lots, self._lot_size), 2)
             legs.append({
                 "security_id": lg.security_id,
                 "opt_type": lg.opt_type,
@@ -1036,6 +1100,7 @@ class DirectionalStrangle(Strategy):
         return {
             "mode": self._mode,
             "strategy_id": self.strategy_id,
+            "underlying": self.underlying,
             "bucket": self._current_bucket,
             "score": round(self._last_score, 3),
             "legs": legs,
@@ -1053,18 +1118,10 @@ class DirectionalStrangle(Strategy):
 
     def _compute_unrealized(self) -> float:
         total = 0.0
-        for lg in self._short_legs:
+        for lg in self._short_legs + self._hedge_legs + self._momentum_legs:
             ltp = self._ltp_cache.get(lg.security_id)
             if ltp is not None:
-                total += (float(lg.entry_price) - ltp) * lg.lots * self._lot_size
-        for lg in self._hedge_legs:
-            ltp = self._ltp_cache.get(lg.security_id)
-            if ltp is not None:
-                total += (ltp - float(lg.entry_price)) * lg.lots * self._lot_size
-        for lg in self._momentum_legs:
-            ltp = self._ltp_cache.get(lg.security_id)
-            if ltp is not None:
-                total += (ltp - float(lg.entry_price)) * lg.lots * self._lot_size
+                total += _leg_pnl(lg, ltp, lg.lots, self._lot_size)
         return round(total, 2)
 
     # ------------------------------------------------------------------ #

@@ -70,6 +70,20 @@ def test_group_paper_pnl_ist_date_boundary():
     assert out["s1"][0]["date"] == "2026-01-02"
 
 
+def test_group_paper_pnl_open_position_contributes_zero_net_pnl():
+    """An open (unclosed) paper position must contribute 0 to net_pnl for that day —
+    same round-trip-only semantics as pdp.journal.stats.compute_daily_stats. This is
+    the exact case backtest-vs-paper divergence numbers depend on: a day with an open
+    leg must not be misreported as if its full sell premium were already realized."""
+    trades = [
+        _trade("directional_strangle_nifty", "SELL", 65, "100", "10", datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+    ]
+    out = group_paper_pnl(trades)
+    day = out["directional_strangle_nifty"][0]
+    assert day["net_pnl"] == 0.0
+    assert day["round_trips"] == 0
+
+
 @pytest.mark.asyncio
 async def test_fetch_paper_trades_maps_rows():
     rows = [

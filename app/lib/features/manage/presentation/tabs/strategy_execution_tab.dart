@@ -16,7 +16,11 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import 'package:fl_chart/fl_chart.dart';
 
+import '../../../../core/theme/app_colors.dart';
+import '../../../../shared/widgets/pnl_text.dart';
 import '../../application/manage_providers.dart';
 import '../../domain/execution_models.dart';
 
@@ -232,15 +236,36 @@ class _OverallStatusBar extends StatelessWidget {
 
 // ─── Per-underlying section (header + legs table) ─────────────────────────────
 
-class _UnderlyingSection extends StatelessWidget {
+class _UnderlyingSection extends ConsumerWidget {
   final UnderlyingGroup group;
 
   const _UnderlyingSection({required this.group});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final bkt = group.bucket ?? '--';
-    final pnlColor = group.dayPnl >= 0 ? Colors.green : Colors.red;
+    
+    // Read P&L and Trades from providers
+    final pnlAsync = ref.watch(stranglePnlProvider);
+    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
+
+    // Resolve true P&L from canonical /pnl endpoint (Task 6.4)
+    double displayPnl = group.dayPnl; // fallback
+    bool isDone = group.doneForDay;
+    String? squaredOffAt;
+    
+    pnlAsync.whenData((pnl) {
+      final match = pnl.byIndex.where((r) => r.underlying == group.underlying).firstOrNull;
+      if (match != null) {
+        displayPnl = match.dayPnl;
+        isDone = match.doneForDay;
+        squaredOffAt = match.squaredOffAt;
+      }
+    });
+
+    final pnlColor = displayPnl >= 0 ? Colors.green : Colors.red;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -276,21 +301,33 @@ class _UnderlyingSection extends StatelessWidget {
                         ?.copyWith(color: _bucketColor(bkt))),
               ],
               const Spacer(),
-              Text(
-                '${group.dayPnl >= 0 ? '+' : ''}${group.dayPnl.toStringAsFixed(0)}',
-                style: TextStyle(
-                    color: pnlColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13),
-              ),
-              if (group.doneForDay) ...[
-                const SizedBox(width: 6),
-                const Text('DONE',
-                    style: TextStyle(fontSize: 10, color: Colors.orange)),
-              ],
+              if (isDone && squaredOffAt != null)
+                // Task 6.3: Squared off banner
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: pnlColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: pnlColor.withValues(alpha: 0.5)),
+                  ),
+                  child: Text(
+                    'Squared off ${squaredOffAt!.substring(0, 5)} — final ₹${displayPnl.toStringAsFixed(0)}',
+                    style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                )
+              else
+                Text(
+                  '${displayPnl >= 0 ? '+' : ''}${displayPnl.toStringAsFixed(0)}',
+                  style: TextStyle(
+                      color: pnlColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13),
+                ),
             ],
           ),
         ),
+        
+        // Open Legs (Live monitor data)
         if (group.legs.isNotEmpty)
           _LegsTable(legs: group.legs)
         else
@@ -299,11 +336,25 @@ class _UnderlyingSection extends StatelessWidget {
             child: Text('no open legs',
                 style: TextStyle(fontSize: 12, color: Colors.grey)),
           ),
+          
+        const SizedBox(height: 12),
+        
+        // Task 6.1: Today's Trades
+        tradesAsync.when(
+          data: (trades) {
+            final idxTrades = trades.byIndex[group.underlying] ?? [];
+            if (idxTrades.isEmpty) return const SizedBox.shrink();
+            return _TodayTradesTable(trades: idxTrades);
+          },
+          loading: () => const Center(child: LinearProgressIndicator()),
+          error: (err, _) => Text('Error loading trades: $err', style: const TextStyle(color: Colors.red, fontSize: 11)),
+        ),
         const SizedBox(height: 6),
       ],
     );
   }
 }
+
 
 Color _bucketColor(String bucket) {
   switch (bucket.toLowerCase()) {
@@ -693,3 +744,115 @@ class _EmptyCard extends StatelessWidget {
     );
   }
 }
+
+// ─── Today's Trades (Task 6.1, 6.2) ──────────────────────────────────────────
+
+class _TodayTradesTable extends StatelessWidget {
+  final List<StrangleTradeRow> trades;
+
+  const _TodayTradesTable({required this.trades});
+
+  @override
+  Widget build(BuildContext context) {
+    if (trades.isEmpty) return const SizedBox.shrink();
+
+    // Cumulative PnL for sparkline
+    double cumPnl = 0;
+    final spots = <FlSpot>[];
+    for (int i = 0; i < trades.length; i++) {
+      final t = trades[i];
+      if (!t.open && t.pnl != null) {
+        cumPnl += t.pnl!;
+        spots.add(FlSpot(i.toDouble(), cumPnl));
+      }
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text("Today's Trades", style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                if (spots.isNotEmpty)
+                  SizedBox(
+                    width: 100,
+                    height: 30,
+                    child: LineChart(
+                      LineChartData(
+                        minX: 0,
+                        maxX: trades.length.toDouble() - 1,
+                        titlesData: const FlTitlesData(show: false),
+                        borderData: FlBorderData(show: false),
+                        gridData: const FlGridData(show: false),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: spots,
+                            isCurved: true,
+                            color: cumPnl >= 0 ? AppColors.profit : AppColors.loss,
+                            barWidth: 2,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(
+                              show: true,
+                              color: cumPnl >= 0 ? AppColors.profitFaint : AppColors.lossFaint,
+                            ),
+                          )
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: trades.length,
+              itemBuilder: (context, index) {
+                final t = trades[index];
+                final isCall = t.optType == 'CE';
+                final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
+                final tag = t.isHedge ? 'H' : (t.optType ?? '');
+                final pnlVal = t.pnl ?? 0.0;
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      _Tag(tag: tag, color: typeColor),
+                      const SizedBox(width: 8),
+                      Text('${t.strike?.toStringAsFixed(0)} ${t.optType}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+                      const SizedBox(width: 12),
+                      Text('${t.lots.toStringAsFixed(0)}x', style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          t.open
+                              ? '${t.entryPrice?.toStringAsFixed(1)} → OPEN'
+                              : '${t.entryPrice?.toStringAsFixed(1)} → ${t.exitPrice?.toStringAsFixed(1)}',
+                          style: const TextStyle(fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      if (!t.open)
+                        PnlText(
+                          pnlVal,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        )
+                      else
+                        const Text('OPEN', style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.bold, fontSize: 12)),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

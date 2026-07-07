@@ -373,6 +373,7 @@ async def lifespan(app: FastAPI):
                 ):
                     if _sid:
                         await adapter.subscribe(_sid, "MCX_COMM", session)
+
         tick_router = TickRouter(
             bar_aggregator=bar_aggregator,
             bar_writer=bar_writer,
@@ -532,6 +533,12 @@ async def lifespan(app: FastAPI):
             snapshots_col=mongo_db["broker_snapshots"],
             client=BrokerAccountClient(settings),
         )
+        if getattr(app.state, "dhan_adapter", None) is not None:
+            broker_sync_service.set_market_adapter(app.state.dhan_adapter)
+            # Manual live account positions from the last sync (so the UI shows live
+            # MTM immediately on restart, without waiting for the next EOD sync).
+            await broker_sync_service.subscribe_current_positions()
+
         app.state.broker_sync_service = broker_sync_service
         broker_sync_scheduler = BrokerSyncScheduler(
             broker_sync_service, eod_time=settings.BROKER_SYNC_EOD_TIME

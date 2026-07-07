@@ -18,4 +18,13 @@ class HoldingsRepository {
       'is_mock': response['is_mock'] as bool? ?? false,
     };
   }
+
+  Future<List<PositionDetail>> getPositions() async {
+    final response = await _api.getJson('/api/v1/broker-sync/positions');
+    final positions = (response['positions'] as List?)
+            ?.map((e) => PositionDetail.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        [];
+    return positions;
+  }
 }

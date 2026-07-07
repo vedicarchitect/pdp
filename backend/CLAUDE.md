@@ -7,8 +7,8 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 
 | If you're working on… | Read only |
 |------------------------|-----------|
-| Directional strangle (core) | `pdp/strategies/` (strangle), `pdp/signals/`, `pdp/backtest/strangle_config.py`, `backtest/strangle_run.py` |
-| Strangle backtest tuning | `backtest/strangle_run.py`, `backtest/configs/strangle_*.yaml`, `pdp/backtest/` |
+| Directional strangle (core) | `pdp/strategies/directional_strangle.py`, `pdp/signals/bias.py`, `backtest/configs/strangle_*.yaml` |
+| Strangle backtest tuning | `backtest/configs/strangle_*.yaml`, `pdp/backtest/`, `backtest/run.py` |
 | Backtest engine / sweeps | `pdp/backtest/`, `backtest/run.py`, `backtest/sweep_all.py`; DB-first warehouse + skills — see `pdp/backtest/CLAUDE.md` |
 | Options warehouse / backfill | `pdp/warehouse/`, `pdp/options/`, `scripts/backfill_*.py`, `scripts/audit_*.py` |
 | Orders / broker / execution | `pdp/orders/`, `pdp/portfolio/`, `pdp/risk/` |
@@ -63,8 +63,20 @@ All Python lives here. Run tooling via the root `Taskfile.yml` (sets `dir: backe
 | `tests/` | pytest suite |
 | `data/` | Local masters/calendars/snapshots (git-ignored) |
 
+## Context: Memory & OpenSpec
+
+For **live-to-backtest parity** issues, see:
+- **Indicator warmup gaps** → `memory/execution_console_accuracy.md` (EMA200 seeding, RSI/PSAR divergence)
+- **Live execution vs backtest** → `memory/live_backtest_parity.md` (18/21 tasks done, 3 deploy-day verifies remain)
+- **Directional strangle specs** → `memory/directional_strangle.md` (canonical config, known gaps, lot history)
+
+For implementation specs, start at:
+- **Strategy registry** → `openspec/specs/strategy-registry/spec.md`
+- **Indicator suite** → `openspec/specs/indicators/spec.md`
+- **Market feed** → `openspec/specs/market-feed/spec.md`
+
 ## Notes
 - `task lint`/`task test` carry **pre-existing** debt (267 ruff items, 27 test failures e.g.
   `PositionState` needing `strategy_id`) unrelated to layout — clean up in a dedicated change.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
-  `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old stale `strangle_tren_cons_tp05_hedged.yaml` is deleted.
+  `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old inactive configs moved to `strategies/inactive/`.

@@ -23,8 +23,11 @@ DATA_COVERAGE = "data-coverage"
 _EVENT_FIELDS = (
     "event_type", "strategy_id", "account_id", "snapshot_date", "ist_time",
     "underlying", "spot", "score", "bucket", "sid", "opt_type", "strike",
-    "lots", "entry_price", "exit_price", "leg_pnl", "day_pnl", "reason",
+    "lots", "entry_price", "exit_price", "day_pnl", "reason",
     "bias_votes", "note",
+    # Enriched close-event fields (live-pnl-trade-ledger-and-journal)
+    "entry_time", "exit_time", "pnl", "is_hedge", "is_momentum",
+    "expiry", "symbol", "partial",
 )
 
 

@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 
-import 'advisory_tab.dart';
 import 'holdings_tab.dart';
+import 'positions_tab.dart'; // We will create this
 
 /// Holdings: real stock/ETF holdings (synced from Dhan) with per-stock detail
-/// on one tab and sector allocation / advice / P&L history insights on the
-/// other. F&O strategy positions live on the Risk & Positions screen instead.
+/// on one tab and F&O intraday positions on the other.
 class PortfolioScreen extends StatelessWidget {
   const PortfolioScreen({super.key});
 
@@ -15,18 +14,18 @@ class PortfolioScreen extends StatelessWidget {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Holdings'),
+          title: const Text('Live Account (Dhan)'),
           bottom: const TabBar(
             tabs: [
               Tab(icon: Icon(Icons.pie_chart_outline), text: 'Holdings'),
-              Tab(icon: Icon(Icons.lightbulb_outline), text: 'Insights'),
+              Tab(icon: Icon(Icons.list_alt), text: 'Positions'),
             ],
           ),
         ),
         body: const TabBarView(
           children: [
             HoldingsTab(),
-            AdvisoryTab(),
+            PositionsTab(),
           ],
         ),
       ),

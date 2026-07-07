@@ -6,13 +6,16 @@ Markdown docs for features/subsystems that need more detail than code comments.
 
 | File | Purpose |
 |------|---------|
-| `ALERTS.md` | Alert engine design: trigger types, evaluation loop, delivery |
-| `ALERTS_TESTING.md` | Manual test steps for verifying alert flows |
-| `backtest.md` | Backtest engine internals: bar replay, fill simulation, commissions |
-| `supertrend_short_strategy.md` | Strategy logic: entry/exit rules, scale-in, stop mechanics |
+| `ARCHITECTURE.md` | System design: three-tier arch, data flow, DB strategy, deployment blueprint |
+| `RUNBOOK.md` | Operational reference: setup, running, monitoring, troubleshooting |
+| `ALERTS.md` | Alert engine design: trigger types, evaluation loop, delivery mechanisms |
+| `ALERTS_TESTING.md` | Manual test steps for verifying alert flows end-to-end |
+| `backtest.md` | Backtest engine internals: bar replay, fill simulation, commission models |
 
-## Note
+## Where to go next
 
-For **operational** docs (how to run things), see [RUNBOOK.md](RUNBOOK.md) (now in this folder).
-For **architectural** context, see [openspec/project.md](../openspec/project.md).
-This folder is for deeper implementation notes that don't fit as code comments.
+- **First time?** → [RUNBOOK.md](RUNBOOK.md) § 1–3 (setup + quickstart)
+- **Running strategies?** → [RUNBOOK.md](RUNBOOK.md) § 6 (strategy operations)
+- **Understanding the design?** → [ARCHITECTURE.md](ARCHITECTURE.md)
+- **Working on a feature?** → Start at the appropriate [`backend/CLAUDE.md`](../backend/CLAUDE.md) or [`app/CLAUDE.md`](../app/CLAUDE.md)
+- **Need context on a capability?** → See [`openspec/project.md`](../openspec/project.md) (tech stack, conventions, glossary)

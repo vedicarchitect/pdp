@@ -344,3 +344,149 @@ class MonitorSnapshot {
     );
   }
 }
+
+// ─── Strangle P&L ──────────────────────────────────────────────────────────────
+
+class StranglePnlRow {
+  final String underlying;
+  final String strategyId;
+  final double dayRealized;
+  final double dayUnrealized;
+  final double dayPnl;
+  final int nOpenLegs;
+  final bool doneForDay;
+  final String? squaredOffAt;
+
+  const StranglePnlRow({
+    required this.underlying,
+    required this.strategyId,
+    required this.dayRealized,
+    required this.dayUnrealized,
+    required this.dayPnl,
+    required this.nOpenLegs,
+    required this.doneForDay,
+    this.squaredOffAt,
+  });
+
+  factory StranglePnlRow.fromJson(Map<String, dynamic> json) {
+    return StranglePnlRow(
+      underlying: json['underlying'] as String? ?? '',
+      strategyId: json['strategy_id'] as String? ?? '',
+      dayRealized: (json['day_realized'] as num?)?.toDouble() ?? 0.0,
+      dayUnrealized: (json['day_unrealized'] as num?)?.toDouble() ?? 0.0,
+      dayPnl: (json['day_pnl'] as num?)?.toDouble() ?? 0.0,
+      nOpenLegs: (json['n_open_legs'] as num?)?.toInt() ?? 0,
+      doneForDay: json['done_for_day'] as bool? ?? false,
+      squaredOffAt: json['squared_off_at'] as String?,
+    );
+  }
+}
+
+class StranglePnl {
+  final List<StranglePnlRow> byIndex;
+  final double totalRealized;
+  final double totalUnrealized;
+  final double totalPnl;
+  final int totalOpenLegs;
+
+  const StranglePnl({
+    required this.byIndex,
+    required this.totalRealized,
+    required this.totalUnrealized,
+    required this.totalPnl,
+    required this.totalOpenLegs,
+  });
+
+  factory StranglePnl.fromJson(Map<String, dynamic> json) {
+    final byIndexRaw = json['by_index'] as List<dynamic>? ?? [];
+    final totals = json['totals'] as Map<String, dynamic>? ?? {};
+    return StranglePnl(
+      byIndex: byIndexRaw.map((e) => StranglePnlRow.fromJson(e as Map<String, dynamic>)).toList(),
+      totalRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
+      totalUnrealized: (totals['day_unrealized'] as num?)?.toDouble() ?? 0.0,
+      totalPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
+      totalOpenLegs: (totals['n_open_legs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+// ─── Strangle Trades ──────────────────────────────────────────────────────────
+
+class StrangleTradeRow {
+  final String? underlying;
+  final String? symbol;
+  final String? optType;
+  final double? strike;
+  final String? expiry;
+  final double lots;
+  final double? entryPrice;
+  final String? entryTime;
+  final double? exitPrice;
+  final String? exitTime;
+  final double? pnl;
+  final bool open;
+  final bool isHedge;
+
+  const StrangleTradeRow({
+    this.underlying,
+    this.symbol,
+    this.optType,
+    this.strike,
+    this.expiry,
+    required this.lots,
+    this.entryPrice,
+    this.entryTime,
+    this.exitPrice,
+    this.exitTime,
+    this.pnl,
+    required this.open,
+    required this.isHedge,
+  });
+
+  factory StrangleTradeRow.fromJson(Map<String, dynamic> json) {
+    return StrangleTradeRow(
+      underlying: json['underlying'] as String?,
+      symbol: json['symbol'] as String?,
+      optType: json['opt_type'] as String?,
+      strike: (json['strike'] as num?)?.toDouble(),
+      expiry: json['expiry'] as String?,
+      lots: (json['lots'] as num?)?.toDouble() ?? 0.0,
+      entryPrice: (json['entry_price'] as num?)?.toDouble(),
+      entryTime: json['entry_time'] as String?,
+      exitPrice: (json['exit_price'] as num?)?.toDouble(),
+      exitTime: json['exit_time'] as String?,
+      pnl: (json['pnl'] as num?)?.toDouble(),
+      open: json['open'] as bool? ?? false,
+      isHedge: json['is_hedge'] as bool? ?? false,
+    );
+  }
+}
+
+class StrangleTrades {
+  final String date;
+  final Map<String, List<StrangleTradeRow>> byIndex;
+
+  const StrangleTrades({
+    required this.date,
+    required this.byIndex,
+  });
+
+  factory StrangleTrades.fromJson(Map<String, dynamic> json) {
+    final Map<String, List<StrangleTradeRow>> parsedByIndex = {};
+    if (json['by_index'] != null) {
+      final map = json['by_index'] as Map<String, dynamic>;
+      for (final entry in map.entries) {
+        final list = entry.value as List?;
+        if (list != null) {
+          parsedByIndex[entry.key] = list
+              .map((e) => StrangleTradeRow.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+      }
+    }
+    return StrangleTrades(
+      date: json['date'] as String? ?? '',
+      byIndex: parsedByIndex,
+    );
+  }
+}
