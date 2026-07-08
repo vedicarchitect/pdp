@@ -76,3 +76,23 @@ def test_aggregate_halted_count():
     ]
     m = aggregate(results)
     assert m["halted"] == 1
+
+
+def test_aggregate_includes_sharpe():
+    # A sweep combo's metrics must carry a real sharpe so single_run_verdict (which grades
+    # combos via the walk-forward thresholds) doesn't silently default sharpe to 0.0 and
+    # force every combo to REVIEW regardless of actual risk-adjusted return.
+    results = [
+        _FakeDayResult(realized=1000.0),
+        _FakeDayResult(realized=-400.0),
+        _FakeDayResult(realized=2000.0),
+        _FakeDayResult(realized=-100.0),
+    ]
+    m = aggregate(results)
+    assert m["sharpe"] is not None
+    assert m["sharpe"] > 0  # positive-mean returns -> positive Sharpe
+
+
+def test_aggregate_sharpe_none_for_single_day():
+    m = aggregate([_FakeDayResult(realized=100.0)])
+    assert m["sharpe"] is None  # needs >=2 return observations

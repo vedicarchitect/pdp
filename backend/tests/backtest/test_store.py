@@ -35,7 +35,7 @@ def _make_manifest(tmp_path: Path, run_id: str = "strangle_20260101-120000") -> 
     m = {
         "run_id": run_id,
         "generated": "2026-01-01T12:00:00",
-        "config": {"timeframe_min": 5, "lot_size": 65},
+        "config": {"timeframe_min": 5, "lot_size": 65, "underlying": "NIFTY"},
         "window": {"from": "2026-01-02", "to": "2026-01-10", "biz_days": 6, "traded_days": 5},
         "metrics": {"days": 5, "net": 10000.0, "gross_profit": 15000.0,
                     "gross_loss": -5000.0, "profit_factor": 3.0,
@@ -140,16 +140,26 @@ def test_build_run_doc_fields(tmp_path):
     doc = build_run_doc(manifest, kind="single", equity_rets=[2000, 3000, -1000, 4000, 2000])
     assert doc["run_id"] == "strangle_20260101-120000"
     assert doc["kind"] == "single"
+    assert doc["underlying"] == "NIFTY"
     assert doc["strategy_id"] == "strangle"
     assert doc["status"] == "complete"
     assert doc["promotion_state"] == "none"
-    assert doc["verdict"] is None
+    assert doc["verdict"] == "PASS"
     assert doc["metrics"]["net"] == pytest.approx(10000.0)
     assert doc["metrics"]["profit_factor"] == pytest.approx(3.0)
     assert doc["metrics"]["max_dd"] == pytest.approx(2000.0)
     assert doc["metrics"]["sharpe"] is not None  # computed from equity_rets
     assert isinstance(doc["created_at"], datetime)
     assert doc["created_at"].tzinfo is not None  # timezone-aware
+
+
+def test_build_run_doc_review_verdict(tmp_path):
+    manifest = _make_manifest(tmp_path)
+    # PF < 1.2 causes REVIEW
+    manifest["metrics"]["profit_factor"] = 1.1
+    doc = build_run_doc(manifest, kind="single", equity_rets=[2000, 3000, -1000, 4000, 2000])
+    assert doc["verdict"] == "REVIEW"
+    assert doc["promotion_state"] == "none"
 
 
 def test_build_run_doc_inf_pf(tmp_path):
@@ -311,10 +321,14 @@ def test_store_ingest_run_folder(tmp_path):
 def test_store_ingest_wf_csv(tmp_path):
     wf = _make_wf_csv(tmp_path)
     store = _make_store()
-    result = store.ingest_wf_csv(wf, run_id="wf_test")
+    result = store.ingest_wf_csv(wf, run_id="wf_test", config={"underlying": "SENSEX"})
     assert result["run_id"] == "wf_test"
     assert result["folds"] == 2
     assert result["verdict"] in ("PASS", "REVIEW")
+    
+    key = str(sorted({"run_id": "wf_test"}.items()))
+    stored = store._runs._docs[key]
+    assert stored["underlying"] == "SENSEX"
 
 
 # ── verdict thresholds / breakdown ───────────────────────────────────────────
@@ -377,8 +391,10 @@ def test_build_sweep_doc_ranks_by_pf_then_net():
     doc = build_sweep_doc(
         "sweep_1", kind="sweep", window={"from": "2026-01-01", "to": "2026-06-01"},
         grid={"day_loss_limit": [10000, 15000, 20000]}, objective="pf", combos=combos,
+        base_config={"underlying": "BANKNIFTY"}
     )
     assert doc["sweep_id"] == "sweep_1"
+    assert doc["underlying"] == "BANKNIFTY"
     ranked = doc["combos"]
     # Highest PF wins; ties broken by higher net -> 20000 (pf=3, net=9000) is rank 1.
     assert ranked[0]["params"] == {"day_loss_limit": 20000}

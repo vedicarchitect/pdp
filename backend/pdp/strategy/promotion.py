@@ -83,6 +83,13 @@ def promote_run(run: dict[str, Any]) -> dict[str, Any]:
 
     Returns dict with: strategy_id, yaml_path — or {"error": reason} on failure.
     """
+    kind = run.get("kind")
+    if kind != "walkforward":
+        return {
+            "error": f"Cannot promote run {run['run_id']!r}: kind is {kind!r}, must be "
+            "'walkforward' — only walk-forward out-of-sample validated runs are promotable"
+        }
+
     verdict = run.get("verdict")
     if verdict != "PASS":
         return {"error": f"Cannot promote run {run['run_id']!r}: verdict is {verdict!r}, must be PASS"}

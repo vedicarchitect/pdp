@@ -28,6 +28,7 @@ class BacktestLiveSource implements BacktestSource {
     String? kind,
     String? strategyId,
     String? verdict,
+    String? underlying,
     String sortBy = 'created_at',
     int sortDir = -1,
     int limit = 50,
@@ -37,6 +38,7 @@ class BacktestLiveSource implements BacktestSource {
       if (kind != null) 'kind': kind,
       if (strategyId != null) 'strategy_id': strategyId,
       if (verdict != null) 'verdict': verdict,
+      if (underlying != null) 'underlying': underlying,
       'sort_by': sortBy,
       'sort_dir': '$sortDir',
       'limit': '$limit',
@@ -45,6 +47,13 @@ class BacktestLiveSource implements BacktestSource {
     final qs = query.entries.map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}').join('&');
     final json = await api.getJson('$_base/runs?$qs');
     return RunsPage.fromJson(json);
+  }
+
+  @override
+  Future<Map<String, LeaderboardEntry>> getLeaderboard() async {
+    final json = await api.getJson('$_base/runs/leaderboard');
+    final map = json['leaderboard'] as Map<String, dynamic>;
+    return map.map((key, value) => MapEntry(key, LeaderboardEntry.fromJson(value as Map<String, dynamic>)));
   }
 
   @override

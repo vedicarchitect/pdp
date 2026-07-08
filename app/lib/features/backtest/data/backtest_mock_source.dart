@@ -38,6 +38,7 @@ class BacktestMockSource implements BacktestSource {
       status: 'complete',
       promotionState: 'promoted',
       window: const DateWindow(from: '2021-01-01', to: '2026-06-26'),
+      underlying: 'NIFTY',
     ),
     BacktestRun(
       runId: 'strangle_20260702-101500',
@@ -79,15 +80,21 @@ class BacktestMockSource implements BacktestSource {
     String? kind,
     String? strategyId,
     String? verdict,
+    String? underlying,
     String sortBy = 'created_at',
     int sortDir = -1,
     int limit = 50,
     int offset = 0,
   }) async {
-    var filtered = _runs.where((r) {
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final filtered = _runs.where((r) {
       if (kind != null && r.kind != kind) return false;
       if (strategyId != null && r.canonicalStrategyId != strategyId && r.strategyId != strategyId) return false;
       if (verdict != null && r.verdict != verdict) return false;
+      if (underlying != null) {
+        final runU = (r.underlying ?? r.config['underlying'] as String?)?.toUpperCase();
+        if (runU != underlying.toUpperCase()) return false;
+      }
       return true;
     }).toList();
 
@@ -115,8 +122,25 @@ class BacktestMockSource implements BacktestSource {
     }
 
     filtered.sort(cmp);
-    final page = filtered.skip(offset).take(limit).toList(growable: false);
-    return RunsPage(total: filtered.length, runs: page);
+    final sorted = filtered;
+    final paginated = sorted.skip(offset).take(limit).toList(growable: false);
+    return RunsPage(total: sorted.length, runs: paginated);
+  }
+
+  @override
+  Future<Map<String, LeaderboardEntry>> getLeaderboard() async {
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    return {
+      'NIFTY': LeaderboardEntry(
+        id: 'mock_run_1',
+        source: 'run',
+        kind: 'single',
+        config: {'underlying': 'NIFTY'},
+        metrics: {'profit_factor': 2.5, 'net': 50000},
+        verdict: 'PASS',
+        promotionState: 'promoted',
+      ),
+    };
   }
 
   @override
@@ -275,7 +299,7 @@ class BacktestMockSource implements BacktestSource {
       BacktestRun(
         runId: runId, kind: 'single', strategyId: 'strangle', canonicalStrategyId: 'directional_strangle_nifty',
         verdict: null, createdAt: DateTime.now(), metrics: const {}, config: request['config'] as Map<String, dynamic>? ?? const {},
-        status: 'complete', promotionState: 'none',
+        status: 'complete', promotionState: 'none', underlying: 'NIFTY',
       ),
     );
     return _submitFakeJob('backtest:single', resultOnComplete: {'run_id': runId});

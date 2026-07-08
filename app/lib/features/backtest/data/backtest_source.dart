@@ -17,11 +17,14 @@ abstract interface class BacktestSource {
     String? kind,
     String? strategyId,
     String? verdict,
+    String? underlying,
     String sortBy,
     int sortDir,
     int limit,
     int offset,
   });
+
+  Future<Map<String, LeaderboardEntry>> getLeaderboard();
 
   Future<BacktestRun> getRun(String runId);
 

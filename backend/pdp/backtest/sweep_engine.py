@@ -23,6 +23,7 @@ from pymongo import MongoClient
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
 from pdp.backtest.day_loader import load_window
+from pdp.backtest.store import _sharpe_from_rets
 from pdp.backtest.strangle_config import StrangleConfig, lot_size_for_date
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window
 from pdp.backtest.strangle_sim import simulate_strangle_day
@@ -99,6 +100,7 @@ def aggregate(results: list) -> dict[str, Any]:
         "profit_factor": profit_factor,
         "win_rate": (pdays / n * 100) if n else 0.0,
         "max_dd": max_dd,
+        "sharpe": _sharpe_from_rets([r.realized for r in results]),
         "trades": sum(len(r.trades) for r in results),
         "halted": sum(1 for r in results if r.done_reason),
     }

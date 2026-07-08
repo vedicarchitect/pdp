@@ -6,9 +6,7 @@ layering, `BacktestSource` interface with live+mock impls) that makes the backen
 usable in a few clicks: run history/leaderboard, run-detail drill-downs, a strategy-registry-driven
 launch flow, a data-coverage/gap-radar panel, promotion rationale, backtest-vs-paper comparison, and
 export/dashboard links.
-
 ## Requirements
-
 ### Requirement: House-convention feature architecture
 The backtest feature SHALL follow the app's house convention: `domain/data/application/presentation`
 layering with a `BacktestSource` interface backed by both a live implementation and a mock
@@ -25,16 +23,32 @@ implementation selected via `AppConfig.useMock`, and all colors/P&L styling SHAL
 
 ### Requirement: Run history and leaderboard console
 The console SHALL list runs in a sortable, filterable table (by metric, kind, verdict, promotion
-state) with an all-index selector (NIFTY/BANKNIFTY/SENSEX), and SHALL show the sweep leaderboard
-ranking combinations by the objective metric with the selected best param.
+state, and index) with an all-index selector (NIFTY/BANKNIFTY/SENSEX), defaulting to a per-index
+grouped layout, and SHALL show the sweep leaderboard ranking combinations by the objective metric
+with the selected best param. Every run's Verdict SHALL render as a PASS/REVIEW chip (never `--`,
+since single runs are now graded), and the console SHALL present a plain-English per-index
+leaderboard card naming the best/promoted config (e.g. "NIFTY: best = ST(10,2)/15m, PF 5.72, PASS,
+promoted") rather than raw combo JSON.
 
 #### Scenario: Runs are filtered and sorted
 - **WHEN** the user filters by kind `walkforward` and sorts by profit-factor descending
 - **THEN** only walk-forward runs are shown, ordered by profit-factor descending
 
+#### Scenario: Runs are grouped by index
+
+- **WHEN** the Runs tab is opened
+- **THEN** runs are grouped per index (NIFTY/BANKNIFTY/SENSEX) and the index selector filters
+  them, and each run shows a PASS/REVIEW verdict chip rather than `--`
+
 #### Scenario: The sweep leaderboard is shown
 - **WHEN** the user opens a sweep
 - **THEN** its combinations are listed ranked by the objective with the best param highlighted
+
+#### Scenario: A plain-English leaderboard card is shown
+
+- **WHEN** the user views the leaderboard
+- **THEN** a per-index card names the best config with its metrics, verdict, and promotion state
+  in plain language, not raw JSON
 
 ### Requirement: Run detail with deep insights
 The run-detail view SHALL show an equity-and-drawdown chart, a day-by-day P&L table, a trade
@@ -51,19 +65,37 @@ stitched-OOS curve and the PASS/REVIEW verdict.
 - **THEN** the per-fold IS-vs-OOS metrics, the stitched-OOS equity curve, and the verdict are displayed
 
 ### Requirement: Few-clicks launch flow
-The launch flow SHALL let the user pick a strategy from `GET /api/v1/strategies` with an editable
-param form (no raw-JSON box), a time-period picker, and an index picker, then launch a single
-backtest, sweep, or walk-forward as an async job whose progress streams live over the jobs
-WebSocket; on completion the run appears in the console.
+The console SHALL let a user launch a single run, sweep, or walk-forward with a schema-driven param
+form (no raw-JSON box), a window, an index, and an objective, tracking progress live over the jobs
+WebSocket. The Sweeps and folds views SHALL carry plain-English explainer copy: what a sweep is
+("we tried N parameter sets; this one had the best profit-factor"), what walk-forward PASS proves
+("optimized on past data, then tested on unseen data — PASS means it held up"), and a one-line
+verdict reason per run.
 
-#### Scenario: A backtest is launched in a few clicks
-- **WHEN** the user selects a strategy, edits params, sets a window and index, and launches
-- **THEN** a job starts, progress streams live, and on completion the run appears in the runs table
+#### Scenario: A user launches from a schema-driven form
+
+- **WHEN** a user selects a strategy, edits its params in the form, and sets a window/index/objective
+- **THEN** the launch uses those params with no raw-JSON box and progress streams live
+
+#### Scenario: Sweeps and folds carry layman copy
+
+- **WHEN** the user views a sweep or walk-forward folds
+- **THEN** plain-English copy explains what the sweep/walk-forward means and gives a one-line
+  verdict reason
 
 ### Requirement: Coverage and gap-radar panel
 The console SHALL show a data-coverage panel (per index and family) backed by `GET /api/v1/coverage`,
-flagging missing input families (e.g. VWAP/spot, weekly Camarilla, VIX, futures) per date, with a
-one-click backfill action per gap whose job progress streams over the jobs WebSocket.
+flagging missing input families (spot, options, weekly Camarilla, VIX) per date, with a one-click
+backfill action per gap whose job progress streams over the jobs WebSocket. The panel SHALL load
+without timing out — it relies on the coverage API's sub-2s response and a sufficient client
+receive-timeout backstop — and SHALL default to a per-index grouped layout. It SHALL NOT reference
+a futures family (removed upstream).
+
+#### Scenario: The coverage panel loads without timing out
+
+- **WHEN** the user opens the Coverage tab
+- **THEN** the panel loads without a Dio timeout / DioException and shows per-index, per-family
+  coverage
 
 #### Scenario: A gap is filled from the panel
 - **WHEN** the user clicks backfill on a flagged gap
@@ -99,3 +131,4 @@ Playwright), runnable via `flutter analyze && flutter test`.
 #### Scenario: Console tests run in the Flutter toolchain
 - **WHEN** `flutter analyze && flutter test` is run
 - **THEN** the backtest console's widget/integration tests execute and pass
+

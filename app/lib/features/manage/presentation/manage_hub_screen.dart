@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 
 import 'tabs/housekeeping_tab.dart';
 import 'tabs/jobs_tab.dart';
-import 'tabs/journal_tab.dart';
-import 'tabs/strategy_execution_tab.dart';
 import 'tabs/strategy_tab.dart';
 
 class ManageHubScreen extends StatelessWidget {
@@ -12,7 +10,7 @@ class ManageHubScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 5,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Management Hub'),
@@ -20,8 +18,6 @@ class ManageHubScreen extends StatelessWidget {
             isScrollable: true,
             tabs: [
               Tab(icon: Icon(Icons.psychology), text: 'Strategies'),
-              Tab(icon: Icon(Icons.monitor_heart), text: 'Execution'),
-              Tab(icon: Icon(Icons.book), text: 'Journal'),
               Tab(icon: Icon(Icons.cleaning_services), text: 'Housekeeping'),
               Tab(icon: Icon(Icons.engineering), text: 'Jobs / Audit'),
             ],
@@ -30,8 +26,6 @@ class ManageHubScreen extends StatelessWidget {
         body: const TabBarView(
           children: [
             StrategyTab(),
-            StrategyExecutionTab(),
-            JournalTab(),
             HousekeepingTab(),
             JobsTab(),
           ],

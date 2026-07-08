@@ -118,7 +118,7 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
     monkeypatch.setattr(cov, "holidays", lambda _path: set())
     monkeypatch.setattr(cov, "trading_days", lambda _from, _to, _hol: [day])
 
-    async def _fake_options_family(settings, underlying, days):
+    async def _fake_options_family(settings, underlying, days, sync_client):
         return cov._empty_family(len(days)), set()
 
     monkeypatch.setattr(cov, "_options_family", _fake_options_family)
@@ -134,7 +134,8 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
     )
 
     result = await cov.underlying_coverage(
-        mongo_db, _FakeSettings(), "NIFTY", window_from=day, window_to=day
+        mongo_db, _FakeSettings(), "NIFTY", window_from=day, window_to=day,
+        sync_client=object(),  # keeps the test offline — no real MongoClient() construction
     )
 
     assert result["radar"]["2026-01-06"]["spot"] == "ready"

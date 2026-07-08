@@ -58,6 +58,10 @@ def _make_mongo_db(
     col_decisions = MagicMock()
     col_decisions.find.return_value = _cursor(decisions or [])
 
+    col_sweeps = MagicMock()
+    col_sweeps.find.return_value = _cursor([])
+    col_sweeps.count_documents = AsyncMock(return_value=0)
+
     _cols = {
         "backtest_runs": col_runs,
         "backtest_days": col_days,
@@ -65,10 +69,11 @@ def _make_mongo_db(
         "backtest_trades": col_trades,
         "backtest_promotions": col_promotions,
         "backtest_decisions": col_decisions,
+        "backtest_sweeps": col_sweeps,
     }
 
     db = MagicMock()
-    db.__getitem__ = lambda self_inner, name: _cols.get(name, MagicMock())
+    db.__getitem__.side_effect = lambda name: _cols.get(name, MagicMock())
     # Expose for test overrides
     db._cols = _cols
     return db
@@ -326,6 +331,16 @@ def test_promote_non_pass_rejected(client):
     client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=review_run)
     resp = client.post("/api/v1/strangle-backtests/runs/strangle_test1/promote")
     assert resp.status_code == 422
+
+
+def test_promote_single_kind_rejected(client):
+    # A single (non-walk-forward) run with a PASS verdict must still be rejected —
+    # only walk-forward, out-of-sample-validated runs are promotable.
+    single_pass_run = {**_RUN, "verdict": "PASS", "kind": "single"}
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=single_pass_run)
+    resp = client.post("/api/v1/strangle-backtests/runs/strangle_test1/promote")
+    assert resp.status_code == 422
+    assert "walkforward" in resp.json()["detail"]
 
 
 def test_promote_pass_accepted(client, tmp_path, monkeypatch):

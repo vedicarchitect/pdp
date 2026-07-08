@@ -52,6 +52,7 @@ from pdp.observability.client import get_opensearch
 from pdp.observability.query import fetch_session_events
 from pdp.settings import get_settings
 from pdp.warehouse.coverage import underlying_coverage
+from pdp.warehouse.service import UNDERLYING_REGISTRY
 
 log = structlog.get_logger()
 
@@ -95,6 +96,7 @@ async def list_runs(
     kind: str | None = Query(None, description="Filter by kind: single, sweep, walkforward"),
     strategy_id: str | None = Query(None),
     verdict: str | None = Query(None, description="Filter by verdict: PASS, REVIEW"),
+    underlying: str | None = Query(None, description="Filter by underlying index"),
     sort_by: str = Query("created_at", description="Sort metric: pf, net, max_dd, sharpe, created_at"),
     sort_dir: int = Query(-1, description="-1 descending, 1 ascending"),
     limit: int = Query(50, le=200),
@@ -108,18 +110,133 @@ async def list_runs(
         filt["strategy_id"] = strategy_id
     if verdict:
         filt["verdict"] = verdict.upper()
+    if underlying:
+        filt["underlying"] = underlying.upper()
 
-    sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
-    col = _col(request, "backtest_runs")
-    cursor = col.find(filt, {"_id": 0}).sort(sort_field, sort_dir).skip(offset).limit(limit)
-    docs = await cursor.to_list(length=limit)
-    total = await col.count_documents(filt)
+    limit_fetch = offset + limit
+
+    s_filt: dict[str, Any] = {}
+    if "underlying" in filt:
+        s_filt["underlying"] = filt["underlying"]
+    if "verdict" in filt:
+        s_filt["verdict"] = filt["verdict"]
+
+    runs_docs = []
+    if not kind or kind in ("single", "walkforward"):
+        col = _col(request, "backtest_runs")
+        sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+        runs_docs = await col.find(filt, {"_id": 0}).sort(sort_field, sort_dir).to_list(length=limit_fetch)
+
+    sweeps_docs = []
+    if not kind or kind == "sweep":
+        scol = _col(request, "backtest_sweeps")
+        # Map sort field for sweeps
+        sweep_sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+        if sweep_sort_field.startswith("metrics."):
+            sweep_sort_field = f"combos.0.{sweep_sort_field}"
+
+        sweep_results = await scol.find(s_filt, {"_id": 0}).sort(sweep_sort_field, sort_dir).to_list(length=limit_fetch)
+        # Adapt sweep doc to run doc shape for the table
+        for s in sweep_results:
+            best_combo = s.get("combos", [{}])[0]
+            sweeps_docs.append({
+                "run_id": s["sweep_id"],
+                "kind": "sweep",
+                "underlying": s.get("underlying"),
+                "strategy_id": "strangle",
+                "verdict": s.get("verdict"),
+                "promotion_state": "none",
+                "config": s.get("best_param") or {},
+                "metrics": best_combo.get("metrics") or {},
+                "created_at": s.get("created_at"),
+            })
+
+    # Merge, sort, and slice
+    all_docs = runs_docs + sweeps_docs
+
+    _metrics_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+    _metrics_key = (
+        _metrics_field.split(".", 1)[1] if _metrics_field.startswith("metrics.") else None
+    )
+
+    def get_sort_val(d):
+        if _metrics_key is None:
+            val = d.get("created_at")
+            # If string, that's fine for comparison if isoformat.
+            return val or ""
+        metrics = d.get("metrics") or {}
+        return metrics.get(_metrics_key) or 0.0
+
+    all_docs.sort(key=get_sort_val, reverse=(sort_dir == -1))
+
+    paginated = all_docs[offset:offset+limit]
+
+    total = 0
+    if not kind or kind in ("single", "walkforward"):
+        total += await _col(request, "backtest_runs").count_documents(filt)
+    if not kind or kind == "sweep":
+        total += await _col(request, "backtest_sweeps").count_documents(s_filt)
+
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "runs": [_doc_out(d) for d in docs],
+        "runs": [_doc_out(d) for d in paginated],
     }
+
+
+@router.get("/runs/leaderboard")
+async def get_leaderboard(request: Request) -> dict[str, Any]:
+    """Return the top backtest config per underlying across runs and sweeps."""
+    runs_col = _col(request, "backtest_runs")
+    sweeps_col = _col(request, "backtest_sweeps")
+    
+    underlyings = list(UNDERLYING_REGISTRY)
+    leaderboard = {}
+    
+    for u in underlyings:
+        run_cursor = runs_col.find({"underlying": u}).sort([("metrics.profit_factor", -1), ("metrics.net", -1)]).limit(1)
+        top_run = await run_cursor.to_list(length=1)
+        
+        sweep_cursor = sweeps_col.find({"underlying": u}).sort([("combos.0.metrics.profit_factor", -1), ("combos.0.metrics.net", -1)]).limit(1)
+        top_sweep = await sweep_cursor.to_list(length=1)
+        
+        candidates = []
+        if top_run:
+            r = top_run[0]
+            candidates.append({
+                "source": "run",
+                "id": r["run_id"],
+                "kind": r.get("kind"),
+                "config": r.get("config"),
+                "metrics": r.get("metrics"),
+                "verdict": r.get("verdict"),
+                "promotion_state": r.get("promotion_state"),
+                "pf": (r.get("metrics") or {}).get("profit_factor") or 0.0,
+            })
+        if top_sweep:
+            s = top_sweep[0]
+            best_combo = s.get("combos", [{}])[0]
+            from pdp.backtest.store import single_run_verdict
+            verdict = single_run_verdict(best_combo.get("metrics", {}))
+            candidates.append({
+                "source": "sweep",
+                "id": s["sweep_id"],
+                "kind": "sweep",
+                "config": s.get("best_param") or {},
+                "metrics": best_combo.get("metrics", {}),
+                "verdict": verdict,
+                "promotion_state": "none",
+                "pf": best_combo.get("metrics", {}).get("profit_factor") or 0.0,
+            })
+        
+        if candidates:
+            candidates.sort(key=lambda x: x["pf"], reverse=True)
+            best = candidates[0]
+            best.pop("pf")
+            leaderboard[u] = best
+            
+    return {"leaderboard": leaderboard}
 
 
 @router.get("/runs/{run_id}")

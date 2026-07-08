@@ -14,6 +14,7 @@ class BacktestRun {
     this.gitSha,
     this.stitchedOos,
     this.window,
+    this.underlying,
   });
 
   final String runId;
@@ -29,6 +30,7 @@ class BacktestRun {
   final String? gitSha;
   final Map<String, dynamic>? stitchedOos;
   final DateWindow? window;
+  final String? underlying;
 
   bool get isPromoted => promotionState == 'promoted';
   bool get isWalkforward => kind == 'walkforward';
@@ -58,6 +60,7 @@ class BacktestRun {
       window: json['window'] is Map<String, dynamic>
           ? DateWindow.fromJson(json['window'] as Map<String, dynamic>)
           : null,
+      underlying: json['underlying'] as String?,
     );
   }
 }
@@ -247,6 +250,44 @@ class DecisionEvent {
       subReason: json['sub_reason'] as String?,
       action: json['action'] as String? ?? '',
       snapshot: json['snapshot'] as Map<String, dynamic>? ?? const {},
+    );
+  }
+}
+
+/// A top backtest config from the leaderboard.
+class LeaderboardEntry {
+  const LeaderboardEntry({
+    required this.id,
+    required this.source,
+    required this.kind,
+    required this.config,
+    required this.metrics,
+    required this.verdict,
+    required this.promotionState,
+  });
+
+  final String id;
+  final String source;
+  final String kind;
+  final Map<String, dynamic> config;
+  final Map<String, dynamic> metrics;
+  final String verdict;
+  final String promotionState;
+
+  double get profitFactor => (metrics['profit_factor'] as num?)?.toDouble() ?? 0;
+  double get net => (metrics['net'] as num?)?.toDouble() ?? 0;
+  int get trades => (metrics['trades'] as num?)?.toInt() ?? 0;
+  int get days => (metrics['days'] as num?)?.toInt() ?? 0;
+
+  factory LeaderboardEntry.fromJson(Map<String, dynamic> json) {
+    return LeaderboardEntry(
+      id: json['id'] as String? ?? '',
+      source: json['source'] as String? ?? '',
+      kind: json['kind'] as String? ?? '',
+      config: json['config'] as Map<String, dynamic>? ?? const {},
+      metrics: json['metrics'] as Map<String, dynamic>? ?? const {},
+      verdict: json['verdict'] as String? ?? '',
+      promotionState: json['promotion_state'] as String? ?? '',
     );
   }
 }
