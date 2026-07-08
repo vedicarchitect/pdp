@@ -19,6 +19,7 @@ class JournalScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.calendar_today),
+            tooltip: 'Select date',
             onPressed: () async {
               final picked = await showDatePicker(
                 context: context,
@@ -33,18 +34,20 @@ class JournalScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.arrow_back_ios),
+            tooltip: 'Previous day',
             onPressed: () {
-              ref.read(journalDateProvider.notifier).update(
-                    (state) => state.subtract(const Duration(days: 1)),
-                  );
+              ref
+                  .read(journalDateProvider.notifier)
+                  .update((state) => state.subtract(const Duration(days: 1)));
             },
           ),
           IconButton(
             icon: const Icon(Icons.arrow_forward_ios),
+            tooltip: 'Next day',
             onPressed: () {
-              ref.read(journalDateProvider.notifier).update(
-                    (state) => state.add(const Duration(days: 1)),
-                  );
+              ref
+                  .read(journalDateProvider.notifier)
+                  .update((state) => state.add(const Duration(days: 1)));
             },
           ),
           const SizedBox(width: 8),
@@ -105,9 +108,9 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
       );
       ref.invalidate(journalDayProvider);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Journal saved')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Journal saved')));
       }
     } catch (e) {
       if (mounted) {
@@ -149,10 +152,19 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 _StatText('Trades', '${s.totalTrades}'),
-                _StatText('Realized P&L', formatInr(s.realizedPnl),
-                    color: s.realizedPnl >= 0 ? AppColors.profit : AppColors.loss),
-                _StatText('Win Rate', '${(s.winRate * 100).toStringAsFixed(1)}%'),
-                _StatText('Charges', formatInr(s.totalCharges, showSign: false)),
+                _StatText(
+                  'Realized P&L',
+                  formatInr(s.realizedPnl),
+                  color: s.realizedPnl >= 0 ? AppColors.profit : AppColors.loss,
+                ),
+                _StatText(
+                  'Win Rate',
+                  '${(s.winRate * 100).toStringAsFixed(1)}%',
+                ),
+                _StatText(
+                  'Charges',
+                  formatInr(s.totalCharges, showSign: false),
+                ),
               ],
             ),
           ],
@@ -171,7 +183,10 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Notes & Tags', style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  'Notes & Tags',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 FilledButton.icon(
                   onPressed: _saveMetadata,
                   icon: const Icon(Icons.save),
@@ -266,21 +281,30 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
                   itemBuilder: (c, i) {
                     final t = entry.value[i];
                     final isPositive = (t.pnl ?? 0) >= 0;
-                    
+
                     return ListTile(
-                      title: Text(t.symbol ?? t.securityId,
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      title: Text(
+                        t.symbol ?? t.securityId,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
                       subtitle: Text(
                         'Qty: ${t.qty}'
                         '${t.entryPrice != null ? ' | Entry: ${formatInr(t.entryPrice!, showSign: false)}' : ''}'
                         '${t.exitPrice != null ? ' | Exit: ${formatInr(t.exitPrice!, showSign: false)}' : ''}',
                       ),
                       trailing: t.open
-                          ? const Chip(label: Text('OPEN', style: TextStyle(fontSize: 10)))
+                          ? const Chip(
+                              label: Text(
+                                'OPEN',
+                                style: TextStyle(fontSize: 10),
+                              ),
+                            )
                           : Text(
                               t.pnl != null ? formatInr(t.pnl!) : '',
                               style: TextStyle(
-                                color: isPositive ? AppColors.profit : AppColors.loss,
+                                color: isPositive
+                                    ? AppColors.profit
+                                    : AppColors.loss,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
@@ -320,9 +344,13 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
                   final t = trades[i];
                   final isBuy = t.side.toUpperCase() == 'BUY';
                   return ListTile(
-                    title: Text(t.securityId,
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('Qty: ${t.qty} @ ${formatInr(t.fillPrice, showSign: false)}'),
+                    title: Text(
+                      t.securityId,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      'Qty: ${t.qty} @ ${formatInr(t.fillPrice, showSign: false)}',
+                    ),
                     trailing: Text(
                       t.side.toUpperCase(),
                       style: TextStyle(
