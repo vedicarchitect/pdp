@@ -89,6 +89,7 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-08: Backtest console readability + nav (UX improvements) archived
 - 2026-07-04: Flutter backtest console (chunk 8) archived
 - 2026-07-05: Flutter dashboard (chunk 6) archived
 - 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived
