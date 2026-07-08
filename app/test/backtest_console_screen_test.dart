@@ -23,11 +23,19 @@ void main() {
     expect(find.text('Backtest Console'), findsOneWidget);
     expect(find.textContaining('strangle_2026'), findsWidgets);
     expect(find.text('PASS'), findsWidgets);
+    
+    // Tap SENSEX tab to see the REVIEW run
+    await tester.tap(find.text('SENSEX'));
+    await tester.pumpAndSettle();
     expect(find.text('REVIEW'), findsOneWidget);
   });
 
   testWidgets('filtering by verdict narrows the runs table', (tester) async {
     await tester.pumpWidget(wrap(const BacktestConsoleScreen()));
+    await tester.pumpAndSettle();
+
+    // Tap SENSEX tab to see the REVIEW run
+    await tester.tap(find.text('SENSEX'));
     await tester.pumpAndSettle();
 
     // Two PASS runs + one REVIEW run are seeded.

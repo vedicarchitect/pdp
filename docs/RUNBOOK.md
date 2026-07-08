@@ -12,7 +12,37 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 
 ---
 
-## Table of Contents
+## Quick Navigation
+
+**New to PDP?**
+1. [Prerequisites](#1-prerequisites) (install tools)
+2. [First-Time Setup](#2-first-time-setup) (clone, `.env`, migrations)
+3. [Starting the Stack](#3-starting-the-stack) (minimum setup)
+
+**Running the system?**
+- [Backend (API Server)](#4-backend-api-server) (start, endpoints, config)
+- [App (Flutter UI)](#5-app-flutter-ui) (run, build, deploy)
+- [Strategy Operations](#6-strategy-operations) (add/manage strategies)
+- [Backtest](#8-backtest) (run, sweep, compare)
+
+**Operating in production?**
+- [Live Monitor](#7-live-monitor) (terminal live ticker)
+- [Health Checks](#14-health-checks) (verify everything works)
+- [Common Troubleshooting](#15-common-troubleshooting) (debug + fix)
+
+**Trading a strategy?**
+- [Directional Strangle — Paper Mode Operations](#17-directional-strangle--paper-mode-operations) (live strangle guide)
+- [Paper Reset](#11-paper-reset) (reset positions)
+- [Live Mode](#12-live-mode) (go-live with real money)
+
+**Data & Infrastructure**
+- [Data Backfill](#9-data-backfill) (fetch historical bars)
+- [Database Admin](#13-database-admin) (inspect, restore)
+- [Unified Log Pipeline (OpenSearch)](#18-unified-log-pipeline-opensearch) (search logs, dashboards)
+
+---
+
+## Table of Contents (Full)
 
 1. [Prerequisites](#1-prerequisites)
 2. [First-Time Setup](#2-first-time-setup)
@@ -23,7 +53,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 7. [Live Monitor](#7-live-monitor)
 8. [Backtest](#8-backtest)
 9. [Data Backfill](#9-data-backfill)
-10. [Data Migration (Abi → MongoDB)](#10-data-migration-abi--mongodb)
+10. [Options Warehouse Gap Backfill](#10-options-warehouse-gap-backfill)
 11. [Paper Reset](#11-paper-reset)
 12. [Live Mode](#12-live-mode)
 13. [Database Admin](#13-database-admin)
@@ -32,7 +62,6 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 16. [Alert System — Setup & Usage Guide](#16-alert-system--setup--usage-guide)
 17. [Directional Strangle — Paper Mode Operations](#17-directional-strangle--paper-mode-operations)
 18. [Unified Log Pipeline (OpenSearch)](#18-unified-log-pipeline-opensearch)
-19. [Strangle Live-Paper Hardening](#19-strangle-live-paper-hardening-change-strangle-live-paper-hardening)
 
 ---
 
@@ -99,7 +128,8 @@ task dev
 
 ```powershell
 # Terminal 1
-task db:up && task dev
+task db:up
+task dev
 
 # Terminal 2 — Windows desktop, live against the local API
 cd app
@@ -250,8 +280,10 @@ flutter test                 # widget/unit tests
 
 | File | ID | Description |
 |------|----|-------------|
-| `strategies/supertrend_short.yaml` | `supertrend_short` | ST(10,2)/15m NIFTY OTM-1 option selling. Paper-only. Promoted 2026-06-14. |
-| `strategies/directional_strangle.yaml` | `directional_strangle` | Bias-driven multi-TF NIFTY ratio strangle. Paper-only. 5yr backtest: Rs 85.6L / PF 5.72. See §17. |
+| `strategies/directional_strangle_nifty.yaml` | `directional_strangle_nifty` | Bias-driven multi-TF NIFTY ratio strangle. Paper-ready. 5yr backtest: Rs 85.6L / PF 5.72. See §17. |
+| `strategies/directional_strangle_banknifty.yaml` | `directional_strangle_banknifty` | Same bias engine, BANKNIFTY tuned (lot=30, strike_step=100). See §17. |
+| `strategies/directional_strangle_sensex.yaml` | `directional_strangle_sensex` | Same bias engine, SENSEX tuned (lot=20). See §17. |
+| `strategies/inactive/supertrend_short.yaml` | `supertrend_short` | (Archived) ST(10,2)/15m NIFTY. Superseded by directional strangle. |
 
 ### Add a new strategy
 
@@ -343,7 +375,7 @@ Requirements:
 ## 8. Backtest
 
 All backtest tooling lives in `backtest/`. Entry point: `backtest/run.py`.
-Named configs live in `backtest/configs/*.yaml`. See [`backtest/CLAUDE.md`](backtest/CLAUDE.md).
+Named configs live in `backtest/configs/*.yaml`. See the backtest module in [`backend/CLAUDE.md`](../backend/CLAUDE.md) for internal architecture.
 
 ### Per-trade detail (default config)
 
@@ -492,11 +524,17 @@ uv run python scripts/validate_options_warehouse.py
 
 The warehouse runs **self-healing gap backfill** automatically while the API is running (`WAREHOUSE_GAP_BACKFILL_ENABLED=True`), scanning every `WAREHOUSE_GAP_CHECK_INTERVAL_HOURS=4.0` hours.
 
-To manually trigger a gap fill for a specific range:
+Everyday manual top-up (spot+options+vix+levels, all 3 indices, `--only-missing`, last 7 days):
 
 ```powershell
-# Gap-fill options from Dhan API
-task backfill:options -- --from 2026-06-01 --to 2026-06-25 --only-missing
+task backfill:daily
+```
+
+To manually trigger a gap fill for a specific range/index:
+
+```powershell
+# Gap-fill NIFTY options from Dhan API
+task backfill:options:nifty -- --from 2026-06-01 --to 2026-06-25 --only-missing
 ```
 
 ---

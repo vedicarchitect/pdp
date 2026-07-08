@@ -34,16 +34,17 @@ class RangeVolumeDetectors:
                 timeframe=tf, title=title, message=msg, payload=dict(payload), dedup_key=dedup,
             ))
 
-        # Level breaks (resistance up / support down)
+        # Level breaks (resistance up / support down). Match the full level name —
+        # names like R1/CAM_R4 carry a trailing digit that is part of the label, so
+        # stripping digits here would miss them.
         for name, price in collect_levels(ctx):
-            base = name.rstrip("0123456789")
-            if base in _RESISTANCE:
+            if name in _RESISTANCE:
                 c = self._p.crossed(f"{sid}:{tf}:brk:{name}:{price:.0f}", close, price)
                 if c > 0:
                     ev(EventType.LEVEL_BREAK, Severity.WARNING, f"broke {name}",
                        f"{u} {tf}: broke above {name} ({price:.0f})",
                        f"{sid}:{tf}:brk:{name}:up", level=name, level_price=round(price, 2))
-            elif base in _SUPPORT:
+            elif name in _SUPPORT:
                 c = self._p.crossed(f"{sid}:{tf}:brk:{name}:{price:.0f}", close, price)
                 if c < 0:
                     ev(EventType.LEVEL_BREAK, Severity.WARNING, f"broke {name}",

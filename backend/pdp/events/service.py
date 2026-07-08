@@ -72,6 +72,9 @@ class EventService:
 
         self._ltp: dict[str, float] = {}
         self._last_emit: dict[str, float] = {}
+        # Warehouse Camarilla/period levels per spot SID, refreshed off the hot path.
+        self._wh_levels: dict[str, list[tuple[str, float]]] = {}
+        self._mongo_db = mongo_db
         self._store_q: asyncio.Queue[Event] = asyncio.Queue(maxsize=2000)
         self._push_q: asyncio.Queue[Event] = asyncio.Queue(maxsize=1000)
         self._tasks: list[asyncio.Task[None]] = []
@@ -88,6 +91,7 @@ class EventService:
             asyncio.create_task(self._run_push_worker(), name="events-push"),
             asyncio.create_task(self._run_position_checks(), name="events-position-checks"),
             asyncio.create_task(self._run_stats(), name="events-stats"),
+            asyncio.create_task(self._run_levels_refresh(), name="events-levels-refresh"),
         ]
         await self._sync.start()
         log.info("event_service_started", timeframes=self.cfg.timeframes)
@@ -138,11 +142,13 @@ class EventService:
         st = eng.get(sid, bar.timeframe) if eng is not None else None
         ml = eng.get_ml_signal(sid, bar.timeframe) if eng is not None else None
         walls = self._oi.walls(underlying) if underlying else []
+        wh_levels = self._wh_levels.get(sid, [])
         ctx = BarContext(
             security_id=sid, underlying=underlying, timeframe=bar.timeframe,
             open=float(bar.open), high=float(bar.high), low=float(bar.low),
             close=float(bar.close), volume=float(bar.volume), bar_time=bar.bar_time,
             snapshot=snap, supertrend=st, ml_signal=ml, cfg=self.cfg, oi_levels=walls,
+            warehouse_levels=wh_levels,
         )
         try:
             self._emit_all(self._trend.evaluate(ctx))
@@ -260,6 +266,57 @@ class EventService:
                     self.emit(self._portfolio_det.build_stats(stats))
             except Exception as exc:
                 log.warning("event_stats_error", exc=str(exc))
+
+    async def _run_levels_refresh(self) -> None:
+        """Refresh warehouse Camarilla/period levels for the spot indices off the hot path.
+
+        Populates ``self._wh_levels[sid]`` with labeled (CAM_*/PDH/PDL/PWH/PWL/PMH/PML)
+        tuples from the persisted ``index_levels`` warehouse — the same source as the
+        Execution-tab matrix — so level-break/Camarilla-touch events agree with it.
+        """
+        if self._mongo_db is None:
+            return
+        from datetime import UTC, datetime, timedelta
+
+        from pdp.indicators.levels_store import LevelsStore
+
+        store = LevelsStore(self._mongo_db["index_levels"])
+        # Refresh once at startup, then hourly (levels only change at session/week/month roll).
+        while not self._stop.is_set():
+            session_date = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+            for sid in _SPOT_SID_TO_NAME:
+                try:
+                    labeled: list[tuple[str, float]] = []
+                    daily = await store.get(sid, "daily", session_date)
+                    weekly = await store.get(sid, "weekly", session_date)
+                    monthly = await store.get(sid, "monthly", session_date)
+                    for doc, hi_label, lo_label in (
+                        (daily, "PDH", "PDL"),
+                        (weekly, "PWH", "PWL"),
+                        (monthly, "PMH", "PML"),
+                    ):
+                        if not doc:
+                            continue
+                        src = doc.get("source") or {}
+                        if src.get("h") is not None:
+                            labeled.append((hi_label, float(src["h"])))
+                        if src.get("l") is not None:
+                            labeled.append((lo_label, float(src["l"])))
+                    # Camarilla — use the DAILY doc (intraday breaks anchor to daily).
+                    cam = (daily or {}).get("camarilla") or {}
+                    for cam_key, label in (
+                        ("r3", "CAM_R3"), ("r4", "CAM_R4"), ("s3", "CAM_S3"), ("s4", "CAM_S4"),
+                    ):
+                        if cam.get(cam_key) is not None:
+                            labeled.append((label, float(cam[cam_key])))
+                    if labeled:
+                        self._wh_levels[sid] = labeled
+                except Exception as exc:
+                    log.warning("event_levels_refresh_error", security_id=sid, exc=str(exc))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=3600.0)
+            except TimeoutError:
+                pass
 
     async def _gather_stats(self) -> dict[str, Any]:
         stats: dict[str, Any] = {}

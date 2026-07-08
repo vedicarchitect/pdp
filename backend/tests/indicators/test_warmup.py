@@ -21,7 +21,6 @@ from pdp.indicators.engine import IndicatorEngine
 from pdp.indicators.supertrend import UP
 from pdp.indicators.warmup import (
     _prior_trading_day,
-    _TF_SESSION_BARS,
     warm_up_indicator_engine,
 )
 from pdp.market.bars import BarClosed
@@ -243,9 +242,13 @@ async def test_warmup_mongo_query_uses_prior_session_start():
     with patch("pdp.indicators.warmup._prior_trading_day", return_value=fixed_prior_day):
         await warm_up_indicator_engine(engine, db, _NO_CREDS, watchlist)
 
+    # Warmup looks back _TF_WARMUP_CALENDAR_DAYS["5m"] calendar days from the prior day,
+    # anchored at that day's session start (03:45 UTC), so EMA(100) can seed.
+    from pdp.indicators.warmup import _TF_WARMUP_CALENDAR_DAYS
     query = db.col.queries[0]
     since_ts = query["ts"]["$gte"]
-    expected = datetime(2026, 6, 12, 3, 45, tzinfo=UTC)
+    warmup_from = fixed_prior_day - timedelta(days=_TF_WARMUP_CALENDAR_DAYS["5m"] - 1)
+    expected = datetime(warmup_from.year, warmup_from.month, warmup_from.day, 3, 45, tzinfo=UTC)
     assert since_ts == expected
 
 
@@ -271,10 +274,13 @@ async def test_warmup_thin_mongo_triggers_dhan_fallback():
 
 @pytest.mark.asyncio
 async def test_warmup_full_mongo_skips_dhan_fallback():
-    """When Mongo returns a full session's worth of bars, the Dhan API is not called."""
+    """When Mongo returns enough bars to seed EMA(100), the Dhan API is not called."""
     engine = IndicatorEngine()
-    session_target = _TF_SESSION_BARS["5m"]  # 75
-    db = _FakeDB(_bar_docs([22000 + 20 * i for i in range(session_target)]))
+    # Warmup demands enough bars to seed EMA(100) across the deepened 5m lookback
+    # window; supply comfortably above that target so no top-up fires.
+    from pdp.indicators.warmup import _TF_SESSION_BARS, _TF_WARMUP_CALENDAR_DAYS
+    target = max(100, _TF_SESSION_BARS["5m"] * max(1, _TF_WARMUP_CALENDAR_DAYS["5m"] // 2))
+    db = _FakeDB(_bar_docs([22000 + 20 * i for i in range(target + 10)]))
     watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["5m"]}]
 
     with patch("pdp.indicators.warmup._fetch_from_dhan") as mock_fetch:

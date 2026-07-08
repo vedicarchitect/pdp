@@ -7,11 +7,9 @@ deterministic bias-scoring engine (shared by backtest and live) drives PE:CE leg
 selection, VIX/PCR gating, rollups, tiered stops, trend-flip adjustment, and a daily loss cap. The
 same bias function and gates SHALL produce identical decisions in backtest and live given identical
 inputs.
-
 ## Requirements
-
 ### Requirement: Bias-scoring engine
-The system SHALL provide a pure, deterministic bias-scoring function in `src/pdp/signals/bias.py` that accepts per-timeframe indicator snapshots (5m/15m/1h/1d/1w), an India VIX series, a PCR value, VWAP, and the 15m opening range, and returns a `BiasResult` containing a normalized score in `[−1, +1]`, a bias bucket, a sell PE:CE lot ratio, a `gated` flag, and a human-readable reason. The same function SHALL be used by both the backtest simulator and the live strategy so that identical inputs yield identical decisions.
+The system SHALL provide a pure, deterministic bias-scoring function in `src/pdp/signals/bias.py` that accepts per-timeframe indicator snapshots (5m/15m/1h/1d/1w), an India VIX series, a PCR value, and the 15m opening range, and returns a `BiasResult` containing a normalized score in `[−1, +1]`, a bias bucket, a sell PE:CE lot ratio, a `gated` flag, and a human-readable reason. VWAP SHALL NOT be a bias input — neither the live strategy nor the backtest simulator SHALL pass a VWAP value into the scoring function, and the function SHALL NOT define a VWAP vote or weight. The same function SHALL be used by both the backtest simulator and the live strategy so that identical inputs yield identical decisions, with no structurally-divergent input (such as futures-weighted vs equal-weighted VWAP) remaining between the two paths.
 
 #### Scenario: Aligned bullish inputs produce a bullish ratio
 - **WHEN** 1h/15m EMAs are aligned bullish (9>20>50, price above 50), 5m price is above its 50 EMA, price closed above daily Camarilla R3 and above PDH, and PCR > 1.1
@@ -24,6 +22,13 @@ The system SHALL provide a pure, deterministic bias-scoring function in `src/pdp
 #### Scenario: Same inputs are deterministic
 - **WHEN** the function is called twice with identical inputs
 - **THEN** it returns an identical `BiasResult` with no side effects
+
+#### Scenario: No VWAP input on either path
+
+- **WHEN** the live strategy and the backtest simulator each assemble bias inputs for the same
+  bar with all other inputs equal
+- **THEN** neither passes a VWAP value, the scoring weight sum excludes any VWAP weight, and the
+  two paths produce the same `BiasResult` with no VWAP-driven divergence
 
 ### Requirement: VIX entry gate
 The bias engine SHALL block new entries (`gated = True`) when any of these hold: India VIX has risen more than 5% on the day, VIX is at the day's high, or VIX has increased over the last three 5-minute candles. When VIX history is unavailable for a timestamp, the gate SHALL default to allowing entries and the condition SHALL be logged.
@@ -66,19 +71,24 @@ The simulator SHALL support two strike-selection methods behind a `strike_method
 - **THEN** the chosen strike's absolute delta is the closest available to 0.6
 
 ### Requirement: Leg lifecycle and exits
-The simulator SHALL implement: rollup of a leg when its premium falls below 20 (buy back, re-sell a strike with premium at least `roll_target_min_prem`); take-profit closing a leg at `take_profit_pct` of collected credit; tiered premium stops (half-close at 30% above entry, full-close at 40% above entry) with a 15-minute stop-recovery cooldown gate before re-entry on the stopped side; trend-flip adjustment that rolls the tested side when the 15m or 1h 50-EMA is crossed against the position; a daily loss cap that flattens and halts trading for the day when day P&L reaches −15000 INR; and square-off of all legs at session end.
+
+The simulator SHALL implement: rollup of a leg when its premium falls below 20 (buy back, re-sell a strike with premium at least `roll_target_min_prem`); take-profit closing a leg at `take_profit_pct` of collected credit; tiered premium stops (half-close at 30% above entry, full-close at 40% above entry) with a 15-minute stop-recovery cooldown gate before re-entry on the stopped side; trend-flip adjustment that rolls the tested side when the 15m or 1h 50-EMA is crossed against the position; a daily loss cap that flattens and halts trading for the day when day P&L reaches −15000 INR; and square-off of all legs at session end. Every terminal close event (`leg_close`, `take_profit`, `stop_all`, and the partial `stop_half`, including the closes driven by `square_off` / `day_loss_cap`) SHALL carry the full round-trip economics — `entry_price`, `exit_price`, `lots`, `entry_time`, `exit_time`, `pnl`, `opt_type`, `strike`, `is_hedge`, `expiry`, and a resolved human `symbol` — with the `pnl` sign matching the engine's unrealized convention (short: `(entry − exit) × lots × lot_size`; hedge/long: `(exit − entry) × lots × lot_size`).
 
 #### Scenario: Rollup on premium decay
 - **WHEN** an open leg's premium drops below 20
 - **THEN** the leg is bought back and a new same-side strike with premium ≥ `roll_target_min_prem` is sold
 
-#### Scenario: Take-profit on credit capture
-- **WHEN** a leg has captured `take_profit_pct` (e.g. 50%) of its collected credit
-- **THEN** the leg is closed and its realized P&L recorded
+#### Scenario: Terminal close carries full round-trip economics
 
-#### Scenario: Daily loss cap halts trading
-- **WHEN** cumulative day P&L reaches −15000 INR
-- **THEN** all open legs are closed and no new entries are taken for the rest of the day
+- **WHEN** any terminal close event is emitted for a leg
+- **THEN** it carries `entry_price`, `exit_price`, `lots`, `entry_time`, `exit_time`, `pnl`,
+  `opt_type`, `strike`, `is_hedge`, `expiry`, and a resolved `symbol`
+
+#### Scenario: A partial stop-half carries the closed-lot P&L
+
+- **WHEN** a `stop_half` closes half of a leg's lots
+- **THEN** its `pnl` is computed on the closed lots only and it is marked partial, leaving the
+  remaining lots open for a later terminal close event
 
 ### Requirement: Detailed every-minute status logging
 The simulator and the live strategy SHALL emit, for every processed decision bar, a detailed status record containing the IST timestamp, spot, bias score and bucket, the VIX/PCR gate state, each individual signal vote (the conditions), every open leg with its strike/lots/entry/LTP/MTM, the running day P&L, and the action taken that bar. In the backtest this is exposed as an opt-in per-bar trace; in live it is a structlog heartbeat with the same fields.
@@ -194,18 +204,23 @@ the next day starts un-halted.
 
 ### Requirement: Leg entry metadata
 
-Each open leg SHALL record `entry_time` (IST timezone-aware) and `entry_reason` (a short string
-capturing the bias bucket and score at entry, e.g. `NEUTRAL@0.10`) when the leg is opened, for short,
-hedge, and momentum legs. The `state()` API SHALL include `entry_time` and `entry_reason` in each leg's
-dict so the monitor can display when and why each leg was opened. Closed-leg exit reasons remain sourced
-from the existing `_activity` event buffer.
+Each open leg SHALL record `entry_time` (IST timezone-aware), `entry_reason` (a short string
+capturing the bias bucket and score at entry, e.g. `NEUTRAL@0.10`), and `expiry` (the resolved
+option expiry date) when the leg is opened, for short, hedge, and momentum legs. The `state()`
+API SHALL include `entry_time`, `entry_reason`, and each strategy's `underlying` so the monitor
+can display when and why each leg was opened and group per index. Closed-leg exit reasons remain
+sourced from the existing `_activity` event buffer. The `expiry` recorded at open SHALL be
+reused at close time — the close path SHALL NOT re-query the expiry.
 
 #### Scenario: Entry metadata captured on open
 
-- **WHEN** a short leg is opened in the NEUTRAL bucket with score 0.10
-- **THEN** the leg's `entry_time` is set to the IST open time and `entry_reason` is `"NEUTRAL@0.10"`
+- **WHEN** a short, hedge, or momentum leg is opened
+- **THEN** the leg records `entry_time`, `entry_reason`, and `expiry`, and `state()` exposes
+  `entry_time`, `entry_reason`, and the strategy `underlying`
 
-#### Scenario: Entry metadata exposed in state
+#### Scenario: Expiry recorded at open is reused at close
 
-- **WHEN** `state()` is called with at least one open leg
-- **THEN** each leg dict includes `entry_time` and `entry_reason`
+- **WHEN** a leg is closed
+- **THEN** the close event's `expiry` is the value recorded at open, without a fresh expiry
+  lookup on the close/tick path
+

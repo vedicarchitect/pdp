@@ -56,17 +56,28 @@ def compute_daily_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
             acc["buy_val"] += value
 
     net_premium = sell_value - buy_value
-    realized_pnl = net_premium - total_charges
 
+    # Realized P&L = sum of P&L over the MATCHED (closed) portion of each security only.
+    # A fully open position (sold but not yet bought back) contributes ZERO; a partial
+    # close (e.g. a stop-half exit) contributes the P&L on the matched qty, prorated by
+    # average price — the unmatched remainder stays open and contributes nothing yet.
+    realized_pnl = Decimal("0")
     round_trips = 0
     wins = 0
     losses = 0
     for acc in per_sec.values():
-        closed = acc["sell_qty"] > 0 and acc["buy_qty"] >= acc["sell_qty"]
-        if not closed:
+        matched_qty = min(acc["sell_qty"], acc["buy_qty"])
+        if matched_qty <= 0:
             continue
+        avg_sell = acc["sell_val"] / acc["sell_qty"]
+        avg_buy = acc["buy_val"] / acc["buy_qty"]
+        # Charges are prorated by the matched fraction of whichever side traded more,
+        # so a partial close only books its share of the day's charges on this security.
+        traded_qty = max(acc["sell_qty"], acc["buy_qty"])
+        matched_charges = acc["charges"] * (matched_qty / traded_qty)
+        pnl = (avg_sell - avg_buy) * matched_qty - matched_charges
+        realized_pnl += pnl
         round_trips += 1
-        pnl = acc["sell_val"] - acc["buy_val"] - acc["charges"]
         if pnl > 0:
             wins += 1
         else:

@@ -16,7 +16,11 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import 'package:fl_chart/fl_chart.dart';
 
+import '../../../../core/theme/app_colors.dart';
+import '../../../../shared/widgets/pnl_text.dart';
 import '../../application/manage_providers.dart';
 import '../../domain/execution_models.dart';
 
@@ -116,10 +120,9 @@ class _MonitorBody extends StatelessWidget {
         const _SectionHeader(title: 'Indicator Matrix'),
         _IndicatorMatrix(indicators: snap.indicators),
         const SizedBox(height: 8),
-        if (snap.recentEvents.isNotEmpty) ...[
-          const _SectionHeader(title: 'Recent Events'),
-          _EventLog(events: snap.recentEvents),
-        ],
+        // Meaningful market-structure events (EMA cross / SuperTrend flip / Camarilla
+        // + level breaks) stream in the Live Events sidebar. The strategy heartbeat
+        // log (bias_evaluated / leg_status) is intentionally not shown here.
       ],
     );
   }
@@ -199,7 +202,7 @@ class _OverallStatusBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final pnlColor = snap.dayPnl >= 0 ? Colors.green : Colors.red;
+    final pnlColor = snap.dayPnl >= 0 ? AppColors.profit : AppColors.loss;
     final bkt = snap.bucket ?? '--';
     return Card(
       child: Padding(
@@ -233,15 +236,36 @@ class _OverallStatusBar extends StatelessWidget {
 
 // ─── Per-underlying section (header + legs table) ─────────────────────────────
 
-class _UnderlyingSection extends StatelessWidget {
+class _UnderlyingSection extends ConsumerWidget {
   final UnderlyingGroup group;
 
   const _UnderlyingSection({required this.group});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final bkt = group.bucket ?? '--';
-    final pnlColor = group.dayPnl >= 0 ? Colors.green : Colors.red;
+    
+    // Read P&L and Trades from providers
+    final pnlAsync = ref.watch(stranglePnlProvider);
+    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
+
+    // Resolve true P&L from canonical /pnl endpoint (Task 6.4)
+    double displayPnl = group.dayPnl; // fallback
+    bool isDone = group.doneForDay;
+    String? squaredOffAt;
+    
+    pnlAsync.whenData((pnl) {
+      final match = pnl.byIndex.where((r) => r.underlying == group.underlying).firstOrNull;
+      if (match != null) {
+        displayPnl = match.dayPnl;
+        isDone = match.doneForDay;
+        squaredOffAt = match.squaredOffAt;
+      }
+    });
+
+    final pnlColor = displayPnl >= 0 ? AppColors.profit : AppColors.loss;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -277,21 +301,33 @@ class _UnderlyingSection extends StatelessWidget {
                         ?.copyWith(color: _bucketColor(bkt))),
               ],
               const Spacer(),
-              Text(
-                '${group.dayPnl >= 0 ? '+' : ''}${group.dayPnl.toStringAsFixed(0)}',
-                style: TextStyle(
-                    color: pnlColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13),
-              ),
-              if (group.doneForDay) ...[
-                const SizedBox(width: 6),
-                const Text('DONE',
-                    style: TextStyle(fontSize: 10, color: Colors.orange)),
-              ],
+              if (isDone && squaredOffAt != null)
+                // Task 6.3: Squared off banner
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: pnlColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: pnlColor.withValues(alpha: 0.5)),
+                  ),
+                  child: Text(
+                    'Squared off ${squaredOffAt!.substring(0, 5)} — final ₹${displayPnl.toStringAsFixed(0)}',
+                    style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                )
+              else
+                Text(
+                  '${displayPnl >= 0 ? '+' : ''}${displayPnl.toStringAsFixed(0)}',
+                  style: TextStyle(
+                      color: pnlColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13),
+                ),
             ],
           ),
         ),
+        
+        // Open Legs (Live monitor data)
         if (group.legs.isNotEmpty)
           _LegsTable(legs: group.legs)
         else
@@ -300,11 +336,25 @@ class _UnderlyingSection extends StatelessWidget {
             child: Text('no open legs',
                 style: TextStyle(fontSize: 12, color: Colors.grey)),
           ),
+          
+        const SizedBox(height: 12),
+        
+        // Task 6.1: Today's Trades
+        tradesAsync.when(
+          data: (trades) {
+            final idxTrades = trades.byIndex[group.underlying] ?? [];
+            if (idxTrades.isEmpty) return const SizedBox.shrink();
+            return _TodayTradesTable(trades: idxTrades);
+          },
+          loading: () => const Center(child: LinearProgressIndicator()),
+          error: (err, _) => Text('Error loading trades: $err', style: const TextStyle(color: Colors.red, fontSize: 11)),
+        ),
         const SizedBox(height: 6),
       ],
     );
   }
 }
+
 
 Color _bucketColor(String bucket) {
   switch (bucket.toLowerCase()) {
@@ -397,7 +447,7 @@ class _LegsTable extends StatelessWidget {
   DataRow _legRow(BuildContext context, LegRow leg) {
     final isCall = leg.optType == 'CE';
     final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
-    final mtmColor = (leg.mtm ?? 0) >= 0 ? Colors.green : Colors.red;
+    final mtmColor = (leg.mtm ?? 0) >= 0 ? AppColors.profit : AppColors.loss;
     final tag = leg.isHedge
         ? 'H'
         : leg.isMomentum
@@ -523,23 +573,12 @@ class _SidMatrix extends StatelessWidget {
                         .labelMedium
                         ?.copyWith(fontWeight: FontWeight.bold)),
                 const Spacer(),
-                if (ind.camarillaDaily != null)
-                  _LevelPill(
-                    label: 'Cam R4',
-                    value: ind.camarillaDaily!.r4,
-                    color: Colors.red,
-                  ),
-                const SizedBox(width: 4),
-                if (ind.camarillaDaily != null)
-                  _LevelPill(
-                    label: 'Cam S4',
-                    value: ind.camarillaDaily!.s4,
-                    color: Colors.green,
-                  ),
+                const Text('Cam: 5-15m daily · 30m/1H weekly · 1D monthly',
+                    style: TextStyle(fontSize: 9, color: Colors.grey)),
               ],
             ),
             const SizedBox(height: 6),
-            // TF grid
+            // TF grid — Camarilla per-TF (daily/weekly/monthly) + VWAP/VWMA (futures)
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: DataTable(
@@ -554,39 +593,38 @@ class _SidMatrix extends StatelessWidget {
                   DataColumn(label: Text('EMA20'), numeric: true),
                   DataColumn(label: Text('EMA50'), numeric: true),
                   DataColumn(label: Text('EMA100'), numeric: true),
+                  DataColumn(label: Text('EMA200'), numeric: true),
                   DataColumn(label: Text('PSAR'), numeric: true),
+                  DataColumn(label: Text('RSI'), numeric: true),
+                  DataColumn(label: Text('VWAP'), numeric: true),
+                  DataColumn(label: Text('VWMA'), numeric: true),
+                  DataColumn(label: Text('CamR4'), numeric: true),
+                  DataColumn(label: Text('CamS4'), numeric: true),
                 ],
                 rows: _matrixTfs
-                    .map((tf) => _tfRow(context, tf, ind.tf[tf]))
+                    .map((tf) => _tfRow(context, tf, ind.tf[tf], ind.camForTf(tf)))
                     .toList(),
               ),
             ),
-            // PDH / PDL / PWH / PWL
-            if (ind.pdh != null || ind.pwh != null) ...[
+            // PDH/PDL/PWH/PWL/PMH/PML
+            if (ind.pdh != null || ind.pwh != null || ind.pmh != null) ...[
               const SizedBox(height: 4),
               Wrap(
                 spacing: 8,
+                runSpacing: 4,
                 children: [
                   if (ind.pdh != null)
-                    _LevelPill(
-                        label: 'PDH',
-                        value: ind.pdh,
-                        color: Colors.blue),
+                    _LevelPill(label: 'PDH', value: ind.pdh, color: Colors.blue),
                   if (ind.pdl != null)
-                    _LevelPill(
-                        label: 'PDL',
-                        value: ind.pdl,
-                        color: Colors.blueGrey),
+                    _LevelPill(label: 'PDL', value: ind.pdl, color: Colors.blueGrey),
                   if (ind.pwh != null)
-                    _LevelPill(
-                        label: 'PWH',
-                        value: ind.pwh,
-                        color: Colors.purple),
+                    _LevelPill(label: 'PWH', value: ind.pwh, color: Colors.purple),
                   if (ind.pwl != null)
-                    _LevelPill(
-                        label: 'PWL',
-                        value: ind.pwl,
-                        color: Colors.deepPurple),
+                    _LevelPill(label: 'PWL', value: ind.pwl, color: Colors.deepPurple),
+                  if (ind.pmh != null)
+                    _LevelPill(label: 'PMH', value: ind.pmh, color: Colors.teal),
+                  if (ind.pml != null)
+                    _LevelPill(label: 'PML', value: ind.pml, color: Colors.tealAccent),
                 ],
               ),
             ],
@@ -596,7 +634,8 @@ class _SidMatrix extends StatelessWidget {
     );
   }
 
-  DataRow _tfRow(BuildContext context, String tf, IndicatorCell? cell) {
+  DataRow _tfRow(
+      BuildContext context, String tf, IndicatorCell? cell, CamarillaLevels? cam) {
     final stDir = cell?.stDir;
     final stIcon = stDir == 'up'
         ? '▲'
@@ -609,6 +648,15 @@ class _SidMatrix extends StatelessWidget {
             ? Colors.red
             : null;
 
+    // RSI coloured vs its signal (rsi > signal = bullish).
+    Color? rsiColor;
+    if (cell?.rsi != null && cell?.rsiMa != null) {
+      rsiColor = cell!.rsi! >= cell.rsiMa! ? Colors.green : Colors.red;
+    }
+    final rsiText = cell?.rsi != null
+        ? '${cell!.rsi!.toStringAsFixed(0)}/${_fmtOpt(cell.rsiMa)}'
+        : '--';
+
     return DataRow(cells: [
       DataCell(Text(tf,
           style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11))),
@@ -617,7 +665,16 @@ class _SidMatrix extends StatelessWidget {
       DataCell(Text(_fmtOpt(cell?.ema20))),
       DataCell(Text(_fmtOpt(cell?.ema50))),
       DataCell(Text(_fmtOpt(cell?.ema100))),
+      DataCell(Text(_fmtOpt(cell?.ema200))),
       DataCell(Text(_fmtOpt(cell?.psar))),
+      DataCell(Text(rsiText,
+          style: TextStyle(color: rsiColor, fontSize: 11))),
+      DataCell(Text(_fmtOpt(cell?.vwap))),
+      DataCell(Text(_fmtOpt(cell?.vwma))),
+      DataCell(Text(_fmtOpt(cam?.r4),
+          style: const TextStyle(color: Colors.redAccent, fontSize: 11))),
+      DataCell(Text(_fmtOpt(cam?.s4),
+          style: const TextStyle(color: Colors.greenAccent, fontSize: 11))),
     ]);
   }
 
@@ -646,66 +703,6 @@ class _LevelPill extends StatelessWidget {
         style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
       ),
     );
-  }
-}
-
-// ─── Event log ────────────────────────────────────────────────────────────────
-
-class _EventLog extends StatelessWidget {
-  final List<Map<String, dynamic>> events;
-
-  const _EventLog({required this.events});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: ListView.separated(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        itemCount: events.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
-        itemBuilder: (context, i) {
-          final ev = events[i];
-          final type = ev['event_type'] as String? ?? ev['type'] as String? ?? '?';
-          final ts = ev['ts'] as String? ?? ev['timestamp'] as String? ?? '';
-          return ListTile(
-            dense: true,
-            leading: _eventIcon(type),
-            title: Text(type,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-            subtitle: Text(_evSummary(ev), style: const TextStyle(fontSize: 11)),
-            trailing: Text(
-              ts.length > 19 ? ts.substring(11, 19) : ts,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _eventIcon(String type) {
-    final lower = type.toLowerCase();
-    if (lower.contains('close') || lower.contains('stop')) {
-      return const Icon(Icons.remove_circle_outline, color: Colors.red, size: 18);
-    }
-    if (lower.contains('open')) {
-      return const Icon(Icons.add_circle_outline, color: Colors.green, size: 18);
-    }
-    if (lower.contains('profit')) {
-      return const Icon(Icons.emoji_events, color: Colors.amber, size: 18);
-    }
-    return const Icon(Icons.info_outline, size: 18);
-  }
-
-  String _evSummary(Map<String, dynamic> ev) {
-    final parts = <String>[];
-    if (ev['opt_type'] != null) parts.add(ev['opt_type'] as String);
-    if (ev['strike'] != null) parts.add('@ ${ev['strike']}');
-    if (ev['lots'] != null) parts.add('${ev['lots']} lots');
-    if (ev['exit_reason'] != null) parts.add('(${ev['exit_reason']})');
-    if (ev['reason'] != null) parts.add('(${ev['reason']})');
-    return parts.isEmpty ? '--' : parts.join(' ');
   }
 }
 
@@ -747,3 +744,115 @@ class _EmptyCard extends StatelessWidget {
     );
   }
 }
+
+// ─── Today's Trades (Task 6.1, 6.2) ──────────────────────────────────────────
+
+class _TodayTradesTable extends StatelessWidget {
+  final List<StrangleTradeRow> trades;
+
+  const _TodayTradesTable({required this.trades});
+
+  @override
+  Widget build(BuildContext context) {
+    if (trades.isEmpty) return const SizedBox.shrink();
+
+    // Cumulative PnL for sparkline
+    double cumPnl = 0;
+    final spots = <FlSpot>[];
+    for (int i = 0; i < trades.length; i++) {
+      final t = trades[i];
+      if (!t.open && t.pnl != null) {
+        cumPnl += t.pnl!;
+        spots.add(FlSpot(i.toDouble(), cumPnl));
+      }
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text("Today's Trades", style: Theme.of(context).textTheme.titleSmall),
+                const Spacer(),
+                if (spots.isNotEmpty)
+                  SizedBox(
+                    width: 100,
+                    height: 30,
+                    child: LineChart(
+                      LineChartData(
+                        minX: 0,
+                        maxX: trades.length.toDouble() - 1,
+                        titlesData: const FlTitlesData(show: false),
+                        borderData: FlBorderData(show: false),
+                        gridData: const FlGridData(show: false),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: spots,
+                            isCurved: true,
+                            color: cumPnl >= 0 ? AppColors.profit : AppColors.loss,
+                            barWidth: 2,
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(
+                              show: true,
+                              color: cumPnl >= 0 ? AppColors.profitFaint : AppColors.lossFaint,
+                            ),
+                          )
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: trades.length,
+              itemBuilder: (context, index) {
+                final t = trades[index];
+                final isCall = t.optType == 'CE';
+                final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
+                final tag = t.isHedge ? 'H' : (t.optType ?? '');
+                final pnlVal = t.pnl ?? 0.0;
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      _Tag(tag: tag, color: typeColor),
+                      const SizedBox(width: 8),
+                      Text('${t.strike?.toStringAsFixed(0)} ${t.optType}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+                      const SizedBox(width: 12),
+                      Text('${t.lots.toStringAsFixed(0)}x', style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          t.open
+                              ? '${t.entryPrice?.toStringAsFixed(1)} → OPEN'
+                              : '${t.entryPrice?.toStringAsFixed(1)} → ${t.exitPrice?.toStringAsFixed(1)}',
+                          style: const TextStyle(fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      if (!t.open)
+                        PnlText(
+                          pnlVal,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        )
+                      else
+                        const Text('OPEN', style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.bold, fontSize: 12)),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

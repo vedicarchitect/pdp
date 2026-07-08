@@ -11,8 +11,18 @@ if TYPE_CHECKING:
 
 
 def collect_levels(ctx: BarContext) -> list[tuple[str, float]]:
-    """Gather named price levels from the snapshot + injected OI walls."""
+    """Gather named price levels from the warehouse/snapshot + injected OI walls.
+
+    Camarilla + period levels (CAM_*/PDH/PDL/PWH/PWL/PMH/PML) come from the persisted
+    ``index_levels`` warehouse when injected (``ctx.warehouse_levels``) so level events
+    agree with the Execution-tab matrix; otherwise they fall back to the live snapshot.
+    """
     out: list[tuple[str, float]] = []
+    # Authoritative warehouse levels (same source as the matrix), when injected.
+    wh = list(ctx.warehouse_levels or ())
+    wh_labels = {label for label, _ in wh}
+    out.extend(wh)
+
     snap = ctx.snapshot
     if snap is not None:
         pl = snap.period_levels
@@ -21,7 +31,7 @@ def collect_levels(ctx: BarContext) -> list[tuple[str, float]]:
                 ("PDH", pl.pdh), ("PDL", pl.pdl), ("PWH", pl.pwh),
                 ("PWL", pl.pwl), ("PMH", pl.pmh), ("PML", pl.pml),
             ):
-                if v is not None:
+                if v is not None and name not in wh_labels:
                     out.append((name, float(v)))
         pv = snap.pivots
         if pv is not None:
@@ -31,7 +41,8 @@ def collect_levels(ctx: BarContext) -> list[tuple[str, float]]:
                 ("CAM_R3", pv.cam_r3), ("CAM_R4", pv.cam_r4),
                 ("CAM_S3", pv.cam_s3), ("CAM_S4", pv.cam_s4),
             ):
-                out.append((name, float(v)))
+                if name not in wh_labels:
+                    out.append((name, float(v)))
         if snap.vwap is not None:
             out.append(("VWAP", float(snap.vwap.vwap)))
         if snap.fib_levels is not None and snap.fib_levels.nearest_level:

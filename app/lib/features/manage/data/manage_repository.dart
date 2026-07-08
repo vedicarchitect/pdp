@@ -1,5 +1,6 @@
 import '../../../core/network/api_client.dart';
 import '../domain/models.dart';
+import '../domain/execution_models.dart';
 
 class ManageRepository {
   final ApiClient _api;
@@ -49,5 +50,15 @@ class ManageRepository {
 
   Future<void> runHousekeeping(String taskName, Map<String, dynamic> params) async {
     await _api.postJson('/api/v1/housekeeping/$taskName', body: params);
+  }
+
+  Future<StrangleTrades> getStrangleTrades(String date) async {
+    final res = await _api.getJson('/api/v1/strangle/trades?date=$date');
+    return StrangleTrades.fromJson(res);
+  }
+
+  Future<StranglePnl> getStranglePnl() async {
+    final res = await _api.getJson('/api/v1/strangle/pnl');
+    return StranglePnl.fromJson(res);
   }
 }

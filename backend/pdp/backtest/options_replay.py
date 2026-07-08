@@ -17,6 +17,7 @@ import structlog
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
 from pdp.backtest.options_strategy import LegConfig, OptionsStrategyConfig, SLTargetSpec
+from pdp.instruments.expiry_calendar import nearest_real_expiry, real_expiries_from_option_bars
 from pdp.settings import get_settings
 
 log = structlog.get_logger()
@@ -137,7 +138,11 @@ def _biz_days_in_range(from_date: date, to_date: date) -> list[date]:
     return days
 
 
-def _resolve_expiry(d: date, selection: str) -> date:
+def _resolve_expiry_synthetic(d: date, selection: str) -> date:
+    """Weekday-projected expiry — used ONLY when ``option_bars`` has no real chain at all for
+    the underlying (pre-ingest). Prefer :func:`_resolve_expiry` (real stored expiries) in all
+    other cases; never treat this as authoritative for a live/regime-current underlying.
+    """
     if selection in ("weekly", "nearest"):
         days_ahead = (1 - d.weekday()) % 7
         if days_ahead == 0:
@@ -230,6 +235,17 @@ def _resolve_strike(
 class OptionsReplayEngine:
     def __init__(self, mongo_db: Any) -> None:
         self._db = mongo_db
+        self._real_expiries: list[date] = []
+
+    def _resolve_expiry(self, d: date, selection: str) -> date:
+        """Real expiry stored in ``option_bars`` for ``d``, falling back to weekday synthesis
+        only when the underlying has no chain ingested at all (see ``pdp.instruments.expiry_calendar``,
+        the shared, cadence-agnostic expiry source used across live/dashboard/backtest).
+        """
+        real = nearest_real_expiry(self._real_expiries, d)
+        if real is not None:
+            return real
+        return _resolve_expiry_synthetic(d, selection)
 
     def run(self, config: OptionsStrategyConfig) -> OptionsBacktestResult:
         settings = get_settings()
@@ -247,6 +263,7 @@ class OptionsReplayEngine:
 
         days = _biz_days_in_range(from_date, to_date)
         spot_by_day = self._load_spot_all(config.underlying, days)
+        self._real_expiries = real_expiries_from_option_bars(self._db, config.underlying)
 
         trade_log: list[TradeRecord] = []
         # (date, net_pnl, n_trades, n_reentries, last_exit_reason)
@@ -259,7 +276,7 @@ class OptionsReplayEngine:
                 log.warning("options_replay_no_spot", date=str(d))
                 continue
 
-            expiry = _resolve_expiry(d, config.expiry_selection)
+            expiry = self._resolve_expiry(d, config.expiry_selection)
             opt_bars = self._load_option_bars(config.underlying, expiry, d)
             if not opt_bars:
                 log.warning("options_replay_no_bars", date=str(d), expiry=str(expiry))
@@ -345,7 +362,7 @@ class OptionsReplayEngine:
     ) -> dict:
         lot_size = config.lot_size
         risk = config.risk
-        expiry = _resolve_expiry(d, config.expiry_selection)
+        expiry = self._resolve_expiry(d, config.expiry_selection)
 
         spot_by_time: dict[time, float] = {b["time"]: b["close"] for b in spot_bars}
         all_times = sorted(spot_by_time)

@@ -5,7 +5,7 @@ This is the bridge between the cached Mongo window (``day_loader.WindowData``) a
   * resamples 1m spot to the decision timeframe (e.g. 5m) and to 15m / 1h,
   * runs ``EMATracker`` per timeframe (warmed with the prior session) for 9/20/50 EMAs,
   * computes daily & weekly Camarilla levels and prior-day/week swing levels from prior-period HLC,
-  * tracks per-day VWAP and the 15m opening range,
+  * tracks the 15m opening range,
   * joins the India VIX series (resampled to 5m) for the gate,
 and emits a ``StrangleDayData`` whose ``decision_bars`` each carry a fully-populated ``BiasInputs``.
 
@@ -175,15 +175,11 @@ def build_strangle_day(
     pcr_times = [t for t, _ in pcr_day] if pcr_day else []
     pcr_vals = [v for _, v in pcr_day] if pcr_day else []
 
-    # Running VWAP over the decision bars (typical price; volume if present else equal-weight).
-    vwap_run = _VWAP()
-
     decision: list[DecisionBar] = []
     for b in dec_bars:
         ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         ist = (ts + _IST).replace(tzinfo=None)
         o, h, lo, c = float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])
-        vwap_run.add(h, lo, c, float(b.get("volume", 0.0)))
 
         vix_i = _asof(vix_times, ist) if vix_times else None
         vix_now = vix_close[vix_i] if vix_i is not None else None
@@ -200,7 +196,6 @@ def build_strangle_day(
             cam_daily=cam_daily,
             cam_weekly=cam_weekly,
             pdh=pdh, pdl=pdl, pwh=pwh, pwl=pwl,
-            vwap=vwap_run.value(),
             orb_high=orb_high, orb_low=orb_low,
             pcr=pcr,
             vix_now=vix_now, vix_day_open=vix_open, vix_day_high=vix_high,
@@ -221,29 +216,6 @@ def build_strangle_day(
         nifty_open=float(dec_bars[0]["open"]) if dec_bars else 0.0,
         nifty_close=float(dec_bars[-1]["close"]) if dec_bars else 0.0,
     )
-
-
-class _VWAP:
-    """Running session VWAP; equal-weights bars when volume is absent (index spot)."""
-
-    def __init__(self) -> None:
-        self._pv = 0.0
-        self._v = 0.0
-        self._n = 0
-        self._sumtp = 0.0
-
-    def add(self, high: float, low: float, close: float, volume: float) -> None:
-        tp = (high + low + close) / 3.0
-        self._sumtp += tp
-        self._n += 1
-        if volume > 0:
-            self._pv += tp * volume
-            self._v += volume
-
-    def value(self) -> float | None:
-        if self._v > 0:
-            return self._pv / self._v
-        return self._sumtp / self._n if self._n else None
 
 
 def load_pcr_window(

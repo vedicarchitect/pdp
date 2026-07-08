@@ -20,21 +20,26 @@ decision trace — SHALL be reconstructable from the DB alone.
 - **THEN** its metrics, per-day equity/drawdown, folds, trades, and decision events are all served from the DB without reading the filesystem
 
 ### Requirement: Backtest run persistence to MongoDB
-The system SHALL persist every strangle backtest, grid sweep, and walk-forward run to MongoDB in a
-`backtest_runs` collection, with one document per run keyed by the run id, capturing the run kind
-(`single` | `sweep` | `walkforward`), strategy id, the full resolved config, the date window,
-headline metrics (net, profit-factor, win rate, max drawdown, Sharpe, Calmar, trades, halted days),
-the git sha, a `status`, a `promotion_state`, and a created-at timestamp. MongoDB SHALL be the
-single source of truth for the run record; the system SHALL NOT depend on a durable filesystem
-`backtest/runs/<id>/` tree for new runs.
+The system SHALL persist each backtest run to MongoDB with its config, window, headline metrics,
+verdict, and promotion state. A top-level `underlying` field SHALL be stored on every run and
+sweep document (populated from `config.underlying`) so runs and sweeps can be grouped and filtered
+by index without reaching into the nested config. Every run SHALL carry a computed `verdict`
+(PASS/REVIEW) — single runs and sweep best-combos SHALL be graded against the same thresholds
+(`WF_PASS_NET/PF/SHARPE/POS_FRAC`) walk-forward already uses, so no run persists with a null
+verdict. `promotion_state` SHALL remain `none` at creation and change only through the PASS-gated
+promotion flow.
 
-#### Scenario: A completed run is queryable
-- **WHEN** a strangle backtest finishes and is persisted
-- **THEN** a `backtest_runs` document exists for its run id with the run kind, config, window, and headline metrics, and it is returned by the list API
+#### Scenario: A single run is graded
 
-#### Scenario: Re-ingesting the same run is idempotent
-- **WHEN** the same run id is persisted twice
-- **THEN** the existing `backtest_runs` document is upserted in place rather than duplicated
+- **WHEN** a single (non-walk-forward) run is persisted with headline metrics above the pass
+  thresholds
+- **THEN** its stored `verdict` is `PASS` (or `REVIEW` when below), not null, and its
+  `promotion_state` is `none` until it is explicitly promoted
+
+#### Scenario: Every run carries a top-level underlying
+
+- **WHEN** a run or sweep is persisted for a given index
+- **THEN** the document has a top-level `underlying` field equal to its `config.underlying`
 
 ### Requirement: Per-day and equity persistence
 The system SHALL persist each run's per-day results to a `backtest_days` collection keyed by
@@ -86,16 +91,26 @@ folder that has not been verified as ingested.
 ### Requirement: Backtest read API
 The system SHALL expose Mongo-backed read endpoints under `/api/v1/strangle-backtests` to list runs
 with filtering and sorting by headline metric, fetch a single run's detail, its equity series, its
-per-day series, its walk-forward folds, and a single day's trade drill-down. Each endpoint SHALL do
-exactly one thing.
+per-day series, its walk-forward folds, and a single day's trade drill-down. The list endpoint
+SHALL support filtering by `underlying` (index) in addition to `kind`, `strategy_id`, and
+`verdict`. The API SHALL expose a per-index leaderboard resource that returns, per underlying, the
+best config (from the sweep `best_param` and walk-forward `pick_label`) with its headline metrics,
+verdict, and promotion state. Each endpoint SHALL do exactly one thing.
 
 #### Scenario: Runs are listed and sorted by metric
 - **WHEN** the list endpoint is requested sorted by out-of-sample profit-factor descending with a kind filter of `walkforward`
 - **THEN** only walk-forward runs are returned, ordered by profit-factor descending
 
-#### Scenario: A run's detail is fetched
-- **WHEN** the detail endpoint is requested for a run id
-- **THEN** the run's config, window, and headline metrics are returned
+#### Scenario: Runs are filtered by index
+
+- **WHEN** the list endpoint is requested with an `underlying` filter of NIFTY
+- **THEN** only runs whose top-level `underlying` is NIFTY are returned
+
+#### Scenario: The per-index leaderboard names the best config
+
+- **WHEN** the leaderboard resource is requested
+- **THEN** it returns, per index, the best config with its headline metrics, verdict, and
+  promotion state
 
 ### Requirement: Multi-run comparison
 The system SHALL expose an endpoint that returns aligned equity curves and headline metrics for a

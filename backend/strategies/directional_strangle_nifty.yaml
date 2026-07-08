@@ -33,7 +33,6 @@ params:
   index_segment: IDX_I
   option_segment: NSE_FNO
   vix_security_id: "21"          # India VIX
-  # futures_security_id — resolved automatically from instruments table at startup
 
   # ---- Lot / strike ----
   lot_size: 65                   # Jan 2026+ NIFTY lot size
@@ -92,7 +91,6 @@ params:
   w_cam_daily: 1.0
   w_cam_weekly: 1.0
   w_swing: 1.0
-  w_vwap: 1.0
   w_orb: 1.0
   w_pcr: 1.0
   th_complete: 0.85

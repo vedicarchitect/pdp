@@ -3,11 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../application/backtest_providers.dart';
 import 'widgets/coverage_tab.dart';
-import 'widgets/dashboard_links.dart';
 import 'widgets/export_menu.dart';
 import 'widgets/launch_backtest_dialog.dart';
 import 'widgets/runs_table_tab.dart';
-import 'widgets/sweep_tab.dart';
 
 class BacktestConsoleScreen extends ConsumerWidget {
   const BacktestConsoleScreen({super.key});
@@ -15,14 +13,13 @@ class BacktestConsoleScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return DefaultTabController(
-      length: 3,
+      length: 2,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Backtest Console'),
           bottom: const TabBar(
             tabs: [
               Tab(text: 'Runs'),
-              Tab(text: 'Sweeps'),
               Tab(text: 'Coverage'),
             ],
           ),
@@ -48,14 +45,12 @@ class BacktestConsoleScreen extends ConsumerWidget {
                 );
               },
             ),
-            const DashboardLinksButton(),
             const SizedBox(width: 8),
           ],
         ),
         body: const TabBarView(
           children: [
             RunsTableTab(),
-            SweepTab(),
             CoverageTab(),
           ],
         ),

@@ -60,10 +60,11 @@ task db:down             Stop containers
 task db:migrate          alembic upgrade head
 task db:tools            Start pgAdmin (:5050)
 
+task backfill:daily      Everyday top-up: spot+options+vix+levels, all 3 indices, --only-missing
 task backfill:nifty      Backfill NIFTY 1m spot → market_bars
 task backfill:banknifty  Backfill BANKNIFTY 1m spot → market_bars
 task backfill:sensex     Backfill SENSEX 1m spot → market_bars
-task backfill:options    Gap-fill option_bars from Dhan
+task backfill:options:nifty  Gap-fill NIFTY option_bars from Dhan
 task backfill:expired    Backfill expired-contract option bars
 
 task audit:coverage      Audit option_bars coverage by date+strike
@@ -150,12 +151,20 @@ See [openspec/project.md](openspec/project.md) for full architecture and convent
 
 ## Data Backfill (Dhan creds required)
 
+Full history is already backfilled. Day to day, just run the combined top-up task:
+
+```powershell
+task backfill:daily              # last 7 days, all 3 indices, --only-missing
+```
+
+For a one-off/wider catch-up (or a single index/step):
+
 ```powershell
 # Spot bars first (options depend on spot for strike derivation)
 task backfill:nifty -- --from 2026-02-09 --to 2026-06-12 --only-missing
 
 # Options bars (post Abi cutoff)
-task backfill:options -- --only-missing
+task backfill:options:nifty -- --only-missing
 
 # Validate coverage
 task audit:coverage
@@ -214,6 +223,6 @@ Risk guards active in all modes:
 - 📖 **Runbook** (how to run everything): [docs/RUNBOOK.md](docs/RUNBOOK.md)
 - 🏗️ **Architecture & Tech Stack**: [openspec/project.md](openspec/project.md)
 - 🤖 **Agent Guidance**: [CLAUDE.md](CLAUDE.md) · [backend/CLAUDE.md](backend/CLAUDE.md)
-- 📜 **Scripts Reference**: [backend/scripts/README.md](backend/scripts/README.md)
+- 📜 **Scripts Reference**: [backend/scripts/CLAUDE.md](backend/scripts/CLAUDE.md)
 - 📚 **API Docs**: http://localhost:8000/docs (when running)
 - 🌐 **Dhan SDK**: [dhanhq on PyPI](https://pypi.org/project/dhanhq/)

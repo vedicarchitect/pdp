@@ -56,11 +56,20 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "lots": _INT,
         "entry_price": _DBL,
         "exit_price": _DBL,
-        "leg_pnl": _DBL,
         "day_pnl": _DBL,
         "reason": _KW,
         "bias_votes": {"type": "object", "enabled": True},
         "note": _TXT,
+        # Enriched close-event fields (live-pnl-trade-ledger-and-journal) — keep in
+        # sync with sinks.py::_EVENT_FIELDS.
+        "entry_time": _DATE,
+        "exit_time": _DATE,
+        "pnl": _DBL,
+        "is_hedge": {"type": "boolean"},
+        "is_momentum": {"type": "boolean"},
+        "expiry": _DATE,
+        "symbol": _KW,
+        "partial": {"type": "boolean"},
     },
     "trades": {
         "@timestamp": _DATE,

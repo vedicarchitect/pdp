@@ -30,15 +30,20 @@ class MockEventsSource implements EventsSource {
   }
 
   void _generateEvent() {
-    final severities = ['info', 'warning', 'alert'];
-    final types = ['crossover', 'breakout', 'anomaly'];
+    final severities = ['info', 'warning', 'critical'];
+    final types = ['EMA_CROSS', 'SUPERTREND_FLIP', 'CAMARILLA_TOUCH', 'LEVEL_BREAK'];
     final indices = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
+    final tfs = ['5m', '15m', '30m', '1H', '1D'];
 
+    final idx = indices[_rand.nextInt(indices.length)];
     final event = AppEvent(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
-      securityId: indices[_rand.nextInt(indices.length)],
+      securityId: idx,
+      underlying: idx,
+      timeframe: tfs[_rand.nextInt(tfs.length)],
       eventType: types[_rand.nextInt(types.length)],
       severity: severities[_rand.nextInt(severities.length)],
+      title: 'Simulated event',
       message: 'Simulated event: Price crossed threshold.',
       timestamp: DateTime.now(),
     );

@@ -3,9 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../shared/widgets/connection_badge.dart';
-import '../../shared/widgets/mode_badge.dart';
+import '../../core/widgets/account_mode_badge.dart';
 import '../events/presentation/event_feed_sidebar.dart';
-import '../portfolio/application/portfolio_providers.dart';
 
 /// Responsive app shell: a side [NavigationRail] on wide layouts (desktop /
 /// tablet) and a bottom [NavigationBar] on compact layouts (phones).
@@ -25,7 +24,7 @@ class AppShell extends ConsumerWidget {
     ),
     _Destination(
       route: '/portfolio',
-      label: 'Holdings',
+      label: 'Live Account (Dhan)',
       icon: Icons.account_balance_wallet_outlined,
       selectedIcon: Icons.account_balance_wallet,
     ),
@@ -87,7 +86,8 @@ class AppShell extends ConsumerWidget {
     final location = GoRouterState.of(context).uri.path;
     final index = _indexFor(location);
     final isWide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
-    final mode = ref.watch(modeProvider);
+
+    final isLiveAccount = location.startsWith('/portfolio');
 
     final appBar = AppBar(
       title: const Text(
@@ -95,9 +95,10 @@ class AppShell extends ConsumerWidget {
         style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.5),
       ),
       actions: [
-        ModeBadge(mode: mode),
+        AccountModeBadge(mode: isLiveAccount ? 'live' : 'paper'),
         const SizedBox(width: 12),
         const ConnectionBadge(),
+
         if (!isWide) ...[
           const SizedBox(width: 8),
           Builder(

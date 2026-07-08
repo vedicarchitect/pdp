@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/theme/app_colors.dart';
+import '../../../shared/format.dart';
 import '../application/journal_providers.dart';
 import '../domain/journal_models.dart';
 
@@ -147,10 +149,10 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 _StatText('Trades', '${s.totalTrades}'),
-                _StatText('Realized P&L', '\$${s.realizedPnl.toStringAsFixed(2)}',
-                    color: s.realizedPnl >= 0 ? Colors.green : Colors.red),
+                _StatText('Realized P&L', formatInr(s.realizedPnl),
+                    color: s.realizedPnl >= 0 ? AppColors.profit : AppColors.loss),
                 _StatText('Win Rate', '${(s.winRate * 100).toStringAsFixed(1)}%'),
-                _StatText('Charges', '\$${s.totalCharges.toStringAsFixed(2)}'),
+                _StatText('Charges', formatInr(s.totalCharges, showSign: false)),
               ],
             ),
           ],
@@ -243,6 +245,57 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
   }
 
   Widget _buildTradeList(BuildContext context) {
+    final byIndex = widget.day.byIndex;
+    if (byIndex.isNotEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Trade Log', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 16),
+              for (final entry in byIndex.entries) ...[
+                Text(entry.key, style: Theme.of(context).textTheme.titleMedium),
+                const Divider(),
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: entry.value.length,
+                  separatorBuilder: (c, i) => const Divider(height: 1),
+                  itemBuilder: (c, i) {
+                    final t = entry.value[i];
+                    final isPositive = (t.pnl ?? 0) >= 0;
+                    
+                    return ListTile(
+                      title: Text(t.symbol ?? t.securityId,
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(
+                        'Qty: ${t.qty}'
+                        '${t.entryPrice != null ? ' | Entry: ${formatInr(t.entryPrice!, showSign: false)}' : ''}'
+                        '${t.exitPrice != null ? ' | Exit: ${formatInr(t.exitPrice!, showSign: false)}' : ''}',
+                      ),
+                      trailing: t.open
+                          ? const Chip(label: Text('OPEN', style: TextStyle(fontSize: 10)))
+                          : Text(
+                              t.pnl != null ? formatInr(t.pnl!) : '',
+                              style: TextStyle(
+                                color: isPositive ? AppColors.profit : AppColors.loss,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Legacy raw-fills fallback
     final trades = widget.day.trades;
     return Card(
       child: Padding(
@@ -269,7 +322,7 @@ class _JournalBodyState extends ConsumerState<_JournalBody> {
                   return ListTile(
                     title: Text(t.securityId,
                         style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('Qty: ${t.qty} @ \$${t.fillPrice.toStringAsFixed(2)}'),
+                    subtitle: Text('Qty: ${t.qty} @ ${formatInr(t.fillPrice, showSign: false)}'),
                     trailing: Text(
                       t.side.toUpperCase(),
                       style: TextStyle(

@@ -60,3 +60,12 @@ final monitorRefreshProvider = FutureProvider.autoDispose<MonitorSnapshot>((ref)
   return source.fetchMonitor();
 });
 
+final stranglePnlProvider = FutureProvider.autoDispose<StranglePnl>((ref) {
+  final repo = ref.watch(manageRepositoryProvider);
+  return repo.getStranglePnl();
+});
+
+final strangleTradesProvider = FutureProvider.autoDispose.family<StrangleTrades, String>((ref, date) {
+  final repo = ref.watch(manageRepositoryProvider);
+  return repo.getStrangleTrades(date);
+});

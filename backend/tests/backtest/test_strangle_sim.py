@@ -42,7 +42,7 @@ def _bull_bias(spot: float = SPOT) -> BiasInputs:
         cam_daily=CamLevels(r3=spot - 50, r4=spot - 10, s3=spot - 400, s4=spot - 450),
         cam_weekly=CamLevels(r3=spot - 80, r4=spot - 20, s3=spot - 500, s4=spot - 550),
         pdh=spot - 100, pdl=spot - 600, pwh=spot - 120, pwl=spot - 650,
-        vwap=spot - 60, orb_high=spot - 40, orb_low=spot - 300, pcr=1.3,
+        orb_high=spot - 40, orb_low=spot - 300, pcr=1.3,
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0, vix_recent=[13.0, 12.5, 12.0],
     )
 
@@ -54,7 +54,7 @@ def _bear_bias(spot: float = SPOT) -> BiasInputs:
         cam_daily=CamLevels(r3=spot + 400, r4=spot + 450, s3=spot + 50, s4=spot + 10),
         cam_weekly=CamLevels(r3=spot + 500, r4=spot + 550, s3=spot + 80, s4=spot + 20),
         pdh=spot + 600, pdl=spot + 100, pwh=spot + 650, pwl=spot + 120,
-        vwap=spot + 60, orb_high=spot + 300, orb_low=spot + 40, pcr=0.7,
+        orb_high=spot + 300, orb_low=spot + 40, pcr=0.7,
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0, vix_recent=[13.0, 12.5, 12.0],
     )
 
@@ -126,8 +126,8 @@ def test_neutral_no_trade():
     chain = _flat_chain({"PE": _PE_PREMS, "CE": _CE_PREMS}, times)
 
     def neutral():
-        # VWAP bull(+1) and ORB bear(-1) cancel -> score 0 -> neutral bucket.
-        return BiasInputs(spot=SPOT, vwap=SPOT - 10, orb_high=SPOT + 10, orb_low=SPOT + 5)
+        # PCR bull(+1) and ORB bear(-1) cancel -> score 0 -> neutral bucket.
+        return BiasInputs(spot=SPOT, pcr=1.3, orb_high=SPOT + 10, orb_low=SPOT + 5)
 
     data = StrangleDayData(TD, TD, _bars(neutral, times), chain)
     res = simulate_strangle_day(StrangleConfig(), data)
@@ -387,10 +387,10 @@ def test_premium_method_picks_strike_above_floor():
 
     # Score in the most_bull band (0.5..0.75) -> 4PE:2CE, a NON-extreme bucket
     # that uses the premium method: ema_1h bull(+2) + ema_15m bull(+1.5) +
-    # vwap bear(-1) = 2.5 / 4.5 = 0.556.
+    # PCR bear(-1) = 2.5 / 4.5 = 0.556.
     def most_bull():
         return BiasInputs(
-            spot=SPOT, ema_1h=_bull_ema(), ema_15m=_bull_ema(), vwap=SPOT + 10,
+            spot=SPOT, ema_1h=_bull_ema(), ema_15m=_bull_ema(), pcr=0.7,
         )
 
     data = StrangleDayData(TD, TD, _bars(most_bull, times), chain)
@@ -419,10 +419,10 @@ def test_delta_method_picks_nearest_delta():
         import pytest
         pytest.skip("vollib not installed — delta method falls back to premium, skip delta test")
 
-    # most_bull bias: ema_1h bull + ema_15m bull + vwap slightly bearish → score ~0.55
+    # most_bull bias: ema_1h bull + ema_15m bull + PCR slightly bearish → score ~0.55
     # → most_bull bucket (4PE:2CE), non-extreme so delta method is used.
     def most_bull_bias():
-        return BiasInputs(spot=SPOT, ema_1h=_bull_ema(), ema_15m=_bull_ema(), vwap=SPOT + 10)
+        return BiasInputs(spot=SPOT, ema_1h=_bull_ema(), ema_15m=_bull_ema(), pcr=0.8)
 
     # Chain: strikes 50 pts apart, premiums mimic realistic near-ATM options.
     # Higher premium = closer to ATM = higher absolute delta.

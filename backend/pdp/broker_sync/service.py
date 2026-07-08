@@ -73,6 +73,28 @@ class BrokerSyncService:
         self._session_maker = session_maker
         self._col = snapshots_col
         self._client = client
+        self._adapter: Any | None = None
+
+    def set_market_adapter(self, adapter: Any) -> None:
+        self._adapter = adapter
+
+    async def subscribe_current_positions(self) -> None:
+        """Subscribe the market feed to every position currently in the PG mirror.
+
+        Shared by ``run_daily`` (post-sync, using the freshly-fetched rows) and app
+        startup (using whatever the last sync persisted), so the subscribe-loop logic
+        lives in exactly one place.
+        """
+        if self._adapter is None:
+            return
+        try:
+            async with self._session_maker() as session:
+                rows = (await session.scalars(select(BrokerPosition))).all()
+                for pos in rows:
+                    if pos.security_id and pos.exchange_segment:
+                        await self._adapter.subscribe(pos.security_id, pos.exchange_segment, session)
+        except Exception as exc:
+            log.warning("broker_sync_subscribe_failed", error=str(exc))
 
     @property
     def account_id(self) -> str:
@@ -152,6 +174,7 @@ class BrokerSyncService:
             log.warning("broker_sync_report_failed", report_type="ledger", error=str(exc))
 
         recon = await self._replace_state_and_reconcile(account_id, holdings, positions, funds)
+        await self.subscribe_current_positions()
 
         status = SyncStatus.OK if not errors else SyncStatus.PARTIAL
         run = await self._close_run(run_id, status, counts, recon, "; ".join(errors) or None)

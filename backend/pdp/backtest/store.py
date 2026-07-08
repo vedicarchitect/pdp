@@ -58,6 +58,18 @@ def verdict_breakdown(stitched_oos: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def single_run_verdict(metrics: dict[str, Any], computed_sharpe: float | None = None) -> str:
+    """Compute PASS/REVIEW for a single run using its headline metrics."""
+    pseudo_oos = {
+        "net": _safe_float(metrics.get("net")) or 0.0,
+        "profit_factor": _safe_float(metrics.get("profit_factor")) or 0.0,
+        "sharpe": computed_sharpe if computed_sharpe is not None else (_safe_float(metrics.get("sharpe")) or 0.0),
+        "folds": 1,
+        "positive_folds": 1,
+    }
+    return "PASS" if verdict_breakdown(pseudo_oos)["all_pass"] else "REVIEW"
+
+
 def _sharpe_from_rets(rets: list[float]) -> float | None:
     n = len(rets)
     if n < 2:
@@ -135,6 +147,7 @@ def build_run_doc(
     doc: dict[str, Any] = {
         "run_id": run_id,
         "kind": kind,
+        "underlying": (config.get("underlying") or "").upper(),
         "strategy_id": strategy_id,
         "canonical_strategy_id": canonical_strategy_id,
         "config": config,
@@ -153,7 +166,7 @@ def build_run_doc(
         "git_sha": manifest.get("git_sha"),
         "status": "complete",
         "promotion_state": "none",
-        "verdict": verdict,
+        "verdict": verdict if verdict is not None else single_run_verdict(raw_metrics, sharpe),
         "created_at": datetime.fromisoformat(manifest["generated"]).replace(tzinfo=UTC)
         if manifest.get("generated")
         else datetime.now(UTC),
@@ -418,12 +431,14 @@ def build_sweep_doc(
     return {
         "sweep_id": sweep_id,
         "kind": kind,
+        "underlying": ((base_config or {}).get("underlying") or "").upper(),
         "window": window,
         "grid": grid,
         "objective": objective,
         "base_config": base_config or {},
         "combos": ranked,
         "best_param": ranked[0]["params"] if ranked else None,
+        "verdict": single_run_verdict(ranked[0].get("metrics", {})) if ranked else None,
         "created_at": datetime.now(UTC),
     }
 
@@ -585,11 +600,12 @@ class BacktestStore:
             _ship_backtest("run", {
                 "run_id": f"{doc['sweep_id']}#rank{combo.get('rank')}",
                 "kind": "sweep_combo",
+                "underlying": ((base_config or {}).get("underlying") or "").upper(),
                 "strategy_id": "strangle",
                 "config": {**base_config, **combo.get("params", {})},
                 "window": doc.get("window", {}),
                 "metrics": combo.get("metrics", {}),
-                "verdict": None,
+                "verdict": single_run_verdict(combo.get("metrics", {})),
                 "promotion_state": "none",
                 "git_sha": None,
                 "created_at": doc.get("created_at"),
@@ -712,6 +728,7 @@ class BacktestStore:
         run_doc: dict[str, Any] = {
             "run_id": run_id,
             "kind": "walkforward",
+            "underlying": ((config or {}).get("underlying") or "").upper(),
             "strategy_id": re.split(r"_\d{8}", run_id)[0] if re.search(r"_\d{8}", run_id) else run_id,
             "config": config or {},
             "window": window,

@@ -85,6 +85,67 @@ async def test_compute_weekly(store: LevelsStore, mock_collection: AsyncMock) ->
 
 
 @pytest.mark.asyncio
+async def test_compute_monthly(store: LevelsStore, mock_collection: AsyncMock) -> None:
+    session_date = datetime.date(2026, 7, 1)
+    month_start = datetime.date(2026, 6, 1)
+    month_end = datetime.date(2026, 6, 30)
+
+    await store.compute_monthly(
+        security_id="51",
+        session_date=session_date,
+        month_h=25000.0,
+        month_l=23000.0,
+        month_c=24200.0,
+        month_start=month_start,
+        month_end=month_end,
+    )
+
+    mock_collection.update_one.assert_called_once()
+    args, _kwargs = mock_collection.update_one.call_args
+    assert args[0] == {
+        "security_id": "51",
+        "period": "monthly",
+        "session_date": "2026-07-01",
+    }
+    doc = args[1]["$set"]
+    assert doc["period"] == "monthly"
+    assert doc["source"]["h"] == 25000.0
+    assert doc["source"]["l"] == 23000.0
+    assert doc["source"]["window_start"] == "2026-06-01"
+    assert doc["source"]["window_end"] == "2026-06-30"
+    assert set(doc["camarilla"].keys()) == {"pp", "r3", "r4", "s3", "s4"}
+
+
+@pytest.mark.asyncio
+async def test_to_feature_rows_monthly_pmh_pml(mock_collection: AsyncMock) -> None:
+    """Monthly feature rows expose pmh/pml from source h/l."""
+    from pdp.indicators.levels_store import _pivot_state_to_doc
+
+    doc = _pivot_state_to_doc(
+        security_id="13", period="monthly",
+        session_date=datetime.date(2026, 7, 1),
+        source_h=25000.0, source_l=23000.0, source_c=24200.0,
+        window_start=datetime.date(2026, 6, 1), window_end=datetime.date(2026, 6, 30),
+    )
+
+    class _AsyncList:
+        def __init__(self, items): self._items = items
+        def __aiter__(self):
+            async def _gen():
+                for it in self._items:
+                    yield it
+            return _gen()
+
+    mock_collection.find = lambda *a, **kw: _AsyncList([doc])
+    store = LevelsStore(mock_collection)
+    rows = await store.to_feature_rows(
+        "13", "monthly", datetime.date(2026, 7, 1), datetime.date(2026, 7, 1),
+    )
+    assert rows[0]["pmh"] == 25000.0
+    assert rows[0]["pml"] == 23000.0
+
+
+@pytest.mark.asyncio
 async def test_weekly_keys_match_spec(store: LevelsStore, mock_collection: AsyncMock) -> None:
     """Weekly doc shape: standard/camarilla/fibonacci keys exactly per design spec."""
     await store.compute_weekly(

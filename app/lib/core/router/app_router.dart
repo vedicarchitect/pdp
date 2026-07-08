@@ -34,9 +34,10 @@ final GoRouter appRouter = GoRouter(
           builder: (context, state) => const BacktestConsoleScreen(),
           routes: [
             GoRoute(
-              path: ':id',
+              path: ':kind/:id',
               builder: (context, state) => BacktestDetailScreen(
                 runId: state.pathParameters['id']!,
+                kind: state.pathParameters['kind']!,
               ),
             ),
           ],

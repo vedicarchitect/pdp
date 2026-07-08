@@ -42,8 +42,22 @@ google_fonts (Inter).
 | `lib/features/backtest/` | Backtest console: run history/leaderboard, run-detail drill-downs, launch flow, coverage/gap-radar, promotion + paper comparison |
 | `lib/features/dashboard/` | Canonical home screen: indices w/ vs-prev-close change + sparkline, global markets, MCX commodities, India VIX, FII/DII, blended sentiment+news, next-expiry, portfolio snapshot, strategy chips, editable watchlist — single `GET /api/v1/dashboard` seed + existing `/ws/market`+`/ws/portfolio` sockets |
 
-## Not yet built
+## Planned screens (future OpenSpec changes)
 
-Order entry, option chain/analytics, events/alerts, ML/ops — each a future
-OpenSpec change cloning the portfolio pattern. `features/shell/
-placeholder_screen.dart` lists them.
+These follow the same `portfolio` vertical-slice pattern (domain/data/application/presentation):
+
+| Screen | Status | Change |
+|--------|--------|--------|
+| Order Entry | Planned | `flutter-orders` |
+| Options Analytics | Planned | `flutter-analytics` |
+| Events & Alerts | Planned | `flutter-events` |
+| Portfolio Advisory | Planned | `flutter-portfolio-advisory` |
+| Strategy Management | Planned | `flutter-management-hub` |
+
+See `features/shell/placeholder_screen.dart` for placeholders.
+
+## Current deliverables
+
+- ✅ **Chunk 6** (`flutter-dashboard`, archived 2026-07-05): Canonical home screen
+- ✅ **Chunk 8** (`flutter-backtest-console`, archived 2026-07-04): Backtest explorer
+- ✅ **Chunk 1** (`flutter-shell`, archived): App shell + portfolio live feed

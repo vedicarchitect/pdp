@@ -1,8 +1,7 @@
 """Smoke test for the multi-timeframe strangle loader.
 
 Builds a synthetic ``WindowData`` (no Mongo) with enough prior trading days to seed the 1h EMA(50),
-then asserts ``build_strangle_day`` assembles decision bars whose ``BiasInputs`` carry populated
-multi-timeframe EMAs, Camarilla levels, swing levels, VWAP and the opening range.
+multi-timeframe EMAs, Camarilla levels, swing levels, and the opening range.
 """
 from __future__ import annotations
 
@@ -69,7 +68,6 @@ def test_loader_assembles_multitimeframe_bias():
     assert b.pdh is not None and b.pdl is not None
     assert b.pwh is not None and b.pwl is not None
     assert b.orb_high is not None and b.orb_low is not None
-    assert b.vwap is not None
 
 
 def test_loader_returns_none_without_spot():

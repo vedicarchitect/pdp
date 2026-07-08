@@ -14,6 +14,7 @@ Read routes (tasks 2.2, 2.3, 2.4):
   GET  /runs/{id}/decisions          decision trace (events by default; ?full=true for per-minute)
   GET  /runs/{id}/promotion          promotion rationale/evidence
   GET  /runs/{id}/vs-paper           backtest-vs-paper alignment (per-day; ?date=&granularity=minute)
+  GET  /runs/{id}/vs-paper/convergence  cumulative divergence + top causes (backtest-paper-parity)
 
 Multi-run comparison (task 2.4):
   POST /compare                      aligned equity + headline metrics for N run ids
@@ -29,6 +30,7 @@ Promotion (task 5.2):
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import date as _date
 from typing import Any
 
@@ -50,6 +52,7 @@ from pdp.observability.client import get_opensearch
 from pdp.observability.query import fetch_session_events
 from pdp.settings import get_settings
 from pdp.warehouse.coverage import underlying_coverage
+from pdp.warehouse.service import UNDERLYING_REGISTRY
 
 log = structlog.get_logger()
 
@@ -93,6 +96,7 @@ async def list_runs(
     kind: str | None = Query(None, description="Filter by kind: single, sweep, walkforward"),
     strategy_id: str | None = Query(None),
     verdict: str | None = Query(None, description="Filter by verdict: PASS, REVIEW"),
+    underlying: str | None = Query(None, description="Filter by underlying index"),
     sort_by: str = Query("created_at", description="Sort metric: pf, net, max_dd, sharpe, created_at"),
     sort_dir: int = Query(-1, description="-1 descending, 1 ascending"),
     limit: int = Query(50, le=200),
@@ -106,18 +110,133 @@ async def list_runs(
         filt["strategy_id"] = strategy_id
     if verdict:
         filt["verdict"] = verdict.upper()
+    if underlying:
+        filt["underlying"] = underlying.upper()
 
-    sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
-    col = _col(request, "backtest_runs")
-    cursor = col.find(filt, {"_id": 0}).sort(sort_field, sort_dir).skip(offset).limit(limit)
-    docs = await cursor.to_list(length=limit)
-    total = await col.count_documents(filt)
+    limit_fetch = offset + limit
+
+    s_filt: dict[str, Any] = {}
+    if "underlying" in filt:
+        s_filt["underlying"] = filt["underlying"]
+    if "verdict" in filt:
+        s_filt["verdict"] = filt["verdict"]
+
+    runs_docs = []
+    if not kind or kind in ("single", "walkforward"):
+        col = _col(request, "backtest_runs")
+        sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+        runs_docs = await col.find(filt, {"_id": 0}).sort(sort_field, sort_dir).to_list(length=limit_fetch)
+
+    sweeps_docs = []
+    if not kind or kind == "sweep":
+        scol = _col(request, "backtest_sweeps")
+        # Map sort field for sweeps
+        sweep_sort_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+        if sweep_sort_field.startswith("metrics."):
+            sweep_sort_field = f"combos.0.{sweep_sort_field}"
+
+        sweep_results = await scol.find(s_filt, {"_id": 0}).sort(sweep_sort_field, sort_dir).to_list(length=limit_fetch)
+        # Adapt sweep doc to run doc shape for the table
+        for s in sweep_results:
+            best_combo = s.get("combos", [{}])[0]
+            sweeps_docs.append({
+                "run_id": s["sweep_id"],
+                "kind": "sweep",
+                "underlying": s.get("underlying"),
+                "strategy_id": "strangle",
+                "verdict": s.get("verdict"),
+                "promotion_state": "none",
+                "config": s.get("best_param") or {},
+                "metrics": best_combo.get("metrics") or {},
+                "created_at": s.get("created_at"),
+            })
+
+    # Merge, sort, and slice
+    all_docs = runs_docs + sweeps_docs
+
+    _metrics_field = _SORT_FIELD_MAP.get(sort_by, "created_at")
+    _metrics_key = (
+        _metrics_field.split(".", 1)[1] if _metrics_field.startswith("metrics.") else None
+    )
+
+    def get_sort_val(d):
+        if _metrics_key is None:
+            val = d.get("created_at")
+            # If string, that's fine for comparison if isoformat.
+            return val or ""
+        metrics = d.get("metrics") or {}
+        return metrics.get(_metrics_key) or 0.0
+
+    all_docs.sort(key=get_sort_val, reverse=(sort_dir == -1))
+
+    paginated = all_docs[offset:offset+limit]
+
+    total = 0
+    if not kind or kind in ("single", "walkforward"):
+        total += await _col(request, "backtest_runs").count_documents(filt)
+    if not kind or kind == "sweep":
+        total += await _col(request, "backtest_sweeps").count_documents(s_filt)
+
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "runs": [_doc_out(d) for d in docs],
+        "runs": [_doc_out(d) for d in paginated],
     }
+
+
+@router.get("/runs/leaderboard")
+async def get_leaderboard(request: Request) -> dict[str, Any]:
+    """Return the top backtest config per underlying across runs and sweeps."""
+    runs_col = _col(request, "backtest_runs")
+    sweeps_col = _col(request, "backtest_sweeps")
+    
+    underlyings = list(UNDERLYING_REGISTRY)
+    leaderboard = {}
+    
+    for u in underlyings:
+        run_cursor = runs_col.find({"underlying": u}).sort([("metrics.profit_factor", -1), ("metrics.net", -1)]).limit(1)
+        top_run = await run_cursor.to_list(length=1)
+        
+        sweep_cursor = sweeps_col.find({"underlying": u}).sort([("combos.0.metrics.profit_factor", -1), ("combos.0.metrics.net", -1)]).limit(1)
+        top_sweep = await sweep_cursor.to_list(length=1)
+        
+        candidates = []
+        if top_run:
+            r = top_run[0]
+            candidates.append({
+                "source": "run",
+                "id": r["run_id"],
+                "kind": r.get("kind"),
+                "config": r.get("config"),
+                "metrics": r.get("metrics"),
+                "verdict": r.get("verdict"),
+                "promotion_state": r.get("promotion_state"),
+                "pf": (r.get("metrics") or {}).get("profit_factor") or 0.0,
+            })
+        if top_sweep:
+            s = top_sweep[0]
+            best_combo = s.get("combos", [{}])[0]
+            from pdp.backtest.store import single_run_verdict
+            verdict = single_run_verdict(best_combo.get("metrics", {}))
+            candidates.append({
+                "source": "sweep",
+                "id": s["sweep_id"],
+                "kind": "sweep",
+                "config": s.get("best_param") or {},
+                "metrics": best_combo.get("metrics", {}),
+                "verdict": verdict,
+                "promotion_state": "none",
+                "pf": best_combo.get("metrics", {}).get("profit_factor") or 0.0,
+            })
+        
+        if candidates:
+            candidates.sort(key=lambda x: x["pf"], reverse=True)
+            best = candidates[0]
+            best.pop("pf")
+            leaderboard[u] = best
+            
+    return {"leaderboard": leaderboard}
 
 
 @router.get("/runs/{run_id}")
@@ -499,4 +618,68 @@ async def get_run_vs_paper(
         "granularity": "day",
         "paper_data_available": bool(paper_days),
         "days": aligned,
+    }
+
+
+@router.get("/runs/{run_id}/vs-paper/convergence")
+async def get_run_vs_paper_convergence(
+    request: Request,
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Cumulative backtest-vs-paper convergence for a run's index (daily convergence check).
+
+    Tracks whether paper is walking toward the run's proven trajectory as paper accumulates:
+    cumulative net on each side plus the most frequent divergence causes, computed from the
+    same per-day alignment rows as ``/vs-paper`` (no new store). A day only counts toward the
+    cumulative totals once both sides have traded it (see `align_days`).
+    """
+    run = await _col(request, "backtest_runs").find_one(
+        {"run_id": run_id}, {"_id": 0, "config": 1, "window": 1})
+    if run is None:
+        raise HTTPException(404, detail=f"Run not found: {run_id}")
+
+    live_strategy_id = resolve_live_strategy_id(run)
+    if live_strategy_id is None:
+        raise HTTPException(422, detail=f"Cannot resolve a live strategy_id for run: {run_id}")
+
+    window = run.get("window") or {}
+    if not window.get("from") or not window.get("to"):
+        raise HTTPException(422, detail=f"Run {run_id} has no window to compare against.")
+    win_from = _date.fromisoformat(str(window["from"])[:10])
+    win_to = _date.fromisoformat(str(window["to"])[:10])
+    underlying = str((run.get("config") or {}).get("underlying", "NIFTY"))
+
+    backtest_days = await _col(request, "backtest_days").find(
+        {"run_id": run_id}, {"_id": 0, "date": 1, "net": 1}).sort("date", 1).to_list(length=2000)
+
+    paper_by_strategy = await paper_pnl_by_strategy(db, win_from, win_to, live_strategy_id)
+    paper_days = paper_by_strategy.get(live_strategy_id, [])
+
+    aligned = align_days(backtest_days, paper_days)
+    radar = await _gap_radar(request, underlying, win_from, win_to)
+    aligned = annotate_day_divergence(aligned, radar)
+
+    backtest_cumulative_net = round(
+        sum(d["backtest_net"] for d in aligned if d["backtest_net"] is not None), 2)
+    paper_cumulative_net = round(
+        sum(d["paper_net"] for d in aligned if d["paper_net"] is not None), 2)
+    divergence = round(backtest_cumulative_net - paper_cumulative_net, 2)
+
+    cause_counts: Counter[str] = Counter(
+        d["cause"] for d in aligned if d.get("diverges") and d.get("cause")
+    )
+    top_causes = [{"cause": cause, "count": count} for cause, count in cause_counts.most_common(5)]
+
+    return {
+        "run_id": run_id,
+        "strategy_id": live_strategy_id,
+        "index": underlying,
+        "paper_data_available": bool(paper_days),
+        "aligned_days": len(aligned),
+        "diverging_days": sum(1 for d in aligned if d.get("diverges")),
+        "backtest_cumulative_net": backtest_cumulative_net,
+        "paper_cumulative_net": paper_cumulative_net,
+        "divergence": divergence,
+        "top_causes": top_causes,
     }

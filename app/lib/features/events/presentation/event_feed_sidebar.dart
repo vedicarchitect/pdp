@@ -84,12 +84,20 @@ class _EventTile extends StatelessWidget {
 
   final AppEvent event;
 
+  static String _headerLabel(AppEvent e) {
+    final name = e.underlying ?? e.securityId ?? 'SYSTEM';
+    return e.timeframe != null ? '$name · ${e.timeframe}' : name;
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Severities are normalised lowercase from the backend enum
+    // (INFO/WARNING/ERROR/CRITICAL) in AppEvent.fromJson.
     Color color;
     IconData icon;
     switch (event.severity) {
-      case 'alert':
+      case 'critical':
+      case 'error':
         color = AppColors.loss;
         icon = Icons.warning_rounded;
         break;
@@ -102,8 +110,11 @@ class _EventTile extends StatelessWidget {
         icon = Icons.bolt;
     }
 
-    final hr = event.timestamp.hour.toString().padLeft(2, '0');
-    final mn = event.timestamp.minute.toString().padLeft(2, '0');
+    // Backend emits `ts` as UTC (datetime.now(UTC)); render in IST (UTC+5:30) to
+    // match the user preference + backend `Event.ist_str`. Device-independent.
+    final ist = event.timestamp.toUtc().add(const Duration(hours: 5, minutes: 30));
+    final hr = ist.hour.toString().padLeft(2, '0');
+    final mn = ist.minute.toString().padLeft(2, '0');
     final timeStr = '$hr:$mn';
 
     return Padding(
@@ -121,7 +132,7 @@ class _EventTile extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      event.securityId ?? 'SYSTEM',
+                      _headerLabel(event),
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,

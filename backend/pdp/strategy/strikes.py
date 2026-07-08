@@ -52,10 +52,15 @@ def otm_strike(spot: float, option_type: str, otm_steps: int, strike_step: int) 
     return atm + otm_steps * strike_step
 
 
-async def nearest_weekly_expiry(
+async def nearest_expiry(
     session: AsyncSession, underlying: str, on_or_after: date | None = None
 ) -> date | None:
-    """Smallest option expiry for ``underlying`` on or after a date (IST today by default)."""
+    """Smallest option expiry for ``underlying`` on or after a date (IST today by default).
+
+    Cadence-agnostic: it returns the real next tradeable expiry from the instruments table
+    (the Dhan scrip master) regardless of weekly/monthly/weekday regime — never a projected
+    weekday. Returns ``None`` when the table has no matching expiry (caller degrades honestly).
+    """
     floor = on_or_after or _ist_today()
     result = await session.execute(
         select(func.min(Instrument.expiry)).where(
@@ -65,6 +70,11 @@ async def nearest_weekly_expiry(
         )
     )
     return result.scalar_one_or_none()
+
+
+# Back-compat alias — the query has always been cadence-agnostic; the old name wrongly
+# implied "weekly". Prefer ``nearest_expiry`` in new code.
+nearest_weekly_expiry = nearest_expiry
 
 
 async def resolve_otm_option(
@@ -77,14 +87,14 @@ async def resolve_otm_option(
     strike_step: int | None = None,
     expiry: date | None = None,
 ) -> Instrument | None:
-    """Return the OTM option ``Instrument`` for the nearest weekly expiry, or None.
+    """Return the OTM option ``Instrument`` for the nearest expiry, or None.
 
     Returns ``None`` when the instruments table has no matching row (e.g. not loaded for
     today's expiry) — callers should skip trading rather than guess a security_id.
     """
     step = strike_step or STRIKE_STEP.get(underlying.upper(), 50)
     if expiry is None:
-        expiry = await nearest_weekly_expiry(session, underlying)
+        expiry = await nearest_expiry(session, underlying)
     if expiry is None:
         log.warning("no_expiry_found", underlying=underlying)
         return None

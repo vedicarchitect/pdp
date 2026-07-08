@@ -66,12 +66,40 @@ class TestLevels:
         assert conf and conf[0].payload["count"] >= 2
 
 
+    def test_warehouse_levels_override_snapshot(self, cfg):
+        from pdp.events.detectors.levels import collect_levels
+
+        # Snapshot has a stale CAM_R4 / PDH; warehouse (matrix source) has the correct ones.
+        snap = make_snapshot(
+            period_levels=SimpleNamespace(pdh=99999, pdl=1, pwh=None, pwl=None, pmh=None, pml=None),
+            pivots=SimpleNamespace(pp=0, r1=0, r2=0, r3=0, s1=0, s2=0, s3=0,
+                                   cam_r3=0, cam_r4=88888, cam_s3=0, cam_s4=0),
+            vwap=None, fib_levels=None, fvg=None, ema=None,
+        )
+        wh = [("PDH", 24300.0), ("CAM_R4", 24450.0)]
+        levels = dict(collect_levels(make_ctx(cfg, snapshot=snap, warehouse_levels=wh)))
+        # Warehouse wins for the overlapping labels; stale snapshot values are dropped.
+        assert levels["PDH"] == 24300.0
+        assert levels["CAM_R4"] == 24450.0
+        assert 99999 not in levels.values() and 88888 not in levels.values()
+
+
 class TestRangeVolume:
     def test_custom_range_break(self, cfg):
         det = RangeVolumeDetectors()
         det.evaluate(make_ctx(cfg, c=24000, snapshot=make_snapshot()))
         evs = det.evaluate(make_ctx(cfg, c=24600, snapshot=make_snapshot()))
         assert any(e.event_type == EventType.CUSTOM_RANGE_BREAK for e in evs)
+
+    def test_level_break_uses_warehouse_camarilla(self, cfg):
+        det = RangeVolumeDetectors()
+        wh = [("CAM_R4", 24450.0)]
+        # First bar below CAM_R4, second breaks above → one LEVEL_BREAK.
+        det.evaluate(make_ctx(cfg, c=24400, snapshot=make_snapshot(), warehouse_levels=wh))
+        evs = det.evaluate(make_ctx(cfg, c=24460, snapshot=make_snapshot(), warehouse_levels=wh))
+        breaks = [e for e in evs if e.event_type == EventType.LEVEL_BREAK
+                  and e.payload.get("level") == "CAM_R4"]
+        assert len(breaks) == 1
 
     def test_gap_open(self, cfg):
         det = RangeVolumeDetectors()

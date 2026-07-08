@@ -53,7 +53,7 @@ def replay_day(config: dict[str, Any], underlying: str, target_date: str) -> dic
         days.sort()
 
     window = load_window(
-        mdb, cal, days, security_id=cfg.security_id, underlying=underlying, expiry_weekday=3,
+        mdb, cal, days, security_id=cfg.security_id, underlying=underlying,
     )
     if td not in window.valid_days:
         return {"found": False, "status_log": [], "decisions": []}

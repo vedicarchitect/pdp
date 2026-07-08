@@ -26,6 +26,11 @@ class JournalRepository {
 
   Future<JournalStats> getStrategyStats(String strategyId, String date) async {
     final response = await _api.getJson('/api/v1/journal/strategy/$strategyId?date=$date');
-    return JournalStats.fromJson(response['stats'] as Map<String, dynamic>);
+    // Non-strangle strategies return {stats: {...}}; strangle strategies (routed
+    // through the trade ledger) return {totals: {...}} instead — no 'stats' key.
+    final statsJson = response['stats'] as Map<String, dynamic>? ??
+        response['totals'] as Map<String, dynamic>? ??
+        {};
+    return JournalStats.fromJson(statsJson);
   }
 }

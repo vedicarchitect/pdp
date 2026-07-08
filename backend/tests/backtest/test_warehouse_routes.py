@@ -58,6 +58,10 @@ def _make_mongo_db(
     col_decisions = MagicMock()
     col_decisions.find.return_value = _cursor(decisions or [])
 
+    col_sweeps = MagicMock()
+    col_sweeps.find.return_value = _cursor([])
+    col_sweeps.count_documents = AsyncMock(return_value=0)
+
     _cols = {
         "backtest_runs": col_runs,
         "backtest_days": col_days,
@@ -65,10 +69,11 @@ def _make_mongo_db(
         "backtest_trades": col_trades,
         "backtest_promotions": col_promotions,
         "backtest_decisions": col_decisions,
+        "backtest_sweeps": col_sweeps,
     }
 
     db = MagicMock()
-    db.__getitem__ = lambda self_inner, name: _cols.get(name, MagicMock())
+    db.__getitem__.side_effect = lambda name: _cols.get(name, MagicMock())
     # Expose for test overrides
     db._cols = _cols
     return db
@@ -328,6 +333,16 @@ def test_promote_non_pass_rejected(client):
     assert resp.status_code == 422
 
 
+def test_promote_single_kind_rejected(client):
+    # A single (non-walk-forward) run with a PASS verdict must still be rejected —
+    # only walk-forward, out-of-sample-validated runs are promotable.
+    single_pass_run = {**_RUN, "verdict": "PASS", "kind": "single"}
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=single_pass_run)
+    resp = client.post("/api/v1/strangle-backtests/runs/strangle_test1/promote")
+    assert resp.status_code == 422
+    assert "walkforward" in resp.json()["detail"]
+
+
 def test_promote_pass_accepted(client, tmp_path, monkeypatch):
     pass_run = {**_RUN, "verdict": "PASS", "kind": "walkforward"}
     client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=pass_run)
@@ -474,7 +489,10 @@ def test_vs_paper_run_not_found(client, _no_gap_radar):
 
 
 def test_vs_paper_unresolvable_strategy_id(client, _no_gap_radar):
-    run = {**_RUN, "config": {}}
+    # "strangle" family + no underlying deliberately defaults to NIFTY (canonical_id's
+    # documented interim heuristic) — use a family with no live registry entry at all to
+    # exercise the genuinely-unresolvable path.
+    run = {**_RUN, "strategy_id": "no_such_family", "config": {}}
     client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=run)
     client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
     try:
@@ -525,3 +543,76 @@ def test_vs_paper_minute_diff_flags_mismatch(client, _no_gap_radar, monkeypatch)
     assert data["granularity"] == "minute"
     assert len(data["minutes"]) == 1
     assert data["minutes"][0]["mismatch"] is True
+
+
+# ── vs-paper/convergence (backtest-paper-parity task 6) ────────────────────────
+
+
+def test_vs_paper_convergence_cumulative_sums(client, _no_gap_radar):
+    days = [_DAY, {**_DAY, "date": "2026-01-03", "net": 1000.0}]
+    client.app.state.mongo_db._cols["backtest_days"].find.return_value = _cursor(days)
+
+    rows = [
+        ("directional_strangle_nifty", "1001", "SELL", 50, Decimal("100"), Decimal("5"),
+         datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1001", "BUY", 50, Decimal("60"), Decimal("5"),
+         datetime(2026, 1, 2, 6, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1002", "SELL", 50, Decimal("50"), Decimal("5"),
+         datetime(2026, 1, 3, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1002", "BUY", 50, Decimal("50"), Decimal("5"),
+         datetime(2026, 1, 3, 6, 0, tzinfo=UTC)),
+    ]
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session(rows)
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["index"] == "NIFTY"
+    assert data["aligned_days"] == 2
+    assert data["backtest_cumulative_net"] == pytest.approx(3000.0)
+    assert data["paper_cumulative_net"] == pytest.approx(1980.0)
+    assert data["divergence"] == pytest.approx(
+        data["backtest_cumulative_net"] - data["paper_cumulative_net"]
+    )
+
+
+def test_vs_paper_convergence_top_causes(client, monkeypatch):
+    monkeypatch.setattr(
+        "pdp.backtest.warehouse_routes.underlying_coverage",
+        AsyncMock(return_value={"radar": {"2026-01-02": {"spot": "spot/VWAP missing"}}}),
+    )
+    rows = [
+        ("directional_strangle_nifty", "1001", "SELL", 50, Decimal("100"), Decimal("5"),
+         datetime(2026, 1, 2, 5, 0, tzinfo=UTC)),
+        ("directional_strangle_nifty", "1001", "BUY", 50, Decimal("60"), Decimal("5"),
+         datetime(2026, 1, 2, 6, 0, tzinfo=UTC)),
+    ]
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session(rows)
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/strangle_test1/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["diverging_days"] == 1
+    assert data["top_causes"] == [{"cause": "spot/VWAP missing", "count": 1}]
+
+
+def test_vs_paper_convergence_run_not_found(client, _no_gap_radar):
+    client.app.state.mongo_db._cols["backtest_runs"].find_one = AsyncMock(return_value=None)
+    client.app.dependency_overrides[get_db] = lambda: _fake_pg_session([])
+    try:
+        resp = client.get(
+            "/api/v1/strangle-backtests/runs/nope/vs-paper/convergence"
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_db, None)
+    assert resp.status_code == 404

@@ -95,14 +95,6 @@ async def test_levels_family_gap_days_from_index_levels():
     assert summary["covered_days"] == 1
 
 
-def test_futures_family_always_reports_unavailable():
-    days = [date(2026, 1, 5), date(2026, 1, 6)]
-    summary, gaps = cov._futures_family(days)
-    assert summary["status"] == "unavailable"
-    assert gaps == set(days)
-    assert summary["covered_days"] == 0
-
-
 async def test_underlying_coverage_rejects_unsupported_underlying():
     mongo_db = _FakeMongoDb()
     settings = object()
@@ -126,7 +118,7 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
     monkeypatch.setattr(cov, "holidays", lambda _path: set())
     monkeypatch.setattr(cov, "trading_days", lambda _from, _to, _hol: [day])
 
-    async def _fake_options_family(settings, underlying, days):
+    async def _fake_options_family(settings, underlying, days, sync_client):
         return cov._empty_family(len(days)), set()
 
     monkeypatch.setattr(cov, "_options_family", _fake_options_family)
@@ -138,12 +130,13 @@ async def test_underlying_coverage_builds_radar_from_family_gaps(monkeypatch):
             docs=[{"ts": _ist_ts(day)}],
         ),
         index_levels=_FakeCollection(docs=[]),
+        option_bars=_FakeCollection(agg_rows=[]),
     )
 
     result = await cov.underlying_coverage(
-        mongo_db, _FakeSettings(), "NIFTY", window_from=day, window_to=day
+        mongo_db, _FakeSettings(), "NIFTY", window_from=day, window_to=day,
+        sync_client=object(),  # keeps the test offline — no real MongoClient() construction
     )
 
     assert result["radar"]["2026-01-06"]["spot"] == "ready"
     assert result["radar"]["2026-01-06"]["levels_weekly"] == "ready"
-    assert result["radar"]["2026-01-06"]["futures"] == "futures missing"

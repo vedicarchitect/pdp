@@ -268,6 +268,16 @@ async def lifespan(app: FastAPI):
                 for _tf in _w.timeframes:
                     indicator_engine.configure_suite(_w.security_id, _tf, _w.indicators)
 
+    # Execution-tab indicator matrix: configure the 3 spot indices (EMA/PSAR/RSI) and
+    # their front-month futures (VWAP/VWMA) across matrix timeframes, and add those SIDs
+    # to the warmup set so the matrix is populated (incl. 1D) at startup.
+    try:
+        from pdp.indicators.warmup import configure_matrix_suites
+        _matrix_entries = await configure_matrix_suites(indicator_engine, get_session_maker())
+        _watchlist_dicts.extend(_matrix_entries)
+    except Exception as exc:
+        log.warning("matrix_suites_configure_failed", exc=str(exc))
+
     if _watchlist_dicts:
         try:
             await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
@@ -348,6 +358,11 @@ async def lifespan(app: FastAPI):
         strategy_host.set_market_adapter(adapter)
         async with get_session_maker()() as session:
             await adapter.start(session)
+            # India VIX (IDX_I): subscribe the configured VIX sid so the TickRouter populates
+            # ltp:<VIX_SECURITY_ID> — otherwise the dashboard VIX section and the bias vix_gate
+            # read an empty cache and report "Unavailable". Idempotent (persisted subscription).
+            if settings.VIX_SECURITY_ID:
+                await adapter.subscribe(settings.VIX_SECURITY_ID, "IDX_I", session)
             # MCX commodities (dashboard-market-feeds capability): subscribe configured sids
             # once — persisted subscriptions auto-restore on every future restart, so this is
             # idempotent. Missing sids are skipped (that commodity stays available:false).
@@ -358,6 +373,7 @@ async def lifespan(app: FastAPI):
                 ):
                     if _sid:
                         await adapter.subscribe(_sid, "MCX_COMM", session)
+
         tick_router = TickRouter(
             bar_aggregator=bar_aggregator,
             bar_writer=bar_writer,
@@ -517,6 +533,12 @@ async def lifespan(app: FastAPI):
             snapshots_col=mongo_db["broker_snapshots"],
             client=BrokerAccountClient(settings),
         )
+        if getattr(app.state, "dhan_adapter", None) is not None:
+            broker_sync_service.set_market_adapter(app.state.dhan_adapter)
+            # Manual live account positions from the last sync (so the UI shows live
+            # MTM immediately on restart, without waiting for the next EOD sync).
+            await broker_sync_service.subscribe_current_positions()
+
         app.state.broker_sync_service = broker_sync_service
         broker_sync_scheduler = BrokerSyncScheduler(
             broker_sync_service, eod_time=settings.BROKER_SYNC_EOD_TIME

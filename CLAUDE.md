@@ -40,47 +40,79 @@ Each dev activity loads **only** the files it needs:
 - **Working a roadmap chunk** → open `openspec/changes/<id>/README.md` for that chunk's
   minimal context set, then its `proposal.md`.
 
-## Program roadmap (chunks = OpenSpec changes)
+## Quick Start
 
-Foundation **1** `repo-restructure-and-claude-arch` (✓ done). Then:
-**2** `broker-account-sync` (✓ done) · **3** `broker-reports-vault` · **4** `strangle-execution-console` (42/43 — owner paper-run pending) ·
-**5** `trade-analysis-feedback-loop` (✓ done — unified OpenSearch log pipeline, archived 2026-06-28) ·
-**6** `flutter-dashboard` (✓ done, archived 2026-07-05 — canonical home screen: indices w/ vs-prev-close
-change math + sparkline, global markets via yfinance, MCX commodities via Dhan feed, India VIX,
-FII/DII via nsepython, blended sentiment (news+internals) via feedparser/vaderSentiment, portfolio
-snapshot, strategy chips, editable watchlist w/ live-quote resolution; single composed
-`GET /api/v1/dashboard` + existing WS sockets; new `dashboard-market-feeds` capability) · **7** `flutter-screener` ·
-**8** `flutter-backtest-console` (✓ done, archived 2026-07-04 — see Backtest console program below) · **9** `flutter-risk-positions` · **10** `flutter-journal` ·
-**11** `flutter-portfolio-advisory` · **12** `flutter-market-intel` · **13** `flutter-event-feed` ·
-**14** `flutter-management-hub` · **15** `multi-broker-kite` · **16** `cloud-deploy-aws`.
-In-flight strangle work: `live-directional-strangle-paper`. `backtest-multi-index-strangle` ✓ done — BANKNIFTY +₹35.1L PF 4.89, SENSEX +₹24.7L PF 6.21 (3yr), archived 2026-06-29.
-
-### Backtest console program (5 changes, backend-first) — ✓ all done
-
-Made the backtest console enterprise-grade + DB-first (no local result files). Order:
-**1** `backtest-results-warehouse` (✓ done, archived 2026-07-04 — real sweeps+leaderboard, strategy-agnostic
-decision-trace, promotion evidence snapshot, DB-first cutover, legacy runs ingested) · **2** `market-data-coverage`
-(✓ done, archived 2026-07-04 — per-index/family coverage API, gap radar, delta-fill jobs, multi-index self-heal, OpenSearch dashboard) ·
-**3** `backtest-paper-comparison` (✓ done, archived 2026-07-04 — per-strategy paper P&L from the PG ledger,
-`GET /runs/{id}/vs-paper` day+minute alignment, gap-radar divergence root-causing, ST-only `compare.py` retired) ·
-**4** `strategy-registry-unification` (✓ done, archived 2026-07-04 — canonical-id registry spanning live
-`strategies/*.yaml` + backtest `backtest/configs/*.yaml`, `GET /api/v1/strategies` with editable param
-schema, `POST /register`, `canonical_id()` wired into run identity + vs-paper; `/strategy:add` skill) ·
-**5** `flutter-backtest-console` (✓ done, archived 2026-07-04 — Flutter console rebuilt to house
-convention: run history/leaderboard, run-detail drill-downs incl. decision trace + walk-forward folds,
-schema-driven launch flow, coverage/gap-radar panel, promotion rationale, backtest-vs-paper view,
-CSV/JSON export, OpenSearch dashboard links; `flutter analyze && flutter test` green). See
-`openspec/changes/archive/2026-07-04-<id>/` for each.
-
-## Key Commands (run from repo root)
+**All available tasks** are in [`Taskfile.yml`](Taskfile.yml) at the repo root. Common workflows:
 
 ```bash
-task dev          # uvicorn :8000 --reload   (runs in backend/)
-task db:up / db:migrate / db:down / db:tools  # compose in infra/compose/
-task test / lint / fmt / typecheck            # ruff/pytest/pyright in backend/
-task backtest:strangle -- --days 90           # directional-strangle backtest
-task backfill:nifty -- --from YYYY-MM-DD [--only-missing]   # + :banknifty / :sensex / :options
-task app:run / app:live / app:test            # Flutter (Windows desktop)
-task search:up / search:init                  # OpenSearch + Dashboards (:9200 / :5601)
-task openspec:list / openspec:validate -- <id> / openspec:archive -- <id>
+task dev              # Start backend (uvicorn :8000 --reload)
+task test             # Run all tests + lint + typecheck
+task backtest:strangle -- --days 5   # Quick 5-day strangle backtest
+task app:run          # Flutter desktop app (Windows)
+task search:up        # OpenSearch :9200 + Dashboards :5601
 ```
+
+For a complete list: `task -l` or `grep "^  [a-z]" Taskfile.yml`. Run any task from repo root; Taskfile routing handles directory context.
+
+## Workflow: Spec-First Development
+
+Every feature starts in OpenSpec, then lands in code:
+
+```
+1. Propose
+   openspec new change my-feature-id
+   → Edit: proposal.md (why + scope), spec.md (design), tasks.md (checklist)
+   openspec validate --strict my-feature-id
+
+2. Implement
+   → Backend: pdp/ modules + tests (pytest green, pyright strict)
+   → App: Flutter components (analyze + test green)
+   → Integration: backtest vs paper (if strategy-related)
+
+3. Verify
+   → For strategies: backtest_multiday.py vs paper_journal (±5% P&L)
+   → For UI: manual test in app, screenshot evidence
+   openspec verify my-feature-id
+
+4. Archive
+   openspec archive my-feature-id
+   → Syncs delta specs → openspec/specs/
+   → Moves proposal → openspec/changes/archive/YYYY-MM-DD-{id}/
+   git commit + git push
+```
+
+## Program Roadmap & Status
+
+**Foundation (Chunks 1–5):** ✅ Complete  
+**Current (Chunk 6+):** Live trading + Flutter UI + enterprise ops
+
+Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
+
+**Recent milestones:**
+- 2026-07-08: Backtest console readability + nav (UX improvements) archived
+- 2026-07-04: Flutter backtest console (chunk 8) archived
+- 2026-07-05: Flutter dashboard (chunk 6) archived
+- 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived
+- **In-flight:** Execution console accuracy (indicator parity), live-backtest-parity (3 deploy-day checks remain)
+
+## Troubleshooting
+
+| Issue | Diagnosis | Fix |
+|-------|-----------|-----|
+| **EMA200 = `--` on app** | Warmup insufficient | See `execution-console-accuracy` memory; increase `_TF_WARMUP_CALENDAR_DAYS` to 180+ days |
+| **Backtest faster than paper** | Backtest ignores slippage, rejections, margin | See `live-backtest-parity` memory; add broker friction to paper |
+| **RSI/PSAR don't match Kite** | Indicator computation diverges | Verify RSI uses Wilder's EMA; run bar-by-bar comparison for 5 days |
+| **Tests fail on Windows** | asyncio teardown race (pre-existing) | Use WSL2 or `pytest -k "not integration"` |
+| **LIVE=1 but still paper** | Broker env var not set | Check `BROKER=dhan` + credentials in `backend/.env` |
+
+## OpenSpec Proposal Governance
+
+For infrastructure changes, multi-service refactors, and proposals requiring cross-team validation, follow the 5-phase governance structure (schemas, logic, tests, deployment). See [`openspec/GOVERNANCE.md`](openspec/GOVERNANCE.md) for the full checklist.
+
+## See Also
+
+- **Architecture** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- **Operational guide** → [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- **Memory & context** → [`~/.claude/projects/.../memory/MEMORY.md`]() (project history, decisions, knowledge base)
+- **Specifications** → [`openspec/specs/`](openspec/specs/) (all archived capabilities)
+- **In-flight work** → [`openspec/changes/`](openspec/changes/) (active proposals)

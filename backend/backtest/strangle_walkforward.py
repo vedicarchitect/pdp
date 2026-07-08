@@ -55,7 +55,7 @@ from pdp.backtest.store import (  # noqa: E402
 from pdp.backtest.strangle_config import StrangleConfig, nifty_lot_size  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_sim import StrangleDayData, simulate_strangle_day  # noqa: E402
-from pdp.instruments.expiry_calendar import NiftyExpiryCalendar  # noqa: E402
+from pdp.instruments.expiry_calendar import NiftyExpiryCalendar, within_dte  # noqa: E402
 from pdp.settings import get_settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -140,13 +140,13 @@ def objective(m: Metrics, kind: str) -> float:
 _WEIGHT_PROFILES: dict[str, dict[str, float]] = {
     "trend": {"w_ema_1h": 2.5, "w_ema_15m": 2.0, "w_ema_5m": 1.5,
               "w_cam_daily": 1.0, "w_cam_weekly": 1.0, "w_swing": 1.0,
-              "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.0},
+              "w_orb": 1.0, "w_pcr": 1.0},
     "balanced": {"w_ema_1h": 2.0, "w_ema_15m": 1.5, "w_ema_5m": 1.0,
                  "w_cam_daily": 1.5, "w_cam_weekly": 1.5, "w_swing": 1.0,
-                 "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.0},
+                 "w_orb": 1.0, "w_pcr": 1.0},
     "levels": {"w_ema_1h": 1.0, "w_ema_15m": 1.0, "w_ema_5m": 0.5,
                "w_cam_daily": 2.0, "w_cam_weekly": 2.0, "w_swing": 1.5,
-               "w_vwap": 1.0, "w_orb": 1.0, "w_pcr": 1.5},
+               "w_orb": 1.0, "w_pcr": 1.5},
 }
 
 # Aggressiveness — how strong a lean must be to size up (bucket thresholds).
@@ -266,10 +266,8 @@ def run_fold(
     is_data: list[StrangleDayData] = []
     oos_data: list[StrangleDayData] = []
     for d in window.valid_days:
-        if base.dte_max is not None:
-            expiry = window.expiry_by_day.get(d)
-            if expiry is not None and (expiry - d).days > base.dte_max:
-                continue
+        if not within_dte(d, window.expiry_by_day.get(d), base.dte_max):
+            continue
         data = build_strangle_day(window, base, d, vix_by_day, pcr_by_day)
         if data is None:
             continue

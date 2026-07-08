@@ -17,16 +17,20 @@ const _sortOptions = {
   'max_dd': 'Max DD',
 };
 
+// Must match the backend's UNDERLYING_REGISTRY (pdp/warehouse/service.py) — an
+// index added here with no backend/warehouse support renders a permanently
+// empty tab and leaderboard card.
 const _underlyings = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 
-/// The backend filters runs by kind/strategy_id/verdict only — there is no
-/// underlying filter, so the index selector is applied client-side against
-/// the run's config/canonical id.
+/// The index selector is applied client-side against the run's top-level
+/// `underlying` field (falling back to `config.underlying` for older docs
+/// predating the backfill). Do NOT substring-match against
+/// `canonicalStrategyId` — "BANKNIFTY" contains "NIFTY", so that fallback
+/// used to put BANKNIFTY runs under the NIFTY tab too.
 bool _matchesUnderlying(BacktestRun run, String underlying) {
-  final configUnderlying = (run.config['underlying'] as String?)?.toUpperCase();
-  if (configUnderlying == underlying) return true;
-  final canonical = run.canonicalStrategyId?.toUpperCase() ?? '';
-  return canonical.contains(underlying);
+  final runUnderlying =
+      (run.underlying ?? run.config['underlying'] as String?)?.toUpperCase();
+  return runUnderlying == underlying;
 }
 
 /// The run-history table: filter by kind/verdict, sort by metric, verdict +
@@ -81,18 +85,6 @@ class RunsTableTab extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.update((f) => f.copyWith(verdict: () => v)),
                     ),
-                    DropdownButton<String?>(
-                      value: filter.underlying,
-                      hint: const Text('All indices'),
-                      items: [
-                        const DropdownMenuItem(
-                            value: null, child: Text('All indices')),
-                        ..._underlyings.map(
-                            (u) => DropdownMenuItem(value: u, child: Text(u))),
-                      ],
-                      onChanged: (v) => notifier
-                          .update((f) => f.copyWith(underlying: () => v)),
-                    ),
                     DropdownButton<String>(
                       value: filter.sortBy,
                       items: _sortOptions.entries
@@ -121,13 +113,59 @@ class RunsTableTab extends ConsumerWidget {
           ),
         ),
         Expanded(
+          child: DefaultTabController(
+            length: _underlyings.length,
+            child: Column(
+              children: [
+                TabBar(
+                  isScrollable: true,
+                  tabs: _underlyings.map((u) => Tab(text: u)).toList(),
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: _underlyings.map((u) {
+                      return _UnderlyingTabContent(
+                        underlying: u,
+                        runsAsync: runsAsync,
+                        filter: filter,
+                        dateFormat: dateFormat,
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _UnderlyingTabContent extends ConsumerWidget {
+  const _UnderlyingTabContent({
+    required this.underlying,
+    required this.runsAsync,
+    required this.filter,
+    required this.dateFormat,
+  });
+
+  final String underlying;
+  final AsyncValue<RunsPage> runsAsync;
+  final RunsFilter filter;
+  final DateFormat dateFormat;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Column(
+      children: [
+        _LeaderboardCard(underlying: underlying),
+        Expanded(
           child: runsAsync.when(
             data: (page) {
-              final runs = filter.underlying == null
-                  ? page.runs
-                  : page.runs
-                      .where((r) => _matchesUnderlying(r, filter.underlying!))
-                      .toList(growable: false);
+              final runs = page.runs
+                  .where((r) => _matchesUnderlying(r, underlying))
+                  .toList(growable: false);
               if (runs.isEmpty) {
                 return const Center(child: Text('No backtest runs found.'));
               }
@@ -151,7 +189,7 @@ class RunsTableTab extends ConsumerWidget {
                     rows: runs.map((run) {
                       return DataRow(
                         onSelectChanged: (_) =>
-                            context.go('/backtests/${run.runId}'),
+                            context.go('/backtests/${run.kind}/${run.runId}'),
                         cells: [
                           DataCell(Text(run.runId.length > 22
                               ? '${run.runId.substring(0, 22)}…'
@@ -190,6 +228,67 @@ class RunsTableTab extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _LeaderboardCard extends ConsumerWidget {
+  const _LeaderboardCard({required this.underlying});
+
+  final String underlying;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final lbAsync = ref.watch(backtestLeaderboardProvider);
+
+    return lbAsync.when(
+      data: (lbMap) {
+        final entry = lbMap[underlying];
+        if (entry == null) return const SizedBox.shrink();
+
+        final statusText = entry.promotionState == 'promoted'
+            ? 'is currently trading live'
+            : (entry.verdict == 'PASS' ? 'is ready to trade' : 'needs review');
+
+        return Card(
+          margin: const EdgeInsets.all(12),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                const Icon(Icons.emoji_events, color: Colors.amber, size: 32),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        const TextSpan(text: 'The best performer is '),
+                        TextSpan(
+                          text: entry.id.length > 15 ? '${entry.id.substring(0, 15)}…' : entry.id,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const TextSpan(text: ' yielding '),
+                        TextSpan(
+                          text: '₹${entry.net.toStringAsFixed(0)}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.profit),
+                        ),
+                        TextSpan(text: ' over ${entry.days} days. '),
+                        TextSpan(text: 'This config $statusText.'),
+                      ],
+                    ),
+                  ),
+                ),
+                VerdictChip(entry.verdict),
+                const SizedBox(width: 8),
+                if (entry.promotionState == 'promoted')
+                  const StatusChip('PROMOTED', color: AppColors.profit),
+              ],
+            ),
+          ),
+        );
+      },
+      loading: () => const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())),
+      error: (err, _) => const SizedBox.shrink(),
     );
   }
 }

@@ -79,8 +79,13 @@ final backtestRunsProvider = FutureProvider.autoDispose<RunsPage>((ref) {
     verdict: filter.verdict,
     sortBy: filter.sortBy,
     sortDir: filter.sortDir,
+    underlying: filter.underlying,
     limit: 200,
   );
+});
+
+final backtestLeaderboardProvider = FutureProvider.autoDispose<Map<String, LeaderboardEntry>>((ref) {
+  return ref.watch(backtestSourceProvider).getLeaderboard();
 });
 
 final backtestRunDetailProvider =

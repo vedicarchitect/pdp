@@ -106,6 +106,11 @@ async def _ensure_option_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore
          ("ts", ASCENDING)],
         name="idx_strike_optype_ts",
     )
+    # Read path: coverage check / gaps (by underlying + timeframe across time)
+    await col.create_index(
+        [("underlying", ASCENDING), ("timeframe", ASCENDING), ("ts", ASCENDING)],
+        name="idx_underlying_tf_ts",
+    )
 
 
 async def _ensure_option_chains(

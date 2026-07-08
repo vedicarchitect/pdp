@@ -65,12 +65,10 @@ def test_radar_for_date_reports_ready_and_missing_labels():
         options={day},
         vix=set(),
         levels_weekly=set(),
-        futures={day},
     )
     status = radar_for_date(gaps, day)
     assert status["spot"] == "ready"
     assert status["options"] == FAMILY_LABELS["options"]
-    assert status["futures"] == FAMILY_LABELS["futures"]
     assert set(status) == set(RADAR_FAMILIES)
 
 
@@ -84,7 +82,6 @@ def test_radar_for_date_all_families_ready_when_no_gaps():
         options={other_day},
         vix={other_day},
         levels_weekly={other_day},
-        futures={other_day},
     )
     status = radar_for_date(gaps, day)
     assert set(status) == set(RADAR_FAMILIES)
@@ -93,8 +90,8 @@ def test_radar_for_date_all_families_ready_when_no_gaps():
 
 def test_radar_window_keys_by_iso_date():
     days = [date(2026, 1, 6), date(2026, 1, 7)]
-    gaps = FamilyGaps(spot=set(), options=set(), vix=set(), levels_weekly=set(), futures=set(days))
+    gaps = FamilyGaps(spot=set(), options=set(), vix=set(), levels_weekly=set(days))
     window = radar_window(gaps, days)
     assert set(window) == {"2026-01-06", "2026-01-07"}
-    assert window["2026-01-06"]["futures"] == FAMILY_LABELS["futures"]
+    assert window["2026-01-06"]["levels_weekly"] == FAMILY_LABELS["levels_weekly"]
     assert window["2026-01-06"]["spot"] == "ready"

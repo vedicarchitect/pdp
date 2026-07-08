@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../shared/widgets/pnl_text.dart';
 import '../application/backtest_providers.dart';
 import '../domain/models.dart';
+import '../domain/sweep.dart';
 import 'widgets/day_table.dart';
 import 'widgets/decision_trace_panel.dart';
 import 'widgets/equity_drawdown_chart.dart';
@@ -15,12 +16,33 @@ import 'widgets/status_chips.dart';
 import 'widgets/vs_paper_view.dart';
 
 class BacktestDetailScreen extends ConsumerWidget {
-  const BacktestDetailScreen({super.key, required this.runId});
+  const BacktestDetailScreen({super.key, required this.runId, required this.kind});
 
   final String runId;
+  final String kind;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (kind == 'sweep') {
+      final sweepAsync = ref.watch(backtestSweepProvider(runId));
+      return Scaffold(
+        appBar: AppBar(
+          title: Text('Sweep $runId', overflow: TextOverflow.ellipsis),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: () => ref.invalidate(backtestSweepProvider(runId)),
+            ),
+          ],
+        ),
+        body: sweepAsync.when(
+          data: (sweep) => _SweepDetailBody(sweep: sweep),
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (err, _) => Center(child: Text('Error: $err', style: const TextStyle(color: AppColors.loss))),
+        ),
+      );
+    }
+
     final detailAsync = ref.watch(backtestRunDetailProvider(runId));
 
     return Scaffold(
@@ -90,6 +112,59 @@ class _DetailBody extends ConsumerWidget {
         children: [
           TabBar(tabs: tabs, isScrollable: true),
           Expanded(child: TabBarView(children: views)),
+        ],
+      ),
+    );
+  }
+}
+
+class _SweepDetailBody extends StatelessWidget {
+  const _SweepDetailBody({required this.sweep});
+
+  final SweepDoc sweep;
+
+  @override
+  Widget build(BuildContext context) {
+    if (sweep.combos.isEmpty) {
+      return const Center(child: Text('This sweep has no combinations.'));
+    }
+    final paramKeys = sweep.combos.first.params.keys.toList(growable: false);
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Objective: ${sweep.objective}', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 16),
+          Expanded(
+            child: SingleChildScrollView(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
+                  columns: [
+                    const DataColumn(label: Text('Rank')),
+                    ...paramKeys.map((k) => DataColumn(label: Text(k))),
+                    const DataColumn(label: Text('PF'), numeric: true),
+                    const DataColumn(label: Text('Net'), numeric: true),
+                  ],
+                  rows: sweep.combos.map((combo) {
+                    final isBest = combo.rank == 1;
+                    return DataRow(
+                      color: isBest
+                          ? WidgetStatePropertyAll(AppColors.profit.withValues(alpha: 0.08))
+                          : null,
+                      cells: [
+                        DataCell(Text('${combo.rank}${isBest ? ' ★' : ''}')),
+                        ...paramKeys.map((k) => DataCell(Text('${combo.params[k]}'))),
+                        DataCell(Text(combo.metrics['profit_factor']?.toStringAsFixed(2) ?? '-')),
+                        DataCell(Text(combo.metrics['net']?.toStringAsFixed(0) ?? '-')),
+                      ],
+                    );
+                  }).toList(growable: false),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

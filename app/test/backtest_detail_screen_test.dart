@@ -14,7 +14,7 @@ void main() {
   }
 
   testWidgets('single run shows Overview/Days/Decisions/Paper tabs, no Folds', (tester) async {
-    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260701-093000')));
+    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260701-093000', kind: 'single')));
     await tester.pumpAndSettle();
 
     expect(find.text('Overview'), findsOneWidget);
@@ -27,7 +27,7 @@ void main() {
   });
 
   testWidgets('walkforward run shows a Folds tab with stitched-OOS verdict', (tester) async {
-    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260702-101500')));
+    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260702-101500', kind: 'walkforward')));
     await tester.pumpAndSettle();
 
     expect(find.text('Folds'), findsOneWidget);
@@ -40,7 +40,7 @@ void main() {
   });
 
   testWidgets('promote button opens rationale dialog for a PASS un-promoted run', (tester) async {
-    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260702-101500')));
+    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260702-101500', kind: 'walkforward')));
     await tester.pumpAndSettle();
 
     expect(find.text('Promote'), findsOneWidget);
@@ -52,7 +52,7 @@ void main() {
   });
 
   testWidgets('days tab expands to show trade fills', (tester) async {
-    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260701-093000')));
+    await tester.pumpWidget(wrap(const BacktestDetailScreen(runId: 'strangle_20260701-093000', kind: 'single')));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Days'));
