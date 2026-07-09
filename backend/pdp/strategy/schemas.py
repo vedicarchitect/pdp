@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pydantic import BaseModel, ConfigDict
 
 import msgspec
 
@@ -74,3 +75,60 @@ def strategy_info_from_dict(d: dict[str, Any]) -> StrategyInfo:
         dropped_ticks=d.get("dropped_ticks", 0),
         watchlist=watchlist,
     )
+
+
+class StrategyListOut(BaseModel):
+    strategies: list[dict[str, Any]]
+
+class StrategyRegisterOut(BaseModel):
+    id: str
+    kind: str
+    underlying: str
+    source: str
+    params_schema: list[dict[str, Any]]
+    defaults: dict[str, Any]
+
+class StrategyActionOut(BaseModel):
+    id: str
+    status: str
+    dropped_ticks: int | None = None
+    watchlist: list[dict[str, Any]] | None = None
+
+class StrangleStatusOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+class StrangleLegsOut(BaseModel):
+    legs: list[dict[str, Any]]
+
+class StrangleActivityOut(BaseModel):
+    events: list[dict[str, Any]]
+    total: int
+
+class StrangleStatsOut(BaseModel):
+    day_realized: float
+    day_unrealized: float
+    day_pnl: float
+    trade_count: int
+    open_pe_lots: int
+    open_ce_lots: int
+    open_hedge_lots: int
+
+class StranglePnlOut(BaseModel):
+    by_index: list[dict[str, Any]]
+    totals: dict[str, Any]
+
+class StrangleTradesOut(BaseModel):
+    date: str
+    by_index: dict[str, Any]
+    totals: dict[str, Any]
+
+class StrangleMonitorOut(BaseModel):
+    indices: dict[str, dict[str, Any]]
+    groups: list[dict[str, Any]]
+    totals: dict[str, float]
+    status: dict[str, Any]
+    recent_events: list[dict[str, Any]]
+    indicators: dict[str, Any]
+
+class LevelsResponseOut(BaseModel):
+    model_config = ConfigDict(extra="allow")

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,9 +8,7 @@ from pdp.alerts.models import AlertRecord
 from pdp.alerts.schemas import AlertCreate, AlertUpdate
 
 
-async def create_alert(
-    db: AsyncSession, user_id: str, alert_data: AlertCreate
-) -> AlertRecord:
+async def create_alert(db: AsyncSession, user_id: str, alert_data: AlertCreate) -> AlertRecord:
     channels = [c.value for c in alert_data.channels]
     alert = AlertRecord(
         user_id=user_id,
@@ -29,17 +25,15 @@ async def create_alert(
 
 
 async def get_alert(db: AsyncSession, user_id: str, alert_id: int) -> AlertRecord | None:
-    stmt = select(AlertRecord).where(
-        AlertRecord.id == alert_id, AlertRecord.user_id == user_id
-    )
+    stmt = select(AlertRecord).where(AlertRecord.id == alert_id, AlertRecord.user_id == user_id)
     result = await db.execute(stmt)
     return result.scalars().first()
 
 
 async def list_alerts(
-    db: AsyncSession, user_id: str, status: AlertStatus | None = None
+    db: AsyncSession, user_id: str, status: AlertStatus | None = None, limit: int = 100, offset: int = 0
 ) -> list[AlertRecord]:
-    stmt = select(AlertRecord).where(AlertRecord.user_id == user_id)
+    stmt = select(AlertRecord).where(AlertRecord.user_id == user_id).limit(limit).offset(offset)
     if status:
         stmt = stmt.where(AlertRecord.status == status.value)
     result = await db.execute(stmt)
@@ -76,15 +70,13 @@ async def delete_alert(db: AsyncSession, user_id: str, alert_id: int) -> bool:
 async def get_alerts_by_security(db: AsyncSession, security_id: str) -> list[AlertRecord]:
     stmt = select(AlertRecord).where(
         AlertRecord.security_id == security_id,
-        AlertRecord.status.in_([AlertStatus.ARMED.value, AlertStatus.TRIGGERED.value])
+        AlertRecord.status.in_([AlertStatus.ARMED.value, AlertStatus.TRIGGERED.value]),
     )
     result = await db.execute(stmt)
     return result.scalars().all()
 
 
-async def update_alert_status(
-    db: AsyncSession, alert_id: int, status: AlertStatus
-) -> AlertRecord | None:
+async def update_alert_status(db: AsyncSession, alert_id: int, status: AlertStatus) -> AlertRecord | None:
     stmt = select(AlertRecord).where(AlertRecord.id == alert_id)
     result = await db.execute(stmt)
     alert = result.scalars().first()

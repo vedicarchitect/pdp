@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from datetime import date as date_type
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from pdp.deps import parse_ist_date, require_auth
+from pdp.journal.schemas import JournalDayOut, StatusOut, JournalStrategyStatsOut
 
 router = APIRouter(prefix="/api/v1/journal", tags=["journal"])
 
-_IST = ZoneInfo("Asia/Kolkata")
+
+class JournalMetadata(BaseModel):
+    """Validated request body for journal metadata edits."""
+
+    notes: str = ""
+    tags: list[str] = Field(default_factory=list)
+    screenshots: list[str] = Field(default_factory=list)
 
 
 def _service(request: Request):
@@ -22,14 +27,11 @@ def _running_strangle_ids(request: Request) -> list[str]:
     host = getattr(request.app.state, "strategy_host", None)
     if host is None:
         return []
-    return [
-        sid for sid, state in host._running.items()
-        if isinstance(state.instance, DirectionalStrangle)
-    ]
+    return [sid for sid, state in host._running.items() if isinstance(state.instance, DirectionalStrangle)]
 
 
-@router.get("")
-async def get_journal(request: Request, date: str | None = None) -> JSONResponse:
+@router.get("", response_model=JournalDayOut)
+async def get_journal(request: Request, date: str | None = None) -> JournalDayOut:
     """Journal day view.
 
     For days with strangle activity, `by_index`/`stats.realized_pnl` are derived
@@ -37,7 +39,8 @@ async def get_journal(request: Request, date: str | None = None) -> JSONResponse
     P&L for a day+strategy MUST match across both surfaces. Non-strangle fills
     still populate the legacy `trades` list.
     """
-    day_data = _service(request).get_day(date)
+    query_date = parse_ist_date(date)
+    day_data = _service(request).get_day(query_date.isoformat())
 
     strangle_ids = _running_strangle_ids(request)
     if strangle_ids:
@@ -48,7 +51,6 @@ async def get_journal(request: Request, date: str | None = None) -> JSONResponse
             read_day_events,
         )
 
-        query_date = date_type.fromisoformat(date) if date else datetime.now(_IST).date()
         all_rows = []
         for sid in strangle_ids:
             all_rows.extend(pair_trades(read_day_events(sid, query_date)))
@@ -63,24 +65,29 @@ async def get_journal(request: Request, date: str | None = None) -> JSONResponse
                 "round_trips": totals["n_round_trips"],
             }
 
-    return JSONResponse(content=day_data)
-
-@router.put("/{date}/metadata")
-async def update_metadata(request: Request, date: str) -> JSONResponse:
-    body = await request.json()
-    notes = body.get("notes", "")
-    tags = body.get("tags", [])
-    screenshots = body.get("screenshots", [])
-    await _service(request).update_metadata(date, notes, tags, screenshots)
-    return JSONResponse(content={"status": "ok"})
+    return JournalDayOut(**day_data)
 
 
-@router.get("/stats")
-async def get_journal_stats(request: Request, date: str | None = None) -> JSONResponse:
-    return JSONResponse(content=_service(request).get_stats(date))
+@router.put(
+    "/{date}/metadata",
+    response_model=StatusOut,
+    status_code=200,
+    dependencies=[Depends(require_auth)],
+    summary="Update journal metadata",
+    description="Update the notes, tags, and screenshots for a given day.",
+)
+async def update_metadata(request: Request, date: str, body: JournalMetadata) -> StatusOut:
+    await _service(request).update_metadata(date, body.notes, body.tags, body.screenshots)
+    return StatusOut(status="ok")
 
-@router.get("/strategy/{strategy_id}")
-async def get_strategy_stats(request: Request, strategy_id: str, date: str | None = None) -> JSONResponse:
+
+@router.get("/stats", response_model=list[dict])
+async def get_journal_stats(request: Request, date: str | None = None) -> list[dict]:
+    return _service(request).get_stats(parse_ist_date(date).isoformat())
+
+
+@router.get("/strategy/{strategy_id}", response_model=JournalStrategyStatsOut)
+async def get_strategy_stats(request: Request, strategy_id: str, date: str | None = None) -> JournalStrategyStatsOut:
     """Per-strategy daily stats.
 
     For strangle strategies, derives realized P&L from the enriched entry→exit
@@ -95,26 +102,27 @@ async def get_strategy_stats(request: Request, strategy_id: str, date: str | Non
             read_day_events,
         )
 
-        query_date = date_type.fromisoformat(date) if date else datetime.now(_IST).date()
+        query_date = parse_ist_date(date)
         events = read_day_events(strategy_id, query_date)
         rows = pair_trades(events)
         by_index = group_by_index(rows)
         totals = compute_totals(rows)
-        return JSONResponse(content={
-            "date": query_date.isoformat(),
-            "strategy_id": strategy_id,
-            "by_index": by_index,
-            "totals": totals,
-            "trades": rows,
-        })
+        return JournalStrategyStatsOut(
+            date=query_date.isoformat(),
+            strategy_id=strategy_id,
+            by_index=by_index,
+            totals=totals,
+            trades=rows,
+        )
 
     # Non-strangle: fall back to traditional fill-based stats
-    day_data = _service(request).get_day(date)
+    day_data = _service(request).get_day(parse_ist_date(date).isoformat())
     trades = [t for t in day_data.get("trades", []) if t.get("strategy_id") == strategy_id]
 
     from pdp.journal.stats import compute_daily_stats
-    return JSONResponse(content={
-        "date": day_data.get("date"),
-        "strategy_id": strategy_id,
-        "stats": compute_daily_stats(trades),
-    })
+
+    return JournalStrategyStatsOut(
+        date=day_data.get("date"),
+        strategy_id=strategy_id,
+        stats=compute_daily_stats(trades),
+    )

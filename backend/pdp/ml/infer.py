@@ -9,6 +9,7 @@ Usage:
     loader.load()                            # called once at startup
     state = loader.infer(bar, snapshot, st)  # called per closed bar; None if not ready
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,9 +28,10 @@ log = structlog.get_logger()
 @dataclass(slots=True)
 class MLSignalState:
     """Read-only output of the ML inference layer for one (sid, tf) bar close."""
-    probs: dict[str, float]   # label -> probability (sum ≈ 1.0)
-    argmax: str               # label with highest probability
-    version: str              # artifact version string
+
+    probs: dict[str, float]  # label -> probability (sum ≈ 1.0)
+    argmax: str  # label with highest probability
+    version: str  # artifact version string
 
 
 class ModelLoader:
@@ -64,13 +66,19 @@ class ModelLoader:
             import lightgbm as lgb
 
             from pdp.ml.registry import ArtifactMeta, artifact_model_path
+
             meta = ArtifactMeta.load(self._model_dir, self._version)
             model = lgb.Booster(model_file=str(artifact_model_path(self._model_dir, self._version)))
             self._meta = meta
             self._model = model
             self._ready = True
-            log.info("ml_model_loaded", version=self._version, head=self._head,
-                     features=len(meta.feature_schema), labels=meta.label_schema)
+            log.info(
+                "ml_model_loaded",
+                version=self._version,
+                head=self._head,
+                features=len(meta.feature_schema),
+                labels=meta.label_schema,
+            )
         except Exception as exc:
             log.warning("ml_model_load_failed", version=self._version, exc=str(exc))
             self._ready = False
@@ -137,9 +145,7 @@ def register_loader(
     _LOADERS[(security_id, timeframe, head)] = loader
 
 
-def get_loader(
-    security_id: str, timeframe: str, head: str = "directional"
-) -> ModelLoader | None:
+def get_loader(security_id: str, timeframe: str, head: str = "directional") -> ModelLoader | None:
     return _LOADERS.get((security_id, timeframe, head))
 
 

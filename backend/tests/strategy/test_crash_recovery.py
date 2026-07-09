@@ -1,4 +1,5 @@
 """Unit tests for recover_strategy_state() in src/pdp/strategy/recovery.py."""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -76,7 +77,7 @@ def _make_ctx(
         inst_res.scalar_one_or_none.return_value = inst
         execute_returns: list = [cross_day_res]
         if fill_dt is not None:
-            from datetime import timezone
+
             fill_date = fill_dt.astimezone(_IST).date()
             if fill_date == _TODAY:
                 execute_returns.append(inst_res)

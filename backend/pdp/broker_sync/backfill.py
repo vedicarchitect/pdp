@@ -38,15 +38,24 @@ def _extract_date(row: dict[str, Any], fallback: str) -> str:
 
 async def _backfill_one(
     col: AsyncIOMotorCollection,  # type: ignore[type-arg]
-    *, account_id: str, report_type: str, rows: list[dict[str, Any]], from_date: str, source: str,
+    *,
+    account_id: str,
+    report_type: str,
+    rows: list[dict[str, Any]],
+    from_date: str,
+    source: str,
 ) -> int:
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         buckets[_extract_date(r, from_date)].append(r)
     for date_str, day_rows in buckets.items():
         await upsert_snapshot(
-            col, account_id=account_id, snapshot_date=date_str,
-            report_type=report_type, rows=day_rows, source=source,
+            col,
+            account_id=account_id,
+            snapshot_date=date_str,
+            report_type=report_type,
+            rows=day_rows,
+            source=source,
         )
     return len(rows)
 
@@ -54,7 +63,9 @@ async def _backfill_one(
 async def backfill_history(
     client: BrokerAccountClient,
     col: AsyncIOMotorCollection,  # type: ignore[type-arg]
-    *, from_date: str, to_date: str,
+    *,
+    from_date: str,
+    to_date: str,
 ) -> dict[str, Any]:
     """Backfill trade history + ledger for [from_date, to_date]. Returns per-report counts."""
     if not client.has_credentials:
@@ -67,8 +78,12 @@ async def backfill_history(
     try:
         trades = await client.fetch_trade_history(from_date, to_date)
         result["trades"] = await _backfill_one(
-            col, account_id=account_id, report_type="trades", rows=trades,
-            from_date=from_date, source="dhan.fetch_trade_history",
+            col,
+            account_id=account_id,
+            report_type="trades",
+            rows=trades,
+            from_date=from_date,
+            source="dhan.fetch_trade_history",
         )
     except Exception as exc:
         result["trades_error"] = str(exc)
@@ -77,8 +92,12 @@ async def backfill_history(
     try:
         ledger = await client.fetch_ledger(from_date, to_date)
         result["ledger"] = await _backfill_one(
-            col, account_id=account_id, report_type="ledger", rows=ledger,
-            from_date=from_date, source="dhan.fetch_ledger",
+            col,
+            account_id=account_id,
+            report_type="ledger",
+            rows=ledger,
+            from_date=from_date,
+            source="dhan.fetch_ledger",
         )
     except Exception as exc:
         result["ledger_error"] = str(exc)

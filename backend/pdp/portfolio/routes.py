@@ -1,4 +1,5 @@
 """Portfolio REST endpoints."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -13,8 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.broker_sync.models import BrokerFund, BrokerHolding
 from pdp.db.session import get_db
+from pdp.deps import require_auth, PaginationParams  # noqa: F401
 from pdp.orders.models import Position
 from pdp.portfolio.sector_map import sector_for
+from pdp.portfolio.schemas import PositionOut, SummaryOut, AdvisoryOut, HoldingsOut, HistoryOut
+from pdp.schemas import Page
 
 log = structlog.get_logger()
 
@@ -62,20 +66,22 @@ def _pos_dict(p: Position) -> dict:
     }
 
 
-@router.get("/positions")
+@router.get("/positions", response_model=Page[PositionOut])
 async def get_positions(
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> JSONResponse:
-    result = await db.execute(select(Position))
+    pagination: PaginationParams = Depends(),
+) -> Page[PositionOut]:
+    stmt = select(Position).offset(pagination.offset).limit(pagination.limit)
+    result = await db.execute(stmt)
     positions = result.scalars().all()
     dicts = [_pos_dict(p) for p in positions]
-    return JSONResponse({"positions": dicts, "count": len(dicts)})
+    return Page(items=[PositionOut(**d) for d in dicts], limit=pagination.limit, offset=pagination.offset)
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=SummaryOut)
 async def get_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> JSONResponse:
+) -> SummaryOut:
     from pdp.settings import get_settings
 
     result = await db.execute(select(Position))
@@ -88,27 +94,25 @@ async def get_summary(
     settings = get_settings()
     mode = "live" if settings.LIVE else "paper"
 
-    return JSONResponse(
-        {
-            "total_unrealized_pnl": float(total_unrealized),
-            "total_realized_pnl": float(total_realized),
-            "day_pnl": float(total_unrealized + total_realized),
-            "open_positions": open_count,
-            "mode": mode,
-        }
+    return SummaryOut(
+        total_unrealized_pnl=float(total_unrealized),
+        total_realized_pnl=float(total_realized),
+        day_pnl=float(total_unrealized + total_realized),
+        open_positions=open_count,
+        mode=mode,
     )
 
 
-@router.get("/advisory")
+@router.get("/advisory", response_model=AdvisoryOut)
 async def get_advisory(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> JSONResponse:
+) -> AdvisoryOut:
     holdings = (await db.execute(select(BrokerHolding))).scalars().all()
     if not holdings:
         # No broker sync has run yet (see pdp/broker_sync) — fall back to demo data
         # so the screen still renders something meaningful.
-        return JSONResponse(content=_MOCK_ADVISORY)
+        return AdvisoryOut(**_MOCK_ADVISORY)
 
     funds = (await db.execute(select(BrokerFund))).scalars().all()
 
@@ -174,13 +178,11 @@ async def get_advisory(
     mongo_db = getattr(request.app.state, "mongo_db", None)
     if mongo_db is not None:
         try:
-            await mongo_db["advisory_snapshots"].insert_one(
-                {"snapshot_ts": datetime.now(UTC), **data}
-            )
+            await mongo_db["advisory_snapshots"].insert_one({"snapshot_ts": datetime.now(UTC), **data})
         except Exception as exc:
             log.warning("advisory_snapshot_write_failed", exc=str(exc))
 
-    return JSONResponse(content=data)
+    return AdvisoryOut(**data)
 
 
 _MOCK_HOLDINGS = {
@@ -195,34 +197,52 @@ _MOCK_HOLDINGS = {
     },
     "holdings": [
         {
-            "symbol": "TCS", "exchange": "NSE", "sector": "Technology",
-            "qty": 20, "avg_price": 3200.0, "last_price": 3800.0,
-            "invested_value": 64000.0, "current_value": 76000.0,
-            "pnl": 12000.0, "pnl_pct": 18.75,
+            "symbol": "TCS",
+            "exchange": "NSE",
+            "sector": "Technology",
+            "qty": 20,
+            "avg_price": 3200.0,
+            "last_price": 3800.0,
+            "invested_value": 64000.0,
+            "current_value": 76000.0,
+            "pnl": 12000.0,
+            "pnl_pct": 18.75,
         },
         {
-            "symbol": "HDFCBANK", "exchange": "NSE", "sector": "Financials",
-            "qty": 10, "avg_price": 1400.0, "last_price": 1650.0,
-            "invested_value": 14000.0, "current_value": 16500.0,
-            "pnl": 2500.0, "pnl_pct": 17.86,
+            "symbol": "HDFCBANK",
+            "exchange": "NSE",
+            "sector": "Financials",
+            "qty": 10,
+            "avg_price": 1400.0,
+            "last_price": 1650.0,
+            "invested_value": 14000.0,
+            "current_value": 16500.0,
+            "pnl": 2500.0,
+            "pnl_pct": 17.86,
         },
         {
-            "symbol": "SUNPHARMA", "exchange": "NSE", "sector": "Healthcare",
-            "qty": 5, "avg_price": 800.0, "last_price": 1100.0,
-            "invested_value": 4000.0, "current_value": 5500.0,
-            "pnl": 1500.0, "pnl_pct": 37.5,
+            "symbol": "SUNPHARMA",
+            "exchange": "NSE",
+            "sector": "Healthcare",
+            "qty": 5,
+            "avg_price": 800.0,
+            "last_price": 1100.0,
+            "invested_value": 4000.0,
+            "current_value": 5500.0,
+            "pnl": 1500.0,
+            "pnl_pct": 37.5,
         },
     ],
 }
 
 
-@router.get("/holdings")
+@router.get("/holdings", response_model=HoldingsOut)
 async def get_holdings(
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> JSONResponse:
+) -> HoldingsOut:
     holdings = (await db.execute(select(BrokerHolding))).scalars().all()
     if not holdings:
-        return JSONResponse(content=_MOCK_HOLDINGS)
+        return HoldingsOut(**_MOCK_HOLDINGS)
 
     funds = (await db.execute(select(BrokerFund))).scalars().all()
     cash_available = float(sum((f.available_balance for f in funds), Decimal("0")))
@@ -257,32 +277,28 @@ async def get_holdings(
     total_pnl = total_current - total_invested
     total_pnl_pct = (total_pnl / total_invested * 100) if total_invested else 0.0
 
-    return JSONResponse(
-        content={
-            "is_mock": False,
-            "summary": {
-                "total_invested": round(total_invested, 2),
-                "total_current_value": round(total_current, 2),
-                "total_pnl": round(total_pnl, 2),
-                "total_pnl_pct": round(total_pnl_pct, 2),
-                "holdings_count": len(rows),
-                "cash_available": round(cash_available, 2),
-            },
-            "holdings": rows,
-        }
+    return HoldingsOut(
+        is_mock=False,
+        summary={
+            "total_invested": round(total_invested, 2),
+            "total_current_value": round(total_current, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl_pct, 2),
+            "holdings_count": len(rows),
+            "cash_available": round(cash_available, 2),
+        },
+        holdings=rows,
     )
 
 
-@router.get("/history")
-async def get_history(request: Request) -> JSONResponse:
+@router.get("/history", response_model=HistoryOut)
+async def get_history(request: Request) -> HistoryOut:
     mongo_db = getattr(request.app.state, "mongo_db", None)
     history: list[dict[str, Any]] = []
 
     if mongo_db is not None:
         try:
-            cursor = mongo_db["paper_journal"].find({}, {"date": 1, "stats.realized_pnl": 1}).sort(
-                "date", 1
-            )
+            cursor = mongo_db["paper_journal"].find({}, {"date": 1, "stats.realized_pnl": 1}).sort("date", 1)
             docs = await cursor.to_list(length=None)
         except Exception as exc:
             log.warning("advisory_history_read_failed", exc=str(exc))
@@ -301,4 +317,4 @@ async def get_history(request: Request) -> JSONResponse:
                 }
             )
 
-    return JSONResponse(content={"history": history, "is_mock": not history})
+    return HistoryOut(history=history, is_mock=not history)

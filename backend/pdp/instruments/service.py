@@ -50,9 +50,7 @@ async def search(
     return list(result.scalars().all())
 
 
-async def get_by_id(
-    session: AsyncSession, security_id: str, segment: str
-) -> Instrument | None:
+async def get_by_id(session: AsyncSession, security_id: str, segment: str) -> Instrument | None:
     stmt = select(Instrument).where(
         Instrument.security_id == security_id,
         Instrument.exchange_segment == segment,

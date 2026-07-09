@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from pdp.deps import require_auth
 from pdp.jobs.runner import JobRunner
+from pdp.housekeeping.schemas import HousekeepingOut
 
 router = APIRouter()
 
@@ -19,8 +21,8 @@ _VALID_TASKS = {
 }
 
 
-@router.post("/{task_name}")
-async def run_housekeeping_task(task_name: str, params: dict[str, Any], request: Request):
+@router.post("/{task_name}", response_model=HousekeepingOut, dependencies=[Depends(require_auth)])
+async def run_housekeeping_task(task_name: str, params: dict[str, Any], request: Request) -> HousekeepingOut:
     if task_name not in _VALID_TASKS:
         raise HTTPException(status_code=404, detail=f"Task '{task_name}' not found")
 
@@ -32,4 +34,4 @@ async def run_housekeeping_task(task_name: str, params: dict[str, Any], request:
 
     runner: JobRunner = request.app.state.job_runner
     job = await runner.submit(f"housekeeping:{task_name}", params)
-    return {"job_id": str(job.id), "status": job.status}
+    return HousekeepingOut(job_id=str(job.id), status=job.status)

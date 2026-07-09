@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+import asyncio
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pdp.alerts import service
 from pdp.alerts.enums import AlertCondition, AlertStatus
 from pdp.alerts.models import AlertRecord
-from pdp.alerts import service
 
 log = structlog.get_logger()
 
 
 class AlertNotification:
-    __slots__ = ("alert_id", "security_id", "condition", "threshold", "timestamp", "status")
+    __slots__ = ("alert_id", "condition", "security_id", "status", "threshold", "timestamp")
 
     def __init__(
         self,
@@ -52,9 +54,7 @@ class AlertEvaluator:
         self._notification_callbacks: list[Callable[[AlertNotification], None]] = []
         self._last_fired: dict[int, bool] = {}  # alert_id -> was_triggered
 
-    def register_notification_callback(
-        self, callback: Callable[[AlertNotification], None]
-    ) -> None:
+    def register_notification_callback(self, callback: Callable[[AlertNotification], None]) -> None:
         self._notification_callbacks.append(callback)
 
     async def load_alerts(self) -> None:
@@ -85,9 +85,7 @@ class AlertEvaluator:
             self._alerts_by_security[security_id].append(row)
         log.info("alerts_loaded", total=sum(len(v) for v in self._alerts_by_security.values()))
 
-    def evaluate_price(
-        self, security_id: str, price: Decimal
-    ) -> None:
+    def evaluate_price(self, security_id: str, price: Decimal) -> None:
         """Evaluate price conditions for a security."""
         alerts = self._alerts_by_security.get(security_id, [])
         if not alerts:
@@ -103,8 +101,11 @@ class AlertEvaluator:
             self._update_alert_state(alert, should_trigger)
 
     def evaluate_greeks(
-        self, security_id: str, delta: Decimal | None = None, gamma: Decimal | None = None,
-        vega: Decimal | None = None
+        self,
+        security_id: str,
+        delta: Decimal | None = None,
+        gamma: Decimal | None = None,
+        vega: Decimal | None = None,
     ) -> None:
         """Evaluate Greeks conditions for a security."""
         alerts = self._alerts_by_security.get(security_id, [])
@@ -179,8 +180,11 @@ class AlertEvaluator:
         return is_armed or was_triggered
 
     def _update_alert_state(self, alert: AlertRecord, should_trigger: bool) -> None:
-        """Update alert state machine and fire notification if needed."""
-        was_triggered = self._last_fired.get(alert.id, False)
+        """Update alert state machine and fire notification if needed.
+
+        Schedules the DB commit as a background task so this can remain
+        sync (called from evaluate_price which has no await).
+        """
         is_triggered = alert.status == AlertStatus.TRIGGERED.value
 
         if should_trigger and not is_triggered:
@@ -195,10 +199,24 @@ class AlertEvaluator:
                 AlertStatus.TRIGGERED,
             )
             self._fire_notification(notification)
+            # C6: Persist status so restarts don't re-fire.
+            asyncio.ensure_future(self._persist_status(alert.id, AlertStatus.TRIGGERED))
         elif not should_trigger and is_triggered:
             # TRIGGERED -> RESOLVED
             alert.status = AlertStatus.RESOLVED.value
-            self._last_fired[alert.id] = False
+            # C7: clear from last_fired so alert can re-arm on re-cross
+            self._last_fired.pop(alert.id, None)
+            # C6: Persist status so restarts reflect reality.
+            asyncio.ensure_future(self._persist_status(alert.id, AlertStatus.RESOLVED))
+
+    async def _persist_status(self, alert_id: int, new_status: AlertStatus) -> None:
+        """Commit an alert status change to the database (C6/C7 fix)."""
+        try:
+            async with self.get_session() as session:
+                await service.update_alert_status(session, alert_id, new_status)
+                await session.commit()
+        except Exception as exc:
+            log.warning("alert_status_persist_failed", alert_id=alert_id, exc=str(exc))
 
     def _fire_notification(self, notification: AlertNotification) -> None:
         """Fire notification callbacks."""

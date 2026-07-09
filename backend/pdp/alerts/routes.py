@@ -8,6 +8,8 @@ from pdp.alerts import service
 from pdp.alerts.enums import AlertStatus
 from pdp.alerts.schemas import AlertCreate, AlertOut, AlertUpdate
 from pdp.db.session import get_db
+from pdp.deps import require_auth, PaginationParams
+from pdp.schemas import Page
 
 log = structlog.get_logger()
 
@@ -27,7 +29,7 @@ def _get_user_id(request) -> str:
     return "user_123"
 
 
-@router.post("", response_model=AlertOut, status_code=201)
+@router.post("", response_model=AlertOut, status_code=201, dependencies=[Depends(require_auth)])
 async def create_alert(
     alert_data: AlertCreate,
     request: Request,
@@ -41,17 +43,19 @@ async def create_alert(
     return AlertOut.model_validate(alert)
 
 
-@router.get("", response_model=list[AlertOut])
+@router.get("", response_model=Page[AlertOut])
 async def list_alerts(
     request: Request,
     status: AlertStatus | None = Query(default=None),
+    pagination: PaginationParams = Depends(),
     db: AsyncSession = Depends(get_db),
-) -> list[AlertOut]:
+) -> Page[AlertOut]:
     """List user's alerts."""
     user_id = _get_user_id(request)
     log.info("list_alerts", user_id=user_id, status=status)
-    alerts = await service.list_alerts(db, user_id, status)
-    return [AlertOut.model_validate(a) for a in alerts]
+    alerts = await service.list_alerts(db, user_id, status, limit=pagination.limit, offset=pagination.offset)
+    items = [AlertOut.model_validate(a) for a in alerts]
+    return Page(items=items, limit=pagination.limit, offset=pagination.offset)
 
 
 @router.get("/{alert_id}", response_model=AlertOut)
@@ -68,7 +72,7 @@ async def get_alert(
     return AlertOut.model_validate(alert)
 
 
-@router.patch("/{alert_id}", response_model=AlertOut)
+@router.patch("/{alert_id}", response_model=AlertOut, dependencies=[Depends(require_auth)])
 async def update_alert(
     alert_id: int,
     alert_data: AlertUpdate,
@@ -85,7 +89,7 @@ async def update_alert(
     return AlertOut.model_validate(alert)
 
 
-@router.delete("/{alert_id}", status_code=204)
+@router.delete("/{alert_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_alert(
     alert_id: int,
     request: Request,

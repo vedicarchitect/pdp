@@ -1,4 +1,5 @@
 """Tests for WSHub publish, subscription filtering, and drop-oldest."""
+
 from __future__ import annotations
 
 import time

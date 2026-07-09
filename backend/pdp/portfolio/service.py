@@ -4,6 +4,7 @@ Maintains an in-memory position cache, recomputes unrealized P&L on each
 Redis tick, flushes dirty values back to PG, and writes an EOD snapshot to
 MongoDB at 15:36 IST.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,7 +75,7 @@ class PortfolioService:
 
     def set_hard_cap_callback(
         self,
-        callback: "Callable[[], Awaitable[None]]",
+        callback: Callable[[], Awaitable[None]],
         daily_loss_cap_inr: float,
     ) -> None:
         """Wire the hard-cap breach callback (auto-invoked when daily loss exceeds cap)."""
@@ -82,15 +83,13 @@ class PortfolioService:
         self._hard_cap_inr = Decimal(str(daily_loss_cap_inr))
         self._hard_cap_triggered = False
 
-    def set_margin_warning_callback(self, callback: "Callable[[float], None]") -> None:
+    def set_margin_warning_callback(self, callback: Callable[[float], None]) -> None:
         """Wire a callback invoked each MTM cycle with the current daily loss (float INR)."""
         self._margin_warning_cb = callback
 
     def get_daily_loss(self) -> Decimal:
         """Current session loss (positive = net loss since day start)."""
-        current_pnl = sum(
-            (ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values()
-        )
+        current_pnl = sum((ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values())
         return max(Decimal("0"), self._day_start_pnl - current_pnl)
 
     def _build_summary(self) -> dict:
@@ -106,9 +105,7 @@ class PortfolioService:
         }
 
     def _reset_day_start_pnl(self) -> None:
-        current_pnl = sum(
-            (ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values()
-        )
+        current_pnl = sum((ps.realized_pnl + ps.unrealized_pnl) for ps in self._cache.values())
         self._day_start_pnl = current_pnl
         self._hard_cap_triggered = False
         log.info("portfolio_day_start_reset", day_start_pnl=str(self._day_start_pnl))
@@ -193,9 +190,7 @@ class PortfolioService:
                     await pubsub.unsubscribe(*(f"tick.{sid}" for sid in gone_sids))
                     self._subscribed_sids -= gone_sids
 
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=0.5
-                )
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
                 if message is None or message.get("type") != "message":
                     continue
 

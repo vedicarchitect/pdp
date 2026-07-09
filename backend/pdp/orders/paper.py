@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
@@ -115,9 +116,7 @@ class PaperBroker:
         self._redis = redis
         await self._load_open_orders()
         await self._load_costs()
-        self._task = asyncio.create_task(
-            self._run(redis), name="paper-broker"
-        )
+        self._task = asyncio.create_task(self._run(redis), name="paper-broker")
         log.info("paper_broker_started", open_orders=sum(len(v) for v in self._open_orders.values()))
 
     async def stop(self) -> None:
@@ -177,9 +176,7 @@ class PaperBroker:
 
         try:
             async with self._session_maker() as session:
-                result = await session.execute(
-                    select(Order).where(Order.status == OrderStatus.OPEN)
-                )
+                result = await session.execute(select(Order).where(Order.status == OrderStatus.OPEN))
                 for order in result.scalars().all():
                     self._open_orders.setdefault(order.security_id, []).append(order)
         except ProgrammingError:
@@ -190,9 +187,7 @@ class PaperBroker:
 
         try:
             async with self._session_maker() as session:
-                result = await session.execute(
-                    select(BrokerCost).where(BrokerCost.broker == "paper")
-                )
+                result = await session.execute(select(BrokerCost).where(BrokerCost.broker == "paper"))
                 for row in result.scalars().all():
                     self._costs[row.instrument_type] = ChargesCalculator(row)
         except ProgrammingError:
@@ -215,9 +210,7 @@ class PaperBroker:
                     except TimeoutError:
                         pass
                     continue
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=0.5
-                )
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
                 if message is None or message["type"] != "message":
                     continue
                 await self._on_tick(message)
@@ -248,6 +241,9 @@ class PaperBroker:
             await self._fill(order, ltp, payload.get("exchange_segment", ""))
 
     async def _fill(self, order: Order, ltp: Decimal, exchange_segment: str) -> None:
+        if order.status == OrderStatus.FILLED:
+            # Already booked — duplicate tick or immediate-fill race; skip silently.
+            return
         fp = _fill_price(ltp, order.side, self._slippage_bps)
         charges = self._compute_charges(order, fp)
         now = datetime.now(UTC)
@@ -269,9 +265,7 @@ class PaperBroker:
 
             # 2. Transition order to FILLED
             await session.execute(
-                update(Order)
-                .where(Order.id == order.id)
-                .values(status=OrderStatus.FILLED, filled_at=now)
+                update(Order).where(Order.id == order.id).values(status=OrderStatus.FILLED, filled_at=now)
             )
 
             # 3. Update position (upsert + weighted-avg / realize-on-reduce)
@@ -346,15 +340,77 @@ def compute_charges(
     return calc.compute(qty if qty is not None else order.qty, fill_price, order.side)
 
 
+@dataclass
+class PositionUpdate:
+    """Result of compute_position_update: new position state after one fill."""
+
+    new_qty: int
+    new_avg: Decimal
+    realized_delta: Decimal  # P&L booked on the closed portion (positive = gain)
+
+
+def compute_position_update(
+    old_qty: int,
+    old_avg: Decimal,
+    fill_qty: int,
+    fill_price: Decimal,
+) -> PositionUpdate:
+    """Pure function: compute new (net_qty, avg_price, realized_delta) from one fill.
+
+    Handles all four cases branch-free:
+    * New position (old_qty == 0)          → avg_price = fill_price
+    * Adding to same-side (sign match)     → weighted average
+    * Reducing but not through zero        → realize on closed qty; avg unchanged
+    * Reversal through zero or flat reopen → realize on closed qty; re-base avg to fill_price
+
+    Shared by PaperBroker and DhanBroker so P&L semantics are identical everywhere.
+    """
+    new_qty = old_qty + fill_qty
+
+    # Case 1: fully closed → zero the position
+    if new_qty == 0:
+        realized = Decimal("0")
+        if old_avg != Decimal("0") and old_qty != 0:
+            realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
+        return PositionUpdate(new_qty=0, new_avg=Decimal("0"), realized_delta=realized)
+
+    # Case 2: new position from flat (old_qty == 0) → re-base avg
+    if old_qty == 0:
+        return PositionUpdate(new_qty=new_qty, new_avg=fill_price, realized_delta=Decimal("0"))
+
+    # Case 3: adding to same-side position → weighted average
+    same_side = (old_qty > 0 and fill_qty > 0) or (old_qty < 0 and fill_qty < 0)
+    if same_side:
+        total_cost = old_avg * Decimal(str(abs(old_qty))) + fill_price * Decimal(str(abs(fill_qty)))
+        new_avg = _round4(total_cost / Decimal(str(abs(new_qty))))
+        return PositionUpdate(new_qty=new_qty, new_avg=new_avg, realized_delta=Decimal("0"))
+
+    # Case 4: reducing / reversing through zero
+    close_qty = min(abs(fill_qty), abs(old_qty))
+    realized = Decimal("0")
+    if old_avg != Decimal("0"):
+        if old_qty > 0:
+            realized = _round4((fill_price - old_avg) * Decimal(str(close_qty)))
+        else:
+            realized = _round4((old_avg - fill_price) * Decimal(str(close_qty)))
+
+    # Sign flipped → re-base avg to fill_price for the residual leg
+    sign_flipped = (old_qty > 0) != (new_qty > 0)
+    new_avg = fill_price if sign_flipped else old_avg
+    return PositionUpdate(new_qty=new_qty, new_avg=new_avg, realized_delta=realized)
+
+
 async def upsert_position(
     session: AsyncSession,
     order: Order,
     fill_price: Decimal,
     now: datetime,
 ) -> Position | None:
-    """Upsert the position for ``order`` using weighted-average / realize-on-reduce.
+    """Upsert the position for ``order`` using compute_position_update.
 
     Shared by the paper engine and the live Dhan broker so P&L semantics match.
+    Delegates all avg_price / realized_pnl logic to the pure helper so there is
+    a single source of truth across flat-reopen, same-side add, reduce, and reversal.
     """
     result = await session.execute(
         select(Position).where(
@@ -365,14 +421,14 @@ async def upsert_position(
         )
     )
     pos = result.scalar_one_or_none()
-    qty = order.qty if order.side == Side.BUY else -order.qty
+    fill_qty = order.qty if order.side == Side.BUY else -order.qty
     if pos is None:
         pos = Position(
             strategy_id=order.strategy_id,
             security_id=order.security_id,
             exchange_segment=order.exchange_segment,
             product=order.product,
-            net_qty=qty,
+            net_qty=fill_qty,
             avg_price=fill_price,
             realized_pnl=Decimal("0"),
             unrealized_pnl=Decimal("0"),
@@ -382,41 +438,16 @@ async def upsert_position(
     else:
         old_qty = pos.net_qty
         old_avg = pos.avg_price
-        new_qty = old_qty + qty
-
-        if new_qty == 0:
-            # Fully closed — skip realized if avg is zero (fill-timing race guard)
-            if old_avg == Decimal("0"):
-                log.warning(
-                    "zero_avg_realized_skipped",
-                    security_id=order.security_id,
-                    strategy_id=order.strategy_id,
-                )
-            else:
-                realized = _round4((fill_price - old_avg) * Decimal(str(old_qty)))
-                pos.realized_pnl += realized
-            pos.avg_price = Decimal("0")
-        elif (old_qty > 0 and qty > 0) or (old_qty < 0 and qty < 0):
-            # Adding to position — weighted average (abs so short-side old_qty sign doesn't invert cost)
-            total_cost = old_avg * Decimal(str(abs(old_qty))) + fill_price * Decimal(str(order.qty))
-            pos.avg_price = _round4(total_cost / Decimal(str(abs(new_qty))))
-        else:
-            # Reducing position — skip realized if avg is zero (fill-timing race guard)
-            reduce_qty = min(abs(qty), abs(old_qty))
-            if old_avg == Decimal("0"):
-                log.warning(
-                    "zero_avg_realized_skipped",
-                    security_id=order.security_id,
-                    strategy_id=order.strategy_id,
-                )
-            elif old_qty > 0:
-                realized = _round4((fill_price - old_avg) * Decimal(str(reduce_qty)))
-                pos.realized_pnl += realized
-            else:
-                realized = _round4((old_avg - fill_price) * Decimal(str(reduce_qty)))
-                pos.realized_pnl += realized
-
-        pos.net_qty = new_qty
+        if old_avg == Decimal("0") and old_qty != 0:
+            log.warning(
+                "zero_avg_realized_skipped",
+                security_id=order.security_id,
+                strategy_id=order.strategy_id,
+            )
+        update = compute_position_update(old_qty, old_avg, fill_qty, fill_price)
+        pos.net_qty = update.new_qty
+        pos.avg_price = update.new_avg
+        pos.realized_pnl += update.realized_delta
         pos.updated_at = now
     await session.flush()
     return pos

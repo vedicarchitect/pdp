@@ -8,6 +8,7 @@ routes each closed bar to either:
 * ``market_bars``  — for the index spot (security_id from settings), via the same
   batched insert pattern as :class:`~pdp.market.bar_writer.BarWriter`.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +23,7 @@ class UnderlyingCfg(TypedDict):
     step: int
     underlying: str
 
+
 import structlog
 
 from pdp.options.warehouse import build_option_bar_doc, upsert_option_bars_async
@@ -34,9 +36,9 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 # Flush tuning — mirrors bar_writer.py
-_FLUSH_INTERVAL = 1.0   # seconds between periodic flushes
-_FLUSH_BATCH = 500      # max docs per flush
-_MAX_BUFFER = 10_000    # drop-oldest threshold per buffer
+_FLUSH_INTERVAL = 1.0  # seconds between periodic flushes
+_FLUSH_BATCH = 500  # max docs per flush
+_MAX_BUFFER = 10_000  # drop-oldest threshold per buffer
 
 
 @dataclass(slots=True)
@@ -46,8 +48,8 @@ class ContractMeta:
     underlying: str
     expiry_date: date
     strike: float
-    option_type: str   # "CE" | "PE"
-    expiry_flag: str   # "WEEK" | "MONTH"
+    option_type: str  # "CE" | "PE"
+    expiry_flag: str  # "WEEK" | "MONTH"
     trading_symbol: str
     security_id: str | None = None
     strike_label: str | None = None
@@ -131,19 +133,21 @@ class OptionBarWriter:
         if len(self._mkt_buf) >= _MAX_BUFFER:
             self._mkt_buf.popleft()
             log.warning("spot_writer_overflow", security_id=bar.security_id)
-        self._mkt_buf.append({
-            "ts": bar.bar_time,
-            "metadata": {
-                "security_id": bar.security_id,
-                "timeframe": bar.timeframe,
-            },
-            "open": float(bar.open),
-            "high": float(bar.high),
-            "low": float(bar.low),
-            "close": float(bar.close),
-            "volume": bar.volume,
-            "oi": bar.oi,
-        })
+        self._mkt_buf.append(
+            {
+                "ts": bar.bar_time,
+                "metadata": {
+                    "security_id": bar.security_id,
+                    "timeframe": bar.timeframe,
+                },
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": bar.volume,
+                "oi": bar.oi,
+            }
+        )
 
     def _enqueue_option(self, bar: BarClosed) -> None:
         meta = self._band.get(bar.security_id)

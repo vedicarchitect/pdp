@@ -2,6 +2,7 @@
 `/api/v1/intel/*` routes (`pdp/intel/routes.py`) and the composed `GET /api/v1/dashboard`
 endpoint (`pdp/intel/dashboard_routes.py`) so the two never drift out of sync.
 """
+
 from __future__ import annotations
 
 import structlog
@@ -73,10 +74,15 @@ async def compute_commodities(request: Request) -> list[dict]:
         if raw_ltp is None:
             out.append({"symbol": symbol, "name": name, "available": False, "security_id": sid})
             continue
-        out.append({
-            "symbol": symbol, "name": name, "available": True,
-            "security_id": sid, "ltp": float(raw_ltp),
-        })
+        out.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "available": True,
+                "security_id": sid,
+                "ltp": float(raw_ltp),
+            }
+        )
     return out
 
 

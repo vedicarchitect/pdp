@@ -8,17 +8,14 @@ Covers:
 - portfolio segment grouping (DB branch) via mocked DB positions
 - Greeks sign adjustment for short vs long positions
 """
+
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from io import StringIO
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from zoneinfo import ZoneInfo
 
 import pytest
 

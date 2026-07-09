@@ -6,10 +6,11 @@ terminal close. Still-open legs are returned with null exit fields.
 
 No new Mongo/PG store — the ledger is a read-time pairing over existing events.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,11 +19,16 @@ import structlog
 
 log = structlog.get_logger()
 _IST = ZoneInfo("Asia/Kolkata")
+_UTC = timezone.utc
 
 # Event types that represent a terminal leg close (entry → exit match)
-_TERMINAL_CLOSE_TYPES = frozenset({
-    "leg_close", "take_profit", "stop_all",
-})
+_TERMINAL_CLOSE_TYPES = frozenset(
+    {
+        "leg_close",
+        "take_profit",
+        "stop_all",
+    }
+)
 # Partial close event
 _PARTIAL_CLOSE_TYPE = "stop_half"
 # Open event
@@ -34,6 +40,81 @@ _OPEN_TYPE = "leg_open"
 # (StrategyDailyLog only ever opens in "a" mode), so mtime+size uniquely
 # identify the exact set of lines already parsed.
 _events_cache: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+
+
+async def read_durable_day_events(
+    strategy_id: str,
+    day: date,
+    *,
+    mongo_collection: Any | None = None,
+    logs_dir: Path = Path("logs"),
+) -> list[dict[str, Any]]:
+    """Read strategy events for a given IST day from the durable store.
+
+    Primary source: Mongo ``events`` collection (leg_open, leg_close, stop_half,
+    take_profit, stop_all).  Converts each document to the same flat-dict format
+    as the JSONL reader so ``pair_trades()`` can be reused unchanged.
+
+    Fallback: local JSONL log file (last-resort — survives Mongo unavailability or
+    empty collection for pre-DB-migration days).
+
+    Args:
+        strategy_id: The strategy identifier (used as Mongo filter field).
+        day: The IST date whose events to read.
+        mongo_collection: Motor AsyncIOMotorCollection for the ``events`` collection.
+            Pass ``None`` to skip the durable path (falls straight to JSONL).
+        logs_dir: Directory root for the JSONL fallback files.
+    """
+    _LEG_EVENT_TYPES = frozenset(
+        {"leg_open", "leg_close", "take_profit", "stop_all", "stop_half"}
+    )
+
+    # IST-day boundary in UTC-naive storage convention used by the events pipeline
+    # (09:00 IST = 03:30 UTC; events arrive 09:15–15:30 IST).
+    import datetime as _dt
+
+    day_start_ist = _dt.datetime(day.year, day.month, day.day, 0, 0, 0)
+    day_end_ist = _dt.datetime(day.year, day.month, day.day, 23, 59, 59)
+    # Convert IST → UTC-naive (subtract 5:30)
+    ist_offset = _dt.timedelta(hours=5, minutes=30)
+    day_start_utc = day_start_ist - ist_offset
+    day_end_utc = day_end_ist - ist_offset
+
+    if mongo_collection is not None:
+        try:
+            cursor = mongo_collection.find(
+                {
+                    "event_type": {"$in": list(_LEG_EVENT_TYPES)},
+                    "strategy_id": strategy_id,
+                    "ts": {"$gte": day_start_utc, "$lte": day_end_utc},
+                },
+                sort=[("ts", 1)],
+            )
+            docs: list[dict[str, Any]] = []
+            async for doc in cursor:
+                doc.pop("_id", None)
+                # Normalise ts → ISO string for downstream consumers
+                ts_raw = doc.get("ts")
+                if isinstance(ts_raw, _dt.datetime):
+                    doc["ts"] = ts_raw.isoformat()
+                docs.append(doc)
+            if docs:
+                return docs
+            log.debug(
+                "trade_ledger_durable_empty_fallback",
+                strategy_id=strategy_id,
+                day=str(day),
+            )
+        except Exception as exc:
+            log.warning(
+                "trade_ledger_durable_read_failed",
+                strategy_id=strategy_id,
+                day=str(day),
+                error=str(exc),
+            )
+
+    # Fallback: JSONL log file
+    return read_day_events(strategy_id, day, logs_dir=logs_dir)
 
 
 def read_day_events(strategy_id: str, day: date, *, logs_dir: Path = Path("logs")) -> list[dict[str, Any]]:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 
 from pdp.intel.sections import (
     compute_commodities,
@@ -13,44 +12,53 @@ from pdp.intel.sections import (
     compute_sentiment,
     compute_vix,
 )
+from pdp.intel.schemas import (
+    GlobalIndicesOut,
+    NewsOut,
+    SentimentOut,
+    CommoditiesOut,
+    VixOut,
+    NextExpiryOut,
+    CalendarOut,
+)
 
 router = APIRouter()
 
 
-@router.get("/global-indices")
-async def get_global_indices(request: Request) -> JSONResponse:
-    return JSONResponse(await compute_global_indices(request))
+@router.get("/global-indices", response_model=GlobalIndicesOut)
+async def get_global_indices(request: Request) -> GlobalIndicesOut:
+    return GlobalIndicesOut(**await compute_global_indices(request))
 
 
-@router.get("/news")
-async def get_news(request: Request) -> JSONResponse:
-    return JSONResponse(await compute_news(request))
+@router.get("/news", response_model=NewsOut)
+async def get_news(request: Request) -> NewsOut:
+    return NewsOut(**await compute_news(request))
 
 
-@router.get("/sentiment")
-async def get_sentiment(request: Request) -> JSONResponse:
-    return JSONResponse(await compute_sentiment(request))
+@router.get("/sentiment", response_model=SentimentOut)
+async def get_sentiment(request: Request) -> SentimentOut:
+    return SentimentOut(**await compute_sentiment(request))
 
 
-@router.get("/commodities")
-async def get_commodities(request: Request) -> JSONResponse:
+@router.get("/commodities", response_model=CommoditiesOut)
+async def get_commodities(request: Request) -> CommoditiesOut:
     """MCX commodity LTP in INR — from the live Dhan feed's Redis ltp cache, not a
     third-party library."""
-    return JSONResponse({"commodities": await compute_commodities(request)})
+    return CommoditiesOut(commodities=await compute_commodities(request))
 
 
-@router.get("/vix")
-async def get_vix(request: Request) -> JSONResponse:
-    return JSONResponse(await compute_vix(request))
+@router.get("/vix", response_model=VixOut)
+async def get_vix(request: Request) -> VixOut:
+    return VixOut(**await compute_vix(request))
 
 
-@router.get("/next-expiry")
-async def get_next_expiry(request: Request) -> JSONResponse:
-    return JSONResponse(await compute_next_expiry())
+@router.get("/next-expiry", response_model=NextExpiryOut)
+async def get_next_expiry(request: Request) -> NextExpiryOut:
+    return NextExpiryOut(**await compute_next_expiry())
 
 
-@router.get("/calendar")
-async def get_calendar() -> JSONResponse:
+@router.get("/calendar", response_model=CalendarOut)
+async def get_calendar() -> CalendarOut:
     # Mock economic calendar — out of scope for flutter-dashboard; unchanged.
     data = {
         "events": [
@@ -86,4 +94,4 @@ async def get_calendar() -> JSONResponse:
             },
         ]
     }
-    return JSONResponse(content=data)
+    return CalendarOut(**data)

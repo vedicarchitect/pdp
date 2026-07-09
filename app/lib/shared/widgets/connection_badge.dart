@@ -16,6 +16,7 @@ class ConnectionBadge extends ConsumerWidget {
       ConnStatus.connecting => AppColors.warning,
       ConnStatus.reconnecting => AppColors.warning,
       ConnStatus.disconnected => AppColors.loss,
+      ConnStatus.engineDown => AppColors.loss,
     };
     return Row(
       mainAxisSize: MainAxisSize.min,

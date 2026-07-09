@@ -69,11 +69,13 @@ class BrokerSyncService:
         session_maker: async_sessionmaker[AsyncSession],
         snapshots_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
         client: BrokerAccountClient,
+        event_service: Any | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._col = snapshots_col
         self._client = client
         self._adapter: Any | None = None
+        self._event_service = event_service  # for POSITION_RECONCILE_MISMATCH alerts
 
     def set_market_adapter(self, adapter: Any) -> None:
         self._adapter = adapter
@@ -118,8 +120,15 @@ class BrokerSyncService:
         account_id = self.account_id
 
         if not self._client.has_credentials:
-            run = await self._record_run(account_id, date_str, trigger, SyncStatus.SKIPPED,
-                                         counts={}, recon=None, error="no Dhan credentials")
+            run = await self._record_run(
+                account_id,
+                date_str,
+                trigger,
+                SyncStatus.SKIPPED,
+                counts={},
+                recon=None,
+                error="no Dhan credentials",
+            )
             log.warning("broker_sync_skipped", account_id=account_id, snapshot_date=date_str)
             return run
 
@@ -137,8 +146,12 @@ class BrokerSyncService:
             try:
                 rows = await getattr(self._client, method)()
                 counts[report_type] = await upsert_snapshot(
-                    self._col, account_id=account_id, snapshot_date=date_str,
-                    report_type=report_type, rows=rows, source=f"dhan.{method}",
+                    self._col,
+                    account_id=account_id,
+                    snapshot_date=date_str,
+                    report_type=report_type,
+                    rows=rows,
+                    source=f"dhan.{method}",
                 )
                 if report_type == "holdings":
                     holdings = rows
@@ -155,8 +168,12 @@ class BrokerSyncService:
             try:
                 rows = await getattr(self._client, method)()
                 counts[report_type] = await upsert_snapshot(
-                    self._col, account_id=account_id, snapshot_date=date_str,
-                    report_type=report_type, rows=rows, source=f"dhan.{method}",
+                    self._col,
+                    account_id=account_id,
+                    snapshot_date=date_str,
+                    report_type=report_type,
+                    rows=rows,
+                    source=f"dhan.{method}",
                 )
             except Exception as exc:
                 errors.append(f"{report_type}: {exc}")
@@ -166,69 +183,97 @@ class BrokerSyncService:
         try:
             rows = await self._client.fetch_ledger(date_str, date_str)
             counts["ledger"] = await upsert_snapshot(
-                self._col, account_id=account_id, snapshot_date=date_str,
-                report_type="ledger", rows=rows, source="dhan.fetch_ledger",
+                self._col,
+                account_id=account_id,
+                snapshot_date=date_str,
+                report_type="ledger",
+                rows=rows,
+                source="dhan.fetch_ledger",
             )
         except Exception as exc:
             errors.append(f"ledger: {exc}")
             log.warning("broker_sync_report_failed", report_type="ledger", error=str(exc))
 
         recon = await self._replace_state_and_reconcile(account_id, holdings, positions, funds)
+
+        # EOD enhanced reconcile: compare PG vs. broker; emit POSITION_RECONCILE_MISMATCH on mismatch
+        from pdp.broker_sync.eod_reconcile import reconcile_day_positions
+
+        try:
+            eod_recon = await reconcile_day_positions(
+                self._session_maker,
+                broker_positions=positions,
+                event_service=self._event_service,
+            )
+            recon = {**recon, "eod": eod_recon}
+        except Exception as exc:
+            log.warning("eod_reconcile_failed", error=str(exc))
+
         await self.subscribe_current_positions()
 
         status = SyncStatus.OK if not errors else SyncStatus.PARTIAL
         run = await self._close_run(run_id, status, counts, recon, "; ".join(errors) or None)
-        log.info("broker_sync_done", account_id=account_id, snapshot_date=date_str,
-                 status=status, counts=counts)
+        log.info(
+            "broker_sync_done", account_id=account_id, snapshot_date=date_str, status=status, counts=counts
+        )
         return run
 
     # ── PG mirror + reconciliation ─────────────────────────────────────────────
     async def _replace_state_and_reconcile(
-        self, account_id: str, holdings: list[dict[str, Any]],
-        positions: list[dict[str, Any]], funds: list[dict[str, Any]],
+        self,
+        account_id: str,
+        holdings: list[dict[str, Any]],
+        positions: list[dict[str, Any]],
+        funds: list[dict[str, Any]],
     ) -> dict[str, Any]:
         async with self._session_maker() as session:
             async with session.begin():
                 await session.execute(delete(BrokerHolding).where(BrokerHolding.account_id == account_id))
                 await session.execute(delete(BrokerPosition).where(BrokerPosition.account_id == account_id))
                 for h in holdings:
-                    session.add(BrokerHolding(
-                        account_id=account_id,
-                        security_id=str(_get(h, "securityId", "security_id", default="")),
-                        isin=str(_get(h, "isin", default="")),
-                        symbol=_get(h, "tradingSymbol", "symbol"),
-                        exchange=_get(h, "exchange"),
-                        total_qty=_int(_get(h, "totalQty", "totalQuantity", default=0)),
-                        available_qty=_int(_get(h, "availableQty", "availableQuantity", default=0)),
-                        avg_cost_price=_num(_get(h, "avgCostPrice", "averageCostPrice")),
-                        last_price=_num(_get(h, "lastTradedPrice", "ltp")) or None,
-                        raw=h,
-                    ))
+                    session.add(
+                        BrokerHolding(
+                            account_id=account_id,
+                            security_id=str(_get(h, "securityId", "security_id", default="")),
+                            isin=str(_get(h, "isin", default="")),
+                            symbol=_get(h, "tradingSymbol", "symbol"),
+                            exchange=_get(h, "exchange"),
+                            total_qty=_int(_get(h, "totalQty", "totalQuantity", default=0)),
+                            available_qty=_int(_get(h, "availableQty", "availableQuantity", default=0)),
+                            avg_cost_price=_num(_get(h, "avgCostPrice", "averageCostPrice")),
+                            last_price=_num(_get(h, "lastTradedPrice", "ltp")) or None,
+                            raw=h,
+                        )
+                    )
                 for p in positions:
-                    session.add(BrokerPosition(
-                        account_id=account_id,
-                        security_id=str(_get(p, "securityId", "security_id", default="")),
-                        exchange_segment=str(_get(p, "exchangeSegment", "exchange_segment", default="")),
-                        product_type=str(_get(p, "productType", "product", default="")),
-                        symbol=_get(p, "tradingSymbol", "symbol"),
-                        net_qty=_int(_get(p, "netQty", "net_qty", default=0)),
-                        buy_avg=_num(_get(p, "buyAvg", "buyAvgPrice")),
-                        sell_avg=_num(_get(p, "sellAvg", "sellAvgPrice")),
-                        realized_pnl=_num(_get(p, "realizedProfit", "realized_pnl")),
-                        unrealized_pnl=_num(_get(p, "unrealizedProfit", "unrealized_pnl")),
-                        raw=p,
-                    ))
+                    session.add(
+                        BrokerPosition(
+                            account_id=account_id,
+                            security_id=str(_get(p, "securityId", "security_id", default="")),
+                            exchange_segment=str(_get(p, "exchangeSegment", "exchange_segment", default="")),
+                            product_type=str(_get(p, "productType", "product", default="")),
+                            symbol=_get(p, "tradingSymbol", "symbol"),
+                            net_qty=_int(_get(p, "netQty", "net_qty", default=0)),
+                            buy_avg=_num(_get(p, "buyAvg", "buyAvgPrice")),
+                            sell_avg=_num(_get(p, "sellAvg", "sellAvgPrice")),
+                            realized_pnl=_num(_get(p, "realizedProfit", "realized_pnl")),
+                            unrealized_pnl=_num(_get(p, "unrealizedProfit", "unrealized_pnl")),
+                            raw=p,
+                        )
+                    )
                 fund = funds[0] if funds else {}
                 if fund:
                     await session.execute(delete(BrokerFund).where(BrokerFund.account_id == account_id))
-                    session.add(BrokerFund(
-                        account_id=account_id,
-                        available_balance=_num(_get(fund, "availabelBalance", "availableBalance")),
-                        utilized_amount=_num(_get(fund, "utilizedAmount")),
-                        collateral_amount=_num(_get(fund, "collateralAmount")),
-                        withdrawable_balance=_num(_get(fund, "withdrawableBalance")),
-                        raw=fund,
-                    ))
+                    session.add(
+                        BrokerFund(
+                            account_id=account_id,
+                            available_balance=_num(_get(fund, "availabelBalance", "availableBalance")),
+                            utilized_amount=_num(_get(fund, "utilizedAmount")),
+                            collateral_amount=_num(_get(fund, "collateralAmount")),
+                            withdrawable_balance=_num(_get(fund, "withdrawableBalance")),
+                            raw=fund,
+                        )
+                    )
 
             return await self._reconcile(session, account_id, positions)
 
@@ -251,22 +296,36 @@ class BrokerSyncService:
             iqty, bqty = internal.get(sid, 0), broker.get(sid, 0)
             if iqty != bqty:
                 mismatches.append({"security_id": sid, "internal": iqty, "broker": bqty})
-                log.warning("broker_recon_mismatch", account_id=account_id,
-                            security_id=sid, internal=iqty, broker=bqty)
+                log.warning(
+                    "broker_recon_mismatch",
+                    account_id=account_id,
+                    security_id=sid,
+                    internal=iqty,
+                    broker=bqty,
+                )
         return {"checked": len(set(internal) | set(broker)), "mismatches": mismatches}
 
     # ── Run-row lifecycle ──────────────────────────────────────────────────────
     async def _open_run(self, run_id: str, account_id: str, date_str: str, trigger: str) -> None:
         async with self._session_maker() as session:
             async with session.begin():
-                session.add(BrokerSyncRun(
-                    id=run_id, account_id=account_id, snapshot_date=date_str,
-                    trigger=trigger, status=SyncStatus.RUNNING,
-                ))
+                session.add(
+                    BrokerSyncRun(
+                        id=run_id,
+                        account_id=account_id,
+                        snapshot_date=date_str,
+                        trigger=trigger,
+                        status=SyncStatus.RUNNING,
+                    )
+                )
 
     async def _close_run(
-        self, run_id: str, status: str, counts: dict[str, int],
-        recon: dict[str, Any] | None, error: str | None,
+        self,
+        run_id: str,
+        status: str,
+        counts: dict[str, int],
+        recon: dict[str, Any] | None,
+        error: str | None,
     ) -> dict[str, Any]:
         async with self._session_maker() as session:
             async with session.begin():
@@ -280,15 +339,27 @@ class BrokerSyncService:
             return _run_dict(run) if run is not None else {}
 
     async def _record_run(
-        self, account_id: str, date_str: str, trigger: str, status: str,
-        counts: dict[str, int], recon: dict[str, Any] | None, error: str | None,
+        self,
+        account_id: str,
+        date_str: str,
+        trigger: str,
+        status: str,
+        counts: dict[str, int],
+        recon: dict[str, Any] | None,
+        error: str | None,
     ) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
         async with self._session_maker() as session:
             async with session.begin():
                 run = BrokerSyncRun(
-                    id=run_id, account_id=account_id, snapshot_date=date_str, trigger=trigger,
-                    status=status, counts=counts, recon=recon, error=error,
+                    id=run_id,
+                    account_id=account_id,
+                    snapshot_date=date_str,
+                    trigger=trigger,
+                    status=status,
+                    counts=counts,
+                    recon=recon,
+                    error=error,
                     finished_at=datetime.now(UTC),
                 )
                 session.add(run)

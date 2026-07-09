@@ -3,6 +3,7 @@
 Reads only caches/DB — no synchronous third-party calls in the request path. Live deltas ride the
 existing `/ws/market` + `/ws/portfolio` sockets, not this endpoint.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -10,7 +11,6 @@ from dataclasses import asdict
 from decimal import Decimal
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from pdp.broker_sync.models import BrokerFund
@@ -21,8 +21,8 @@ from pdp.intel.sections import (
     compute_news,
     compute_next_expiry,
     compute_sentiment,
-    compute_vix,
 )
+from pdp.intel.schemas import DashboardOut
 from pdp.options.fii_dii import StubFIIDIISource
 from pdp.orders.models import Position
 from pdp.settings import get_settings
@@ -37,7 +37,13 @@ async def _prev_close(mongo_db, security_id: str, today: datetime.date) -> float
     """Latest 1D bar close strictly before `today` from `market_bars`."""
     col = mongo_db["market_bars"]
     day_start = datetime.datetime(
-        today.year, today.month, today.day, 0, 0, 0, tzinfo=datetime.UTC,
+        today.year,
+        today.month,
+        today.day,
+        0,
+        0,
+        0,
+        tzinfo=datetime.UTC,
     ) - datetime.timedelta(hours=6)
     doc = await col.find_one(
         {
@@ -95,8 +101,7 @@ async def _fii_dii_section(request: Request) -> dict:
     return {
         "available": True,
         "days": [
-            {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(r).items()}
-            for r in rows
+            {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(r).items()} for r in rows
         ],
     }
 
@@ -151,28 +156,32 @@ async def _strategy_chips_section(request: Request) -> dict:
     chips = []
     for entry in unified_registry.load_all(strategies_dir=host.strategies_dir):
         live = live_by_id.get(entry.id)
-        chips.append({
-            "id": entry.id,
-            "underlying": entry.underlying,
-            "status": str(live["status"]) if live else "BACKTEST_ONLY",
-        })
+        chips.append(
+            {
+                "id": entry.id,
+                "underlying": entry.underlying,
+                "status": str(live["status"]) if live else "BACKTEST_ONLY",
+            }
+        )
     return {"available": True, "strategies": chips}
 
 
-@router.get("/dashboard")
-async def get_dashboard(request: Request) -> JSONResponse:
-    return JSONResponse({
-        "as_of": datetime.datetime.now(datetime.UTC).isoformat(),
-        "indices": await _index_section(request),
-        "global_indices": await compute_global_indices(request),
-        "commodities": await compute_commodities(request),
-        "vix": await compute_vix(request),
-        "next_expiry": await compute_next_expiry(),
-        "fii_dii": await _fii_dii_section(request),
-        "news": await compute_news(request),
-        "sentiment": await compute_sentiment(request),
-        "portfolio": await _portfolio_section(),
-        "today_pnl": await _today_pnl_section(request),
-        "margin": await _margin_section(),
-        "strategies": await _strategy_chips_section(request),
-    })
+@router.get("/dashboard", response_model=DashboardOut)
+async def get_dashboard(request: Request) -> DashboardOut:
+    return DashboardOut(
+        {
+            "as_of": datetime.datetime.now(datetime.UTC).isoformat(),
+            "indices": await _index_section(request),
+            "global_indices": await compute_global_indices(request),
+            "commodities": await compute_commodities(request),
+            "vix": await compute_vix(request),
+            "next_expiry": await compute_next_expiry(),
+            "fii_dii": await _fii_dii_section(request),
+            "news": await compute_news(request),
+            "sentiment": await compute_sentiment(request),
+            "portfolio": await _portfolio_section(),
+            "today_pnl": await _today_pnl_section(request),
+            "margin": await _margin_section(),
+            "strategies": await _strategy_chips_section(request),
+        }
+    )

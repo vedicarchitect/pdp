@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from pdp.jobs.runner import JobRunner
 from pdp.ml.registry import get_active_model_version, list_artifacts, set_active_model
+from pdp.ml.schemas import TrainOut, ModelsOut, DeployOut
 
 router = APIRouter()
 
@@ -38,15 +39,15 @@ async def train_handler(
     return {"version": result_version}
 
 
-@router.post("/train")
-async def trigger_training(params: dict[str, Any], request: Request):
+@router.post("/train", response_model=TrainOut, status_code=202)
+async def trigger_training(params: dict[str, Any], request: Request) -> TrainOut:
     runner: JobRunner = request.app.state.job_runner
     job = await runner.submit("ml_train", params)
-    return {"job_id": str(job.id), "status": job.status}
+    return TrainOut(job_id=str(job.id), status=job.status)
 
 
-@router.get("/models")
-async def get_models():
+@router.get("/models", response_model=ModelsOut)
+async def get_models() -> ModelsOut:
     from pdp.settings import get_settings
 
     settings = get_settings()
@@ -60,11 +61,11 @@ async def get_models():
         m["is_active"] = meta.version == active_ver
         m["report"] = report
         models.append(m)
-    return {"models": models}
+    return ModelsOut(models=models)
 
 
-@router.post("/deploy/{version}")
-async def deploy_model(version: str):
+@router.post("/deploy/{version}", response_model=DeployOut)
+async def deploy_model(version: str) -> DeployOut:
     from pdp.settings import get_settings
 
     settings = get_settings()
@@ -72,4 +73,4 @@ async def deploy_model(version: str):
     if not any(a[0].version == version for a in artifacts):
         raise HTTPException(status_code=404, detail="Version not found")
     await asyncio.to_thread(set_active_model, settings.ML_MODEL_DIR, version)
-    return {"status": "deployed", "version": version}
+    return DeployOut(status="deployed", version=version)

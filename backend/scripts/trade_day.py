@@ -40,6 +40,8 @@ _STRATEGIES = [
     "directional_strangle_sensex",
 ]
 _UNDERLYINGS = ["NIFTY", "BANKNIFTY", "SENSEX"]
+_INDEX_SID_LABEL = {"13": "NIFTY", "25": "BANKNIFTY", "51": "SENSEX"}
+_IND_TFS = ["5m", "15m", "30m", "1H", "1D"]
 
 # ── ANSI helpers ──────────────────────────────────────────────────────────────
 R = "\033[91m"   # red
@@ -261,6 +263,48 @@ def _leg_opt(leg: dict) -> str:
     return f"{R}{ot}{Z}" if ot == "PE" else f"{B}{ot}{Z}"
 
 
+def _fmt_ind(val: float | None, dp: int = 1) -> str:
+    if val is None:
+        return f"{DM}--{Z}"
+    return f"{val:,.{dp}f}"
+
+
+def _indicator_lines(mon: dict | None) -> list[str]:
+    """Flat, copy-paste-friendly EMA/ST/PSAR/RSI matrix per underlying x timeframe.
+
+    Sourced from GET /api/v1/strangle/monitor's `indicators` field (keyed by
+    the underlying's spot security_id). A `--` on ema200 means warmup hasn't
+    fed 200 bars for that timeframe yet — see memory/execution_console_accuracy.md.
+    """
+    lines: list[str] = []
+    if not mon:
+        return lines
+    indicators: dict = mon.get("indicators") or {}
+    for sid, label in _INDEX_SID_LABEL.items():
+        cell_by_tf = (indicators.get(sid) or {}).get("tf") or {}
+        if not cell_by_tf:
+            continue
+        lines.append(f"\n  {BD}{W}{label} indicators{Z}")
+        lines.append(
+            f"  {DM}{'TF':<5} {'EMA9':>10} {'EMA20':>10} {'EMA50':>10} "
+            f"{'EMA100':>10} {'EMA200':>10} {'ST':>10} {'PSAR':>10} {'RSI':>7}{Z}"
+        )
+        for tf in _IND_TFS:
+            c = cell_by_tf.get(tf)
+            if not c:
+                continue
+            st_dir = c.get("st_dir")
+            st_arrow = "^" if st_dir == "up" else ("v" if st_dir == "down" else "")
+            st_disp = f"{_fmt_ind(c.get('st_val'))}{st_arrow}"
+            lines.append(
+                f"  {tf:<5} {_fmt_ind(c.get('ema9')):>10} {_fmt_ind(c.get('ema20')):>10} "
+                f"{_fmt_ind(c.get('ema50')):>10} {_fmt_ind(c.get('ema100')):>10} "
+                f"{_fmt_ind(c.get('ema200')):>10} {st_disp:>10} {_fmt_ind(c.get('psar')):>10} "
+                f"{_fmt_ind(c.get('rsi'), 1):>7}"
+            )
+    return lines
+
+
 def monitor_loop() -> None:
     print(f"\n{BD}Live monitor started — Ctrl+C to exit{Z}\n")
     refresh = 5  # seconds
@@ -342,6 +386,9 @@ def monitor_loop() -> None:
                 out.append("  " + "━" * 74)
                 total_disp = _fmt_pnl(total_pnl) if all_pnl_known else f"{DM}—{Z}"
                 out.append(f"  {BD}TOTAL Day P&L{Z}  {total_disp}")
+
+            mon = _get("/api/v1/strangle/monitor", n_events=1)
+            out.extend(_indicator_lines(mon))
 
             out.append("")
             out.append(f"  {DM}Refreshes every {refresh}s  ·  Ctrl+C to exit{Z}")

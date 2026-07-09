@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 _FLUSH_INTERVAL = 1.0  # seconds
-_FLUSH_BATCH = 500     # documents
-_MAX_BUFFER = 10_000   # drop-oldest threshold
+_FLUSH_BATCH = 500  # documents
+_MAX_BUFFER = 10_000  # drop-oldest threshold
 
 
 class BarWriter:
@@ -45,16 +45,18 @@ class BarWriter:
         if len(self._buffer) >= _MAX_BUFFER:
             self._buffer.popleft()
             log.warning("bar_writer_overflow", buffer_size=_MAX_BUFFER)
-        self._buffer.append({
-            "ts": bar.bar_time,
-            "metadata": {"security_id": bar.security_id, "timeframe": bar.timeframe},
-            "open": float(bar.open),
-            "high": float(bar.high),
-            "low": float(bar.low),
-            "close": float(bar.close),
-            "volume": bar.volume,
-            "oi": bar.oi,
-        })
+        self._buffer.append(
+            {
+                "ts": bar.bar_time,
+                "metadata": {"security_id": bar.security_id, "timeframe": bar.timeframe},
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": bar.volume,
+                "oi": bar.oi,
+            }
+        )
 
     async def _flush_loop(self) -> None:
         while not self._stop_event.is_set():

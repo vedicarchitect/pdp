@@ -4,6 +4,7 @@ No new internals computation lives here — the internals sub-score is derived f
 codebase already computes elsewhere (India VIX level via the tick feed, option PCR via
 `pdp.options.analytics.compute_pcr`). This module only blends what's handed to it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,21 +25,27 @@ _PCR_BULLISH = 0.7
 
 @dataclass
 class SentimentData:
-    blended_score: float       # 0-100, 50 = neutral
-    label: str                 # "Bullish" | "Neutral" | "Bearish"
-    news_score: float | None   # 0-100, None if no headlines available
+    blended_score: float  # 0-100, 50 = neutral
+    label: str  # "Bullish" | "Neutral" | "Bearish"
+    news_score: float | None  # 0-100, None if no headlines available
     internals_score: float | None  # 0-100, None if neither VIX nor PCR available
 
 
 class SentimentSource(Protocol):
     async def score(
-        self, headlines: list[str], vix: float | None, pcr: float | None,
+        self,
+        headlines: list[str],
+        vix: float | None,
+        pcr: float | None,
     ) -> SentimentData | None: ...
 
 
 class StubSentimentSource:
     async def score(
-        self, headlines: list[str], vix: float | None, pcr: float | None,
+        self,
+        headlines: list[str],
+        vix: float | None,
+        pcr: float | None,
     ) -> SentimentData | None:
         return None
 
@@ -77,12 +84,18 @@ def _internals_score(vix: float | None, pcr: float | None) -> float | None:
 
 class BlendedSentimentSource:
     async def score(
-        self, headlines: list[str], vix: float | None, pcr: float | None,
+        self,
+        headlines: list[str],
+        vix: float | None,
+        pcr: float | None,
     ) -> SentimentData | None:
         return await asyncio.to_thread(self._score_sync, headlines, vix, pcr)
 
     def _score_sync(
-        self, headlines: list[str], vix: float | None, pcr: float | None,
+        self,
+        headlines: list[str],
+        vix: float | None,
+        pcr: float | None,
     ) -> SentimentData | None:
         news_score: float | None = None
         if headlines:

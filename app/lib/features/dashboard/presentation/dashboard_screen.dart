@@ -8,6 +8,7 @@ import '../../../shared/widgets/pnl_text.dart';
 import '../../../shared/widgets/stat_card.dart';
 import '../application/dashboard_providers.dart';
 import '../domain/dashboard_models.dart';
+import '../../events/presentation/critical_alerts_card.dart';
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
@@ -26,6 +27,7 @@ class DashboardScreen extends ConsumerWidget {
   Widget _buildDashboard(BuildContext context, WidgetRef ref, DashboardData data) {
     return CustomScrollView(
       slivers: [
+        const CriticalAlertsCard(),
         SliverToBoxAdapter(
           child: SizedBox(
             height: 156,

@@ -3,6 +3,7 @@
 feedparser performs blocking network I/O — callers MUST invoke `fetch()` from a thread-pool
 executor (see `pdp/intel/poller.py`), never inline on a request path.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,16 +48,15 @@ class FeedparserNewsSource:
                 source = parsed.feed.get("title", url) if parsed.feed else url
                 for entry in parsed.entries:
                     published = entry.get("published_parsed") or entry.get("updated_parsed")
-                    published_at = (
-                        datetime.fromtimestamp(mktime(published))
-                        if published else datetime.now()
+                    published_at = datetime.fromtimestamp(mktime(published)) if published else datetime.now()
+                    articles.append(
+                        NewsArticle(
+                            headline=entry.get("title", ""),
+                            source=source,
+                            url=entry.get("link", ""),
+                            published_at=published_at,
+                        )
                     )
-                    articles.append(NewsArticle(
-                        headline=entry.get("title", ""),
-                        source=source,
-                        url=entry.get("link", ""),
-                        published_at=published_at,
-                    ))
             except Exception as exc:
                 log.warning("news_feed_fetch_failed", url=url, exc=str(exc))
         articles.sort(key=lambda a: a.published_at, reverse=True)

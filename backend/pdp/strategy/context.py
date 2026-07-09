@@ -236,6 +236,18 @@ class StrategyContext:
     market: MarketControl | None = None
     session_maker: async_sessionmaker[AsyncSession] | None = None
     chain_hub: Any | None = None
+    _event_service: Any | None = None
+
+    def emit_critical(
+        self,
+        event_type: Any,
+        security_id: str,
+        title: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self._event_service is not None:
+            self._event_service.emit_critical(event_type, security_id, title, message, payload)
 
 
 class StrategyOrderClient:
@@ -291,9 +303,7 @@ class StrategyOrderClient:
     async def cancel_open_entry_orders(self, security_id: str) -> list[int]:
         """Cancel all OPEN SELL orders this strategy has on a security."""
         async with self._session_maker() as session:
-            return await self._router.cancel_open_entry_orders(
-                session, security_id, self._strategy_id
-            )
+            return await self._router.cancel_open_entry_orders(session, security_id, self._strategy_id)
 
     async def get_net_qty(self, security_id: str) -> int:
         """Return net_qty from the positions table for this strategy+security (0 if no row)."""
@@ -372,7 +382,9 @@ class StrategyOrderClient:
 
     async def _count_open_orders(self, session: AsyncSession) -> int:
         result = await session.execute(
-            select(func.count()).select_from(Order).where(
+            select(func.count())
+            .select_from(Order)
+            .where(
                 Order.strategy_id == self._strategy_id,
                 Order.status == OrderStatus.OPEN,
             )

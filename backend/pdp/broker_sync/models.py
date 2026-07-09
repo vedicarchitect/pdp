@@ -82,7 +82,10 @@ class BrokerPosition(Base):
     __tablename__ = "broker_positions"
     __table_args__ = (
         UniqueConstraint(
-            "account_id", "security_id", "exchange_segment", "product_type",
+            "account_id",
+            "security_id",
+            "exchange_segment",
+            "product_type",
             name="uq_broker_positions_acct_sid_seg_prod",
         ),
     )

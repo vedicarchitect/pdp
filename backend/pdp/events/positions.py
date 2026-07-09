@@ -1,4 +1,5 @@
 """Sync manual Dhan positions into a monitored set + auto-subscribe their feeds."""
+
 from __future__ import annotations
 
 import asyncio
@@ -153,14 +154,16 @@ class PositionSync:
             rows = result.scalars().all()
         out: list[MonitoredPosition] = []
         for r in rows:
-            out.append(MonitoredPosition(
-                security_id=r.security_id,
-                underlying=_resolve_underlying(r.security_id),
-                exchange_segment=r.exchange_segment,
-                net_qty=int(r.net_qty),
-                avg_price=float(r.avg_price),
-                side="LONG" if r.net_qty > 0 else "SHORT",
-            ))
+            out.append(
+                MonitoredPosition(
+                    security_id=r.security_id,
+                    underlying=_resolve_underlying(r.security_id),
+                    exchange_segment=r.exchange_segment,
+                    net_qty=int(r.net_qty),
+                    avg_price=float(r.avg_price),
+                    side="LONG" if r.net_qty > 0 else "SHORT",
+                )
+            )
         return out
 
     async def _apply(self, new_list: list[MonitoredPosition]) -> None:
@@ -180,23 +183,37 @@ class PositionSync:
             p = new_map[k]
             await self._subscribe(p)
             sym = p.trading_symbol or p.security_id
-            self._emit(Event(
-                event_type=EventType.POSITION_CHANGE, severity=Severity.INFO,
-                security_id=p.security_id, underlying=p.underlying,
-                title=f"opened {sym}",
-                message=f"New position: {p.net_qty:+d} {sym} @ {p.avg_price:.1f}",
-                payload={"qty": p.net_qty, "avg": p.avg_price, "strike": p.strike,
-                         "option_type": p.option_type}, dedup_key=f"{k}:opened",
-            ))
+            self._emit(
+                Event(
+                    event_type=EventType.POSITION_CHANGE,
+                    severity=Severity.INFO,
+                    security_id=p.security_id,
+                    underlying=p.underlying,
+                    title=f"opened {sym}",
+                    message=f"New position: {p.net_qty:+d} {sym} @ {p.avg_price:.1f}",
+                    payload={
+                        "qty": p.net_qty,
+                        "avg": p.avg_price,
+                        "strike": p.strike,
+                        "option_type": p.option_type,
+                    },
+                    dedup_key=f"{k}:opened",
+                )
+            )
         for k in closed:
             p = self._positions[k]
-            self._emit(Event(
-                event_type=EventType.POSITION_CHANGE, severity=Severity.INFO,
-                security_id=p.security_id, underlying=p.underlying,
-                title=f"closed {p.trading_symbol or p.security_id}",
-                message=f"Position closed: {p.trading_symbol or p.security_id}",
-                payload={"last_mtm": round(p.last_mtm, 0)}, dedup_key=f"{k}:closed",
-            ))
+            self._emit(
+                Event(
+                    event_type=EventType.POSITION_CHANGE,
+                    severity=Severity.INFO,
+                    security_id=p.security_id,
+                    underlying=p.underlying,
+                    title=f"closed {p.trading_symbol or p.security_id}",
+                    message=f"Position closed: {p.trading_symbol or p.security_id}",
+                    payload={"last_mtm": round(p.last_mtm, 0)},
+                    dedup_key=f"{k}:closed",
+                )
+            )
 
         self._positions = new_map
 

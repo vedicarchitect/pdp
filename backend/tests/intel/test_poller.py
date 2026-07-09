@@ -1,4 +1,5 @@
 """Poller tests: confirms sync lib calls are offloaded and results land in the cache."""
+
 from __future__ import annotations
 
 import json
@@ -21,26 +22,47 @@ from pdp.options.fii_dii import FIIDIIData
 
 def _make_poller(redis, mongo_db=None) -> IntelPoller:
     global_source = MagicMock()
-    global_source.fetch = AsyncMock(return_value=[
-        GlobalIndexQuote(symbol="DOW", ticker="^DJI", close=100.0, prev_close=95.0,
-                          change=5.0, change_pct=5.26),
-    ])
+    global_source.fetch = AsyncMock(
+        return_value=[
+            GlobalIndexQuote(
+                symbol="DOW", ticker="^DJI", close=100.0, prev_close=95.0, change=5.0, change_pct=5.26
+            ),
+        ]
+    )
     news_source = MagicMock()
-    news_source.fetch = AsyncMock(return_value=[
-        NewsArticle(headline="Markets rally", source="Test", url="https://x",
-                    published_at=__import__("datetime").datetime.now()),
-    ])
+    news_source.fetch = AsyncMock(
+        return_value=[
+            NewsArticle(
+                headline="Markets rally",
+                source="Test",
+                url="https://x",
+                published_at=__import__("datetime").datetime.now(),
+            ),
+        ]
+    )
     sentiment_source = MagicMock()
-    sentiment_source.score = AsyncMock(return_value=SentimentData(
-        blended_score=65.0, label="Bullish", news_score=70.0, internals_score=60.0,
-    ))
+    sentiment_source.score = AsyncMock(
+        return_value=SentimentData(
+            blended_score=65.0,
+            label="Bullish",
+            news_score=70.0,
+            internals_score=60.0,
+        )
+    )
     fii_dii_source = MagicMock()
-    fii_dii_source.fetch_range = AsyncMock(return_value=[
-        FIIDIIData(date=__import__("datetime").date(2026, 7, 3),
-                   fii_index_futures_net=0.0, fii_index_options_net=0.0,
-                   fii_stock_futures_net=1355.33, dii_index_futures_net=0.0,
-                   dii_index_options_net=0.0, dii_stock_futures_net=-1953.89),
-    ])
+    fii_dii_source.fetch_range = AsyncMock(
+        return_value=[
+            FIIDIIData(
+                date=__import__("datetime").date(2026, 7, 3),
+                fii_index_futures_net=0.0,
+                fii_index_options_net=0.0,
+                fii_stock_futures_net=1355.33,
+                dii_index_futures_net=0.0,
+                dii_index_options_net=0.0,
+                dii_stock_futures_net=-1953.89,
+            ),
+        ]
+    )
     return IntelPoller(
         redis=redis,
         global_market_source=global_source,

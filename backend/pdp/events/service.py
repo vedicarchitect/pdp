@@ -1,4 +1,5 @@
 """EventService — orchestrates detectors, position sync, dedup, persistence, delivery."""
+
 from __future__ import annotations
 
 import asyncio
@@ -67,7 +68,11 @@ class EventService:
         self._oi = OIGreeksDetectors()
         self._portfolio_det = PortfolioDetectors()
         self._sync = PositionSync(
-            settings, session_maker, adapter, self.emit, self.cfg.position_sync_seconds,
+            settings,
+            session_maker,
+            adapter,
+            self.emit,
+            self.cfg.position_sync_seconds,
         )
 
         self._ltp: dict[str, float] = {}
@@ -114,12 +119,39 @@ class EventService:
         self._last_emit[key] = now
         self._hub.publish(event)
         _drop_put(self._store_q, event)
-        if (self.cfg.push_enabled
-                and event.severity.rank >= self._min_rank
-                and event.event_type.value not in self.cfg.push_disabled_types):
+        if (
+            self.cfg.push_enabled
+            and event.severity.rank >= self._min_rank
+            and event.event_type.value not in self.cfg.push_disabled_types
+        ):
             _drop_put(self._push_q, event)
-        log.debug("event_emitted", type=event.event_type.value, sev=event.severity.value,
-                  sid=event.security_id, tf=event.timeframe)
+        log.debug(
+            "event_emitted",
+            type=event.event_type.value,
+            sev=event.severity.value,
+            sid=event.security_id,
+            tf=event.timeframe,
+        )
+
+    def emit_critical(
+        self,
+        event_type: EventType,
+        security_id: str,
+        title: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+        dedup_key: str | None = None,
+    ) -> None:
+        ev = Event(
+            event_type=event_type,
+            severity=Severity.CRITICAL,
+            security_id=security_id,
+            title=title,
+            message=message,
+            payload=payload or {},
+            dedup_key=dedup_key or f"{event_type.value}:{security_id}",
+        )
+        self.emit(ev)
 
     def _emit_all(self, events: list[Event]) -> None:
         for e in events:
@@ -137,17 +169,30 @@ class EventService:
         sid = bar.security_id
         underlying = _SPOT_SID_TO_NAME.get(sid)
         eng = self._engine
-        snap = snapshot if snapshot is not None else (
-            eng.get_snapshot(sid, bar.timeframe) if eng is not None else None)
+        snap = (
+            snapshot
+            if snapshot is not None
+            else (eng.get_snapshot(sid, bar.timeframe) if eng is not None else None)
+        )
         st = eng.get(sid, bar.timeframe) if eng is not None else None
         ml = eng.get_ml_signal(sid, bar.timeframe) if eng is not None else None
         walls = self._oi.walls(underlying) if underlying else []
         wh_levels = self._wh_levels.get(sid, [])
         ctx = BarContext(
-            security_id=sid, underlying=underlying, timeframe=bar.timeframe,
-            open=float(bar.open), high=float(bar.high), low=float(bar.low),
-            close=float(bar.close), volume=float(bar.volume), bar_time=bar.bar_time,
-            snapshot=snap, supertrend=st, ml_signal=ml, cfg=self.cfg, oi_levels=walls,
+            security_id=sid,
+            underlying=underlying,
+            timeframe=bar.timeframe,
+            open=float(bar.open),
+            high=float(bar.high),
+            low=float(bar.low),
+            close=float(bar.close),
+            volume=float(bar.volume),
+            bar_time=bar.bar_time,
+            snapshot=snap,
+            supertrend=st,
+            ml_signal=ml,
+            cfg=self.cfg,
+            oi_levels=walls,
             warehouse_levels=wh_levels,
         )
         try:
@@ -171,53 +216,61 @@ class EventService:
         price = payload.get("fill_price", 0)
         symbol = payload.get("security_id", "")
         strategy_id = payload.get("strategy_id", "")
-        self.emit(Event(
-            event_type=EventType.ORDER_FILL,
-            severity=Severity.INFO,
-            security_id=symbol,
-            title="Order Filled",
-            message=f"{side} {qty} @ {price}" + (f" [{strategy_id}]" if strategy_id else ""),
-            payload=payload,
-            dedup_key=f"ORDER_FILL:{payload.get('order_id', symbol)}",
-        ))
+        self.emit(
+            Event(
+                event_type=EventType.ORDER_FILL,
+                severity=Severity.INFO,
+                security_id=symbol,
+                title="Order Filled",
+                message=f"{side} {qty} @ {price}" + (f" [{strategy_id}]" if strategy_id else ""),
+                payload=payload,
+                dedup_key=f"ORDER_FILL:{payload.get('order_id', symbol)}",
+            )
+        )
 
     def emit_kill_switch(self, trigger: str = "") -> None:
         """Called when the kill switch fires. Severity = CRITICAL."""
-        self.emit(Event(
-            event_type=EventType.KILL_SWITCH_TRIGGERED,
-            severity=Severity.CRITICAL,
-            security_id="PORTFOLIO",
-            title="Kill Switch Triggered",
-            message=f"All positions closed. Trigger: {trigger or 'hard_cap'}",
-            dedup_key="KILL_SWITCH_TRIGGERED",
-        ))
+        self.emit(
+            Event(
+                event_type=EventType.KILL_SWITCH_TRIGGERED,
+                severity=Severity.CRITICAL,
+                security_id="PORTFOLIO",
+                title="Kill Switch Triggered",
+                message=f"All positions closed. Trigger: {trigger or 'hard_cap'}",
+                dedup_key="KILL_SWITCH_TRIGGERED",
+            )
+        )
 
     def emit_margin_warning(self, daily_loss: float, cap: float) -> None:
         """Called when daily P&L reaches RISK_SOFT_CAP_PCT of the daily loss cap."""
         pct = (daily_loss / cap * 100) if cap > 0 else 0.0
-        self.emit(Event(
-            event_type=EventType.MARGIN_WARNING,
-            severity=Severity.WARNING,
-            security_id="PORTFOLIO",
-            title="Margin Warning",
-            message=f"Daily loss ₹{daily_loss:,.0f} is {pct:.0f}% of cap ₹{cap:,.0f}",
-            payload={"daily_loss": daily_loss, "cap": cap, "pct": pct},
-            dedup_key="MARGIN_WARNING",
-        ))
+        self.emit(
+            Event(
+                event_type=EventType.MARGIN_WARNING,
+                severity=Severity.WARNING,
+                security_id="PORTFOLIO",
+                title="Margin Warning",
+                message=f"Daily loss ₹{daily_loss:,.0f} is {pct:.0f}% of cap ₹{cap:,.0f}",
+                payload={"daily_loss": daily_loss, "cap": cap, "pct": pct},
+                dedup_key="MARGIN_WARNING",
+            )
+        )
 
     def emit_strategy_signal(
         self, strategy_id: str, security_id: str, signal: str, underlying: str | None = None
     ) -> None:
         """Called from StrategyHost when a strategy generates an entry/exit signal."""
-        self.emit(Event(
-            event_type=EventType.STRATEGY_SIGNAL,
-            severity=Severity.INFO,
-            security_id=security_id,
-            underlying=underlying,
-            title=f"Strategy Signal: {strategy_id}",
-            message=signal,
-            dedup_key=f"STRATEGY_SIGNAL:{strategy_id}:{signal[:20]}",
-        ))
+        self.emit(
+            Event(
+                event_type=EventType.STRATEGY_SIGNAL,
+                severity=Severity.INFO,
+                security_id=security_id,
+                underlying=underlying,
+                title=f"Strategy Signal: {strategy_id}",
+                message=signal,
+                dedup_key=f"STRATEGY_SIGNAL:{strategy_id}:{signal[:20]}",
+            )
+        )
 
     def on_chain(self, underlying: str, doc: dict[str, Any]) -> None:
         if not self.cfg.enabled:
@@ -247,8 +300,9 @@ class EventService:
             try:
                 positions = self._sync.get_positions()
                 if positions:
-                    self._emit_all(self._position.evaluate_tick(
-                        positions, self._ltp_of, self._spot_of, self.cfg))
+                    self._emit_all(
+                        self._position.evaluate_tick(positions, self._ltp_of, self._spot_of, self.cfg)
+                    )
             except Exception as exc:
                 log.warning("event_position_check_error", exc=str(exc))
 
@@ -305,7 +359,10 @@ class EventService:
                     # Camarilla — use the DAILY doc (intraday breaks anchor to daily).
                     cam = (daily or {}).get("camarilla") or {}
                     for cam_key, label in (
-                        ("r3", "CAM_R3"), ("r4", "CAM_R4"), ("s3", "CAM_S3"), ("s4", "CAM_S4"),
+                        ("r3", "CAM_R3"),
+                        ("r4", "CAM_R4"),
+                        ("s3", "CAM_S3"),
+                        ("s4", "CAM_S4"),
                     ):
                         if cam.get(cam_key) is not None:
                             labeled.append((label, float(cam[cam_key])))
@@ -337,6 +394,7 @@ class EventService:
         js = self._journal
         if js is not None:
             import inspect
+
             for attr in ("get_today_stats", "today_stats", "get_daily_stats"):
                 fn = getattr(js, attr, None)
                 if fn is None:

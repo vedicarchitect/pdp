@@ -6,6 +6,7 @@
 Labels look forward by exactly the configured horizon and are DROPPED where the
 full horizon is unavailable (end of series / end of session boundary).
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

@@ -15,6 +15,7 @@ Responsibilities
 
 The service does NOT touch the order router (paper-first, read/ingest only).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -51,9 +52,9 @@ _SEGMENT_IDX = "IDX_I"
 # Static registry: supported underlyings and their exchange metadata.
 # sid = Dhan IDX_I security_id; step = strike increment in points.
 UNDERLYING_REGISTRY: dict[str, dict[str, Any]] = {
-    "NIFTY":     {"sid": "13", "step": 50,  "expiry_path_setting": "EXPIRY_CACHE_PATH"},
+    "NIFTY": {"sid": "13", "step": 50, "expiry_path_setting": "EXPIRY_CACHE_PATH"},
     "BANKNIFTY": {"sid": "25", "step": 100, "expiry_path_setting": "BANKNIFTY_EXPIRY_CACHE_PATH"},
-    "SENSEX":    {"sid": "51", "step": 100, "expiry_path_setting": "SENSEX_EXPIRY_CACHE_PATH"},
+    "SENSEX": {"sid": "51", "step": 100, "expiry_path_setting": "SENSEX_EXPIRY_CACHE_PATH"},
 }
 
 # Dhan IDX_I security_id for every spot-style series the coverage/gap-radar reads from
@@ -153,9 +154,7 @@ class WarehouseService:
 
         # Flat routing table: all currently subscribed SIDs (index + option) → their writer.
         # Initially contains only index SIDs; option SIDs are added on each _roll_band call.
-        self._writers: dict[str, OptionBarWriter] = {
-            sid: state.writer for sid, state in self._states.items()
-        }
+        self._writers: dict[str, OptionBarWriter] = {sid: state.writer for sid, state in self._states.items()}
 
         self._stop_event = asyncio.Event()
         self._snapshot_done: date | None = None
@@ -195,9 +194,7 @@ class WarehouseService:
         roll_task = asyncio.create_task(self._roll_loop(), name="warehouse-roll-loop")
         bg_tasks = [tick_task, roll_task]
         if self._settings.WAREHOUSE_GAP_BACKFILL_ENABLED:
-            bg_tasks.append(
-                asyncio.create_task(self._gap_backfill_loop(), name="warehouse-gap-backfill")
-            )
+            bg_tasks.append(asyncio.create_task(self._gap_backfill_loop(), name="warehouse-gap-backfill"))
 
         log.info("warehouse_service_running", underlyings=underlyings)
         await self._stop_event.wait()

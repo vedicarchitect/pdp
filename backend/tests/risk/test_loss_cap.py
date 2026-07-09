@@ -1,4 +1,5 @@
 """Unit tests for daily loss calculation and hard-cap trigger in PortfolioService."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -57,6 +58,7 @@ def _pos(
 # get_daily_loss                                                       #
 # ------------------------------------------------------------------ #
 
+
 def test_get_daily_loss_zero_when_no_pnl():
     svc = _make_service()
     svc._cache[("13", "NSE_FNO", "MIS")] = _pos()
@@ -88,6 +90,7 @@ def test_get_daily_loss_accounts_for_day_start_reference():
 # ------------------------------------------------------------------ #
 # Hard cap enforcement                                                 #
 # ------------------------------------------------------------------ #
+
 
 @pytest.mark.asyncio
 async def test_hard_cap_triggers_callback_when_breached():
@@ -172,6 +175,7 @@ async def test_hard_cap_resets_after_day_reset():
 # ------------------------------------------------------------------ #
 # _build_summary                                                       #
 # ------------------------------------------------------------------ #
+
 
 def test_build_summary_includes_realized_loss_today():
     svc = _make_service()

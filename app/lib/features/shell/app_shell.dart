@@ -59,12 +59,6 @@ class AppShell extends ConsumerWidget {
       selectedIcon: Icons.filter_alt,
     ),
     _Destination(
-      route: '/risk',
-      label: 'Risk',
-      icon: Icons.gpp_maybe_outlined,
-      selectedIcon: Icons.gpp_maybe,
-    ),
-    _Destination(
       route: '/manage',
       label: 'More',
       icon: Icons.grid_view_outlined,

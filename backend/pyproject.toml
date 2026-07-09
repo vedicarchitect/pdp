@@ -47,6 +47,9 @@ dev = [
 
 [project.scripts]
 pdp = "pdp.cli:main"
+pdp-api = "pdp.runtime.entrypoints:run_api"
+pdp-engine = "pdp.runtime.entrypoints:run_engine"
+pdp-ops = "pdp.runtime.entrypoints:run_ops"
 
 [build-system]
 requires = ["hatchling"]

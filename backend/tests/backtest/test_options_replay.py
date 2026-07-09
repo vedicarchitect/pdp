@@ -1,10 +1,9 @@
 """Tests for OptionsReplayEngine with mock bar data."""
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from unittest.mock import MagicMock
-
-import pytest
 
 from pdp.backtest.options_replay import (
     OptionsReplayEngine,
@@ -49,8 +48,18 @@ def _config(**overrides) -> OptionsStrategyConfig:
         "entry": {
             "time_ist": "09:20",
             "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
+                {
+                    "type": "CE",
+                    "side": "SELL",
+                    "lots": 1,
+                    "strike_selection": {"method": "atm_offset", "offset": 0},
+                },
+                {
+                    "type": "PE",
+                    "side": "SELL",
+                    "lots": 1,
+                    "strike_selection": {"method": "atm_offset", "offset": 0},
+                },
             ],
         },
         "exit": {"time_ist": "15:10"},
@@ -88,6 +97,7 @@ def _make_engine(spot_docs: list[dict], opt_docs: list[dict]) -> OptionsReplayEn
 # Unit helpers
 # ---------------------------------------------------------------------------
 
+
 def test_strike_step_nifty():
     assert _strike_step("NIFTY") == 50
 
@@ -118,6 +128,7 @@ def test_resolve_expiry_weekly():
 # ---------------------------------------------------------------------------
 # Replay tests with mock data
 # ---------------------------------------------------------------------------
+
 
 def _run_one_day(
     d: date,
@@ -160,8 +171,18 @@ def _run_one_day(
         "entry": {
             "time_ist": "09:20",
             "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
+                {
+                    "type": "CE",
+                    "side": "SELL",
+                    "lots": 1,
+                    "strike_selection": {"method": "atm_offset", "offset": 0},
+                },
+                {
+                    "type": "PE",
+                    "side": "SELL",
+                    "lots": 1,
+                    "strike_selection": {"method": "atm_offset", "offset": 0},
+                },
             ],
         },
         "exit": {"time_ist": "15:10"},
@@ -215,23 +236,35 @@ def test_combined_sl_triggers_exit():
         {"ts": _to_utc(d, time(10, 0)), "close": 100.0, "strike": atm, "option_type": "PE"},
         {"ts": _to_utc(d, time(15, 10)), "close": 70.0, "strike": atm, "option_type": "PE"},
     ]
-    config = OptionsStrategyConfig.model_validate({
-        "type": "options-strategy",
-        "name": "SL Test",
-        "underlying": "NIFTY",
-        "date_range": {"from": d.isoformat(), "to": d.isoformat()},
-        "entry": {
-            "time_ist": "09:20",
-            "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-            ],
-        },
-        "exit": {"time_ist": "15:10"},
-        "risk": {"combined_sl": {"type": "points", "value": 50}},
-        "lot_size": 75,
-        "commissions": False,
-    })
+    config = OptionsStrategyConfig.model_validate(
+        {
+            "type": "options-strategy",
+            "name": "SL Test",
+            "underlying": "NIFTY",
+            "date_range": {"from": d.isoformat(), "to": d.isoformat()},
+            "entry": {
+                "time_ist": "09:20",
+                "legs": [
+                    {
+                        "type": "CE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                    {
+                        "type": "PE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                ],
+            },
+            "exit": {"time_ist": "15:10"},
+            "risk": {"combined_sl": {"type": "points", "value": 50}},
+            "lot_size": 75,
+            "commissions": False,
+        }
+    )
     engine = _make_engine(spot_docs, opt_docs)
     result = engine.run(config)
     assert result.total_pnl < 0
@@ -260,23 +293,35 @@ def test_combined_target_triggers_exit():
         {"ts": _to_utc(d, time(10, 0)), "close": 80.0, "strike": atm, "option_type": "PE"},
         {"ts": _to_utc(d, time(15, 10)), "close": 80.0, "strike": atm, "option_type": "PE"},
     ]
-    config = OptionsStrategyConfig.model_validate({
-        "type": "options-strategy",
-        "name": "Target Test",
-        "underlying": "NIFTY",
-        "date_range": {"from": d.isoformat(), "to": d.isoformat()},
-        "entry": {
-            "time_ist": "09:20",
-            "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-            ],
-        },
-        "exit": {"time_ist": "15:10"},
-        "risk": {"combined_target": {"type": "points", "value": 30}},
-        "lot_size": 75,
-        "commissions": False,
-    })
+    config = OptionsStrategyConfig.model_validate(
+        {
+            "type": "options-strategy",
+            "name": "Target Test",
+            "underlying": "NIFTY",
+            "date_range": {"from": d.isoformat(), "to": d.isoformat()},
+            "entry": {
+                "time_ist": "09:20",
+                "legs": [
+                    {
+                        "type": "CE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                    {
+                        "type": "PE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                ],
+            },
+            "exit": {"time_ist": "15:10"},
+            "risk": {"combined_target": {"type": "points", "value": 30}},
+            "lot_size": 75,
+            "commissions": False,
+        }
+    )
     engine = _make_engine(spot_docs, opt_docs)
     result = engine.run(config)
     assert result.total_pnl > 0
@@ -303,7 +348,12 @@ def test_trailing_sl_adjusts_and_triggers():
         {"ts": _to_utc(d, time(9, 20)), "close": 100.0, "strike": atm, "option_type": "CE"},
         {"ts": _to_utc(d, time(9, 25)), "close": 85.0, "strike": atm, "option_type": "CE"},
         {"ts": _to_utc(d, time(9, 30)), "close": 70.0, "strike": atm, "option_type": "CE"},  # pnl=+30
-        {"ts": _to_utc(d, time(9, 35)), "close": 75.0, "strike": atm, "option_type": "CE"},  # pnl=+25 → triggers at 25
+        {
+            "ts": _to_utc(d, time(9, 35)),
+            "close": 75.0,
+            "strike": atm,
+            "option_type": "CE",
+        },  # pnl=+25 → triggers at 25
         {"ts": _to_utc(d, time(9, 40)), "close": 75.0, "strike": atm, "option_type": "CE"},
         {"ts": _to_utc(d, time(15, 10)), "close": 75.0, "strike": atm, "option_type": "CE"},
         # No PE — single leg straddle for simplicity
@@ -314,25 +364,37 @@ def test_trailing_sl_adjusts_and_triggers():
         {"ts": _to_utc(d, time(9, 40)), "close": 0.01, "strike": atm, "option_type": "PE"},
         {"ts": _to_utc(d, time(15, 10)), "close": 0.01, "strike": atm, "option_type": "PE"},
     ]
-    config = OptionsStrategyConfig.model_validate({
-        "type": "options-strategy",
-        "name": "Trail Test",
-        "underlying": "NIFTY",
-        "date_range": {"from": d.isoformat(), "to": d.isoformat()},
-        "entry": {
-            "time_ist": "09:20",
-            "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-            ],
-        },
-        "exit": {"time_ist": "15:10"},
-        "risk": {
-            "trailing_sl": {"enabled": True, "trail_after": 20, "trail_step": 5},
-        },
-        "lot_size": 75,
-        "commissions": False,
-    })
+    config = OptionsStrategyConfig.model_validate(
+        {
+            "type": "options-strategy",
+            "name": "Trail Test",
+            "underlying": "NIFTY",
+            "date_range": {"from": d.isoformat(), "to": d.isoformat()},
+            "entry": {
+                "time_ist": "09:20",
+                "legs": [
+                    {
+                        "type": "CE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                    {
+                        "type": "PE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                ],
+            },
+            "exit": {"time_ist": "15:10"},
+            "risk": {
+                "trailing_sl": {"enabled": True, "trail_after": 20, "trail_step": 5},
+            },
+            "lot_size": 75,
+            "commissions": False,
+        }
+    )
     engine = _make_engine(spot_docs, opt_docs)
     result = engine.run(config)
     # Should have a trailing_sl exit
@@ -362,26 +424,38 @@ def test_reentry_after_sl():
         {"ts": _to_utc(d, time(10, 0)), "close": 80.0, "strike": atm, "option_type": "PE"},
         {"ts": _to_utc(d, time(15, 10)), "close": 60.0, "strike": atm, "option_type": "PE"},
     ]
-    config = OptionsStrategyConfig.model_validate({
-        "type": "options-strategy",
-        "name": "Re-entry Test",
-        "underlying": "NIFTY",
-        "date_range": {"from": d.isoformat(), "to": d.isoformat()},
-        "entry": {
-            "time_ist": "09:20",
-            "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-                {"type": "PE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-            ],
-        },
-        "exit": {"time_ist": "15:10"},
-        "risk": {
-            "combined_sl": {"type": "points", "value": 50},
-            "re_entry": {"enabled": True, "max_count": 1},
-        },
-        "lot_size": 75,
-        "commissions": False,
-    })
+    config = OptionsStrategyConfig.model_validate(
+        {
+            "type": "options-strategy",
+            "name": "Re-entry Test",
+            "underlying": "NIFTY",
+            "date_range": {"from": d.isoformat(), "to": d.isoformat()},
+            "entry": {
+                "time_ist": "09:20",
+                "legs": [
+                    {
+                        "type": "CE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                    {
+                        "type": "PE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                ],
+            },
+            "exit": {"time_ist": "15:10"},
+            "risk": {
+                "combined_sl": {"type": "points", "value": 50},
+                "re_entry": {"enabled": True, "max_count": 1},
+            },
+            "lot_size": 75,
+            "commissions": False,
+        }
+    )
     engine = _make_engine(spot_docs, opt_docs)
     result = engine.run(config)
     # Should have at least 2 trades: initial + re-entry
@@ -398,22 +472,29 @@ def test_missing_bar_data_skips_day():
     ]
     opt_docs = []  # no bars
 
-    config = OptionsStrategyConfig.model_validate({
-        "type": "options-strategy",
-        "name": "Missing Data Test",
-        "underlying": "NIFTY",
-        "date_range": {"from": d.isoformat(), "to": d.isoformat()},
-        "entry": {
-            "time_ist": "09:20",
-            "legs": [
-                {"type": "CE", "side": "SELL", "lots": 1, "strike_selection": {"method": "atm_offset", "offset": 0}},
-            ],
-        },
-        "exit": {"time_ist": "15:10"},
-        "risk": {},
-        "lot_size": 75,
-        "commissions": False,
-    })
+    config = OptionsStrategyConfig.model_validate(
+        {
+            "type": "options-strategy",
+            "name": "Missing Data Test",
+            "underlying": "NIFTY",
+            "date_range": {"from": d.isoformat(), "to": d.isoformat()},
+            "entry": {
+                "time_ist": "09:20",
+                "legs": [
+                    {
+                        "type": "CE",
+                        "side": "SELL",
+                        "lots": 1,
+                        "strike_selection": {"method": "atm_offset", "offset": 0},
+                    },
+                ],
+            },
+            "exit": {"time_ist": "15:10"},
+            "risk": {},
+            "lot_size": 75,
+            "commissions": False,
+        }
+    )
     engine = _make_engine(spot_docs, opt_docs)
     result = engine.run(config)
     assert result.total_trades == 0

@@ -15,6 +15,7 @@ Sign convention for votes: ``+1`` = bullish, ``-1`` = bearish, ``0`` = neutral
 or insufficient data. "Bullish" for a *seller* means lean the strangle toward
 selling more PUTs (premium safe to the upside).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -240,9 +241,9 @@ def _vix_gate(inp: BiasInputs, w: BiasWeights) -> tuple[bool, str]:
     """Return (gated, reason). Missing VIX data => allow (logged by caller)."""
     if inp.vix_now is None:
         return False, "vix_unavailable"
-    # >5% intraday spike
-    if inp.vix_day_open:
-        if (inp.vix_now - inp.vix_day_open) / inp.vix_day_open > w.vix_spike_pct:
+    # >5% intraday spike ANY TIME TODAY (using day high instead of now)
+    if inp.vix_day_open and inp.vix_day_high is not None:
+        if (inp.vix_day_high - inp.vix_day_open) / inp.vix_day_open > w.vix_spike_pct:
             return True, "vix_spike_gt_5pct"
     # at day high
     if inp.vix_day_high is not None and inp.vix_now >= inp.vix_day_high - w.vix_day_high_eps:

@@ -22,8 +22,14 @@ def get_engine() -> AsyncEngine:
         _engine = create_async_engine(
             settings.DATABASE_URL,
             pool_pre_ping=True,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+            # Recycle connections before the server/proxy closes them silently
+            # (default: -1 = never recycle).
+            pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+            # Raise after this many seconds waiting for a connection, instead
+            # of hanging indefinitely on pool exhaustion.
+            pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
         )
     return _engine
 
@@ -31,9 +37,7 @@ def get_engine() -> AsyncEngine:
 def get_session_maker() -> async_sessionmaker[AsyncSession]:
     global _session_maker
     if _session_maker is None:
-        _session_maker = async_sessionmaker(
-            get_engine(), expire_on_commit=False, class_=AsyncSession
-        )
+        _session_maker = async_sessionmaker(get_engine(), expire_on_commit=False, class_=AsyncSession)
     return _session_maker
 
 

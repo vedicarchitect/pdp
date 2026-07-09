@@ -30,6 +30,7 @@ Parity additions (chunk 4 strangle-execution-console):
   - Live PCR: not yet wired (no ind.pcr or accessible poller.latest_pcr)
   - Indicator timeframe audit on startup
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,6 +41,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from pdp.instruments.expiry_calendar import within_dte
 from pdp.instruments.symbols import symbol_for
 from pdp.settings import get_settings
 from pdp.signals.bias import (
@@ -86,8 +88,10 @@ def _to_cam(pivot_state: Any) -> CamLevels | None:
     if pivot_state is None:
         return None
     return CamLevels(
-        r3=pivot_state.cam_r3, r4=pivot_state.cam_r4,
-        s3=pivot_state.cam_s3, s4=pivot_state.cam_s4,
+        r3=pivot_state.cam_r3,
+        r4=pivot_state.cam_r4,
+        s3=pivot_state.cam_s3,
+        s4=pivot_state.cam_s4,
     )
 
 
@@ -95,16 +99,20 @@ def _to_cam(pivot_state: Any) -> CamLevels | None:
 class OpenLeg:
     security_id: str
     segment: str
-    opt_type: str           # "PE" or "CE"
+    opt_type: str  # "PE" or "CE"
     strike: float
     lots: int
     entry_price: Decimal
-    is_hedge: bool = False      # True = far-OTM protective long
-    is_momentum: bool = False   # True = ITM directional long (COMPLETE_* only)
+    is_hedge: bool = False  # True = far-OTM protective long
+    is_momentum: bool = False  # True = ITM directional long (COMPLETE_* only)
     half_stopped: bool = False  # True after pct_stop_half partial close (shorts only)
-    entry_time: datetime | None = None   # IST-aware open timestamp
-    entry_reason: str = ""               # bucket@score at entry (e.g. "NEUTRAL@0.10")
-    expiry: date | None = None           # resolved at open time; reused at close (no re-query)
+    entry_time: datetime | None = None  # IST-aware open timestamp
+    entry_reason: str = ""  # bucket@score at entry (e.g. "NEUTRAL@0.10")
+    expiry: date | None = None  # resolved at open time; reused at close (no re-query)
+    # Running LTP high/low the position has experienced since it was opened — the
+    # trader-facing "day range" for the leg (updated on every on_tick for this sid).
+    day_high: float | None = None
+    day_low: float | None = None
 
 
 def _leg_pnl(leg: OpenLeg, price: float, lots: int, lot_size: int) -> float:
@@ -113,15 +121,18 @@ def _leg_pnl(leg: OpenLeg, price: float, lots: int, lot_size: int) -> float:
     Short legs profit when price falls (entry - price); hedge/momentum longs
     profit when price rises (price - entry). Used for both unrealized MTM
     (price = live LTP) and realized P&L at close (price = exit price).
+
+    Guard: if entry_price is 0 (unresolved fill), MTM is 0 — never phantom.
     """
     entry = float(leg.entry_price)
+    if entry <= 0:
+        return 0.0
     if leg.is_hedge or leg.is_momentum:
         return (price - entry) * lots * lot_size
     return (entry - price) * lots * lot_size
 
 
 class DirectionalStrangle(Strategy):
-
     # ------------------------------------------------------------------ #
     # Initialisation                                                       #
     # ------------------------------------------------------------------ #
@@ -143,9 +154,7 @@ class DirectionalStrangle(Strategy):
         self._hedge_prem_max: float = float(p.get("hedge_prem_max", 5.0))
         self._hedge_scan_start: int = int(p.get("hedge_scan_start", 10))
         self._hedge_scan_end: int = int(p.get("hedge_scan_end", 22))
-        self._strike_step: int = int(
-            p.get("strike_step", STRIKE_STEP.get(self.underlying, 50))
-        )
+        self._strike_step: int = int(p.get("strike_step", STRIKE_STEP.get(self.underlying, 50)))
 
         self._take_profit_pct: float = float(p.get("take_profit_pct", 0.5))
         self._pct_stop_half: float = float(p.get("pct_stop_half", 0.30))
@@ -156,8 +165,14 @@ class DirectionalStrangle(Strategy):
         self._entry_after_ist: time = _parse_hhmm(p.get("entry_after_ist", "10:15"))
         self._squareoff_ist: time = _parse_hhmm(p.get("squareoff_ist", "15:10"))
 
+        # DTE window: open new legs only within `dte_max` calendar days of expiry.
+        # None (default) = no filter. Reuses the same `within_dte` helper as the backtest.
+        self._dte_max: int | None = int(p["dte_max"]) if p.get("dte_max") is not None else None
+
         # VIX gate — disabled by default (5yr data shows it costs Rs 33L and increases MaxDD)
         self._vix_gate_enabled: bool = bool(p.get("vix_gate_enabled", False))
+
+        self._hedge_price_wait_s: float = float(p.get("hedge_price_wait_s", 2.0))
 
         # Momentum long: buy ITM+1 on COMPLETE_BULL/BEAR, close when |score| < threshold
         self._momentum_enabled: bool = bool(p.get("momentum_enabled", True))
@@ -192,11 +207,11 @@ class DirectionalStrangle(Strategy):
             if raw_rt
             else {
                 BiasBucket.COMPLETE_BULL: (5, 0),
-                BiasBucket.MOST_BULL:     (4, 2),
-                BiasBucket.MORE_BULL:     (3, 2),
-                BiasBucket.NEUTRAL:       (3, 3),
-                BiasBucket.MORE_BEAR:     (2, 3),
-                BiasBucket.MOST_BEAR:     (2, 4),
+                BiasBucket.MOST_BULL: (4, 2),
+                BiasBucket.MORE_BULL: (3, 2),
+                BiasBucket.NEUTRAL: (3, 3),
+                BiasBucket.MORE_BEAR: (2, 3),
+                BiasBucket.MOST_BEAR: (2, 4),
                 BiasBucket.COMPLETE_BEAR: (0, 5),
             }
         )
@@ -205,6 +220,9 @@ class DirectionalStrangle(Strategy):
         self._short_legs: list[OpenLeg] = []
         self._hedge_legs: list[OpenLeg] = []
         self._momentum_legs: list[OpenLeg] = []
+        # Per-sid locks serializing "check position cap, then open" so concurrent
+        # opens on the same sid can't both pass the cap check and jointly exceed it.
+        self._leg_locks: dict[str, asyncio.Lock] = {}
         self._current_bucket: str | None = None
         self._last_score: float = 0.0
         self._done_for_day = False
@@ -212,15 +230,20 @@ class DirectionalStrangle(Strategy):
         self._subscribed_option_sids: set[str] = set()
         self._halt_checked: bool = False  # checked once per day to avoid repeated Redis reads
         self._pending_bucket: str | None = None  # candidate new bucket awaiting confirmation
-        self._pending_bucket_count: int = 0      # consecutive bars seen for pending bucket
+        self._pending_bucket_count: int = 0  # consecutive bars seen for pending bucket
+
+        # Nearest tradeable expiry, cached once per bar day (for the DTE entry gate).
+        self._expiry_cache: tuple[date, date | None] | None = None
 
         self._vix_now: float | None = None
         self._vix_day_open: float | None = None
         self._vix_day_high: float | None = None
         self._vix_recent: list[float] = []
+        self._vix_spike_emitted: bool = False
 
         self._orb_high: float | None = None
         self._orb_low: float | None = None
+        self._orb_unseeded: bool = False
 
         self._day_baseline: dict[str, Decimal] = {}
         self._touched_sids: set[str] = set()
@@ -287,6 +310,12 @@ class DirectionalStrangle(Strategy):
                 strategy_id=self.strategy_id,
             )
 
+        # Repair: re-base any currently-open PG positions with avg_price == 0
+        await self._repair_zero_avg_positions()
+
+        # Rehydrate open legs from the durable position ledger (restart safety)
+        await self._rehydrate_legs()
+
     # ------------------------------------------------------------------ #
     # Bar handler                                                          #
     # ------------------------------------------------------------------ #
@@ -307,9 +336,27 @@ class DirectionalStrangle(Strategy):
             self._halt_checked = True
 
         # 15m bar: capture Opening Range on first bar of the session
-        if bar.timeframe == "15m" and not self._orb_high:
-            self._orb_high = float(bar.high)
-            self._orb_low = float(bar.low)
+        if bar.timeframe == "15m" and not self._orb_high and not self._orb_unseeded:
+            expected_windows = (time(9, 15), time(9, 30))
+            if now in expected_windows:
+                self._orb_high = float(bar.high)
+                self._orb_low = float(bar.low)
+            else:
+                self._orb_unseeded = True
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.INDICATOR_UNSEEDED,
+                    self.sid,
+                    "ORB unseeded",
+                    "ORB not seeded from opening window",
+                    {
+                        "strategy_id": self.strategy_id,
+                        "indicator": "ORB",
+                        "expected_window": "09:15-09:30",
+                        "seen_from": now.strftime("%H:%M"),
+                    },
+                )
 
         if bar.timeframe != "5m":
             return
@@ -346,6 +393,10 @@ class DirectionalStrangle(Strategy):
                 await self.ctx.market.cache_set(self._halt_key(self._day_key), "1", ex=86400)
             return
 
+        # DTE entry gate: new legs open only within `dte_max` days of expiry.
+        # Existing legs are still managed (exits run in on_tick; bucket-change closes below).
+        entry_allowed = await self._entry_within_dte(bar_day)
+
         inp = self._build_bias_inputs(spot)
         result = score_bias(inp, weights=self._weights, ratio_table=self._ratio_table)
         self._last_score = result.score
@@ -356,7 +407,7 @@ class DirectionalStrangle(Strategy):
             score=round(result.score, 3),
             bucket=result.bucket.value if result.bucket else None,
             gated=result.gated,
-            reason=result.reason,
+            reason="dte_gated" if not entry_allowed else result.reason,
             shorts=len(self._short_legs),
             momentum=len(self._momentum_legs),
             votes=result.votes,
@@ -366,6 +417,21 @@ class DirectionalStrangle(Strategy):
         self._emit_leg_status()
 
         if result.gated:
+            if "vix_spike_gt_5pct" in result.reason and not getattr(self, "_vix_spike_emitted", False):
+                self._vix_spike_emitted = True
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.VIX_SPIKE,
+                    self.sid,
+                    "VIX Spike Detected",
+                    f"VIX intraday spike exceeded 5%: {result.reason}",
+                    {
+                        "strategy_id": self.strategy_id,
+                        "vix_open": self._vix_day_open,
+                        "vix_high": self._vix_day_high,
+                    },
+                )
             return
 
         if result.bucket == BiasBucket.NEUTRAL and self._neutral_no_trade:
@@ -388,20 +454,24 @@ class DirectionalStrangle(Strategy):
             if self._pending_bucket_count >= self._bucket_confirm_bars:
                 # Confirmation met — act on the bucket change.
                 if self._short_legs or self._hedge_legs:
-                    self._emit_event(StrangleEventType.BUCKET_CHANGE,
-                        old_bucket=self._current_bucket, new_bucket=bucket_str)
+                    self._emit_event(
+                        StrangleEventType.BUCKET_CHANGE,
+                        old_bucket=self._current_bucket,
+                        new_bucket=bucket_str,
+                    )
                     await self._close_shorts_and_hedges("bucket_change")
                 self._current_bucket = bucket_str
                 self._pending_bucket = None
                 self._pending_bucket_count = 0
-                await self._open_bucket(spot, pe_lots, ce_lots)
+                if entry_allowed:
+                    await self._open_bucket(spot, pe_lots, ce_lots)
         else:
             # Bucket matches current — clear any pending confirmation.
             self._pending_bucket = None
             self._pending_bucket_count = 0
 
         if self._momentum_enabled:
-            if result.bucket in _EXTREME_BUCKETS and not self._momentum_legs:
+            if entry_allowed and result.bucket in _EXTREME_BUCKETS and not self._momentum_legs:
                 await self._open_momentum(spot, result.bucket)
             await self._maybe_close_momentum(result.score)
 
@@ -430,6 +500,14 @@ class DirectionalStrangle(Strategy):
         # Update LTP cache for all option ticks
         self._ltp_cache[sid] = ltp
 
+        # Maintain the running day high/low for every open leg on this sid (all leg
+        # types) so the execution console can show the range the position has seen.
+        for lg in self._short_legs + self._hedge_legs + self._momentum_legs:
+            if lg.security_id != sid:
+                continue
+            lg.day_high = ltp if lg.day_high is None else max(lg.day_high, ltp)
+            lg.day_low = ltp if lg.day_low is None else min(lg.day_low, ltp)
+
         # Only watch short legs (momentum longs exit on score signal, not premium)
         legs = [lg for lg in self._short_legs if lg.security_id == sid]
         for leg in legs:
@@ -444,7 +522,9 @@ class DirectionalStrangle(Strategy):
 
             if ltp <= entry * self._take_profit_pct:
                 await self._close_short_leg(
-                    leg, "take_profit", event_type=StrangleEventType.TAKE_PROFIT,
+                    leg,
+                    "take_profit",
+                    event_type=StrangleEventType.TAKE_PROFIT,
                 )
                 await self._close_matching_hedge(leg)
                 return
@@ -456,12 +536,19 @@ class DirectionalStrangle(Strategy):
                     await self._place(sid, leg.segment, "BUY", close_lots)
                     leg.lots -= close_lots
                     leg.half_stopped = True
-                    self._emit_event(StrangleEventType.STOP_HALF,
-                        sid=sid, ltp=ltp, remaining=leg.lots,
-                        partial=True, **exit_fields)
+                    self._emit_event(
+                        StrangleEventType.STOP_HALF,
+                        sid=sid,
+                        ltp=ltp,
+                        remaining=leg.lots,
+                        partial=True,
+                        **exit_fields,
+                    )
                     # Record stop gate for this side
                     self._stop_gate[leg.opt_type] = {
-                        "exit_px": ltp, "sid": sid, "n_below": 0,
+                        "exit_px": ltp,
+                        "sid": sid,
+                        "n_below": 0,
                     }
                     # leg.lots just changed (halved) — re-check stop-all against the
                     # now-smaller remaining position on the NEXT tick, not this one,
@@ -470,10 +557,14 @@ class DirectionalStrangle(Strategy):
             if ltp >= entry * (1 + self._pct_stop_all):
                 # Record stop gate before closing
                 self._stop_gate[leg.opt_type] = {
-                    "exit_px": ltp, "sid": sid, "n_below": 0,
+                    "exit_px": ltp,
+                    "sid": sid,
+                    "n_below": 0,
                 }
                 await self._close_short_leg(
-                    leg, "premium_stop", event_type=StrangleEventType.STOP_ALL,
+                    leg,
+                    "premium_stop",
+                    event_type=StrangleEventType.STOP_ALL,
                 )
                 await self._close_matching_hedge(leg)
 
@@ -525,8 +616,9 @@ class DirectionalStrangle(Strategy):
             "bucket": self._current_bucket,
             **fields,
         }
-        self.ctx.log.info(event_type, **{k: str(v) if isinstance(v, Decimal) else v
-                                         for k, v in record.items()})
+        self.ctx.log.info(
+            event_type, **{k: str(v) if isinstance(v, Decimal) else v for k, v in record.items()}
+        )
         if self._slog:
             self._slog.write(record)
         self._activity.append(record)
@@ -539,16 +631,18 @@ class DirectionalStrangle(Strategy):
             mtm: float | None = None
             if ltp is not None:
                 mtm = round(_leg_pnl(lg, ltp, lg.lots, self._lot_size), 2)
-            legs.append({
-                "security_id": lg.security_id,
-                "opt_type": lg.opt_type,
-                "strike": lg.strike,
-                "lots": lg.lots,
-                "entry_price": float(lg.entry_price),
-                "ltp": ltp,
-                "mtm": mtm,
-                "is_hedge": lg.is_hedge,
-            })
+            legs.append(
+                {
+                    "security_id": lg.security_id,
+                    "opt_type": lg.opt_type,
+                    "strike": lg.strike,
+                    "lots": lg.lots,
+                    "entry_price": float(lg.entry_price),
+                    "ltp": ltp,
+                    "mtm": mtm,
+                    "is_hedge": lg.is_hedge,
+                }
+            )
         self._emit_event(StrangleEventType.LEG_STATUS, legs=legs)
 
     # ------------------------------------------------------------------ #
@@ -571,8 +665,7 @@ class DirectionalStrangle(Strategy):
         for opt_type, gate in self._stop_gate.items():
             ltp = self._ltp_cache.get(gate["sid"])
             if ltp is None:
-                self._emit_event(StrangleEventType.STOP_GATE_WAIT,
-                    opt_type=opt_type, reason="no_ltp")
+                self._emit_event(StrangleEventType.STOP_GATE_WAIT, opt_type=opt_type, reason="no_ltp")
                 continue
             if ltp < gate["exit_px"]:
                 gate["n_below"] += 1
@@ -581,9 +674,13 @@ class DirectionalStrangle(Strategy):
                     continue
             else:
                 gate["n_below"] = 0
-            self._emit_event(StrangleEventType.STOP_GATE_WAIT,
-                opt_type=opt_type, exit_px=gate["exit_px"], ltp=ltp,
-                n_below=gate["n_below"])
+            self._emit_event(
+                StrangleEventType.STOP_GATE_WAIT,
+                opt_type=opt_type,
+                exit_px=gate["exit_px"],
+                ltp=ltp,
+                n_below=gate["n_below"],
+            )
 
     # ------------------------------------------------------------------ #
     # Bias input assembly                                                  #
@@ -634,40 +731,87 @@ class DirectionalStrangle(Strategy):
     # Leg open — shorts + protective hedges                               #
     # ------------------------------------------------------------------ #
 
+    async def _resolve_current_expiry(self, bar_day: date) -> date | None:
+        """Nearest tradeable expiry for the underlying, resolved once per bar day.
+
+        Uses the same scrip-master lookup the strike resolver uses (never a hardcoded
+        weekday). Cached per day so the DTE gate does not hit the DB on every bar.
+        """
+        if self._expiry_cache is not None and self._expiry_cache[0] == bar_day:
+            return self._expiry_cache[1]
+        expiry: date | None = None
+        if self.ctx.session_maker is not None:
+            async with self.ctx.session_maker() as sess:
+                expiry = await nearest_weekly_expiry(sess, self.underlying)
+        self._expiry_cache = (bar_day, expiry)
+        return expiry
+
+    async def _entry_within_dte(self, bar_day: date) -> bool:
+        """Whether new-leg entry is allowed today under the DTE window.
+
+        Reuses the shared ``within_dte`` helper so live and backtest agree exactly.
+        ``dte_max=None`` disables the filter (always True).
+        """
+        if self._dte_max is None:
+            return True
+        expiry = await self._resolve_current_expiry(bar_day)
+        return within_dte(bar_day, expiry, self._dte_max)
+
     async def _open_bucket(self, spot: float, pe_lots: int, ce_lots: int) -> None:
         if pe_lots > 0:
             await self._open_short(spot, "PE", pe_lots)
         if ce_lots > 0:
             await self._open_short(spot, "CE", ce_lots)
 
-    async def _await_fill_avg_px(self, sid: str) -> Decimal:
-        """Poll get_position until paper broker fills the MARKET order (avg_px > 0).
+    async def _resolve_fill_price(self, sid: str) -> Decimal | None:
+        """Resolve a real fill reference price via four fallback layers.
 
-        With the immediate-fill-from-cache path in PaperBroker this usually resolves
-        on the first poll.  The loop is a fallback for when no cached LTP exists yet.
+        1. Broker avg (from PaperBroker / DhanBroker position)
+        2. In-process LTP cache (updated on every on_tick)
+        3. Market feed ltp_with_age (Redis)
+        4. Last bar close (not implemented here — rare cold-start fallback)
+
+        Returns None only if all four layers are exhausted.
         """
+        # Layer 1: broker avg
         for _ in range(8):
             _, avg_px = await self.ctx.orders.get_position(sid)
             if avg_px and avg_px > 0:
                 return avg_px
             await asyncio.sleep(0.15)
         _, avg_px = await self.ctx.orders.get_position(sid)
-        if avg_px is None or avg_px == Decimal("0"):
-            # Fallback: use last known LTP from on_tick cache so entry_price is
-            # never stored as 0 (which would make every MTM compute as -ltp).
-            ltp = self._ltp_cache.get(sid)
-            if ltp and ltp > 0:
-                self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, ltp=ltp)
-                return Decimal(str(ltp))
-            self.ctx.log.warning("fill_avg_px_zero", sid=sid)
-            return Decimal("0")
-        return avg_px
+        if avg_px and avg_px > 0:
+            return avg_px
+
+        # Layer 2: in-process LTP cache
+        ltp_cached = self._ltp_cache.get(sid)
+        if ltp_cached and ltp_cached > 0:
+            self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, source="ltp_cache", ltp=ltp_cached)
+            return Decimal(str(ltp_cached))
+
+        # Layer 3: market feed Redis
+        if self.ctx.market is not None:
+            ltp_feed, _ = await self.ctx.market.ltp_with_age(sid)
+            if ltp_feed and ltp_feed > 0:
+                self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, source="market_feed", ltp=float(ltp_feed))
+                return Decimal(str(ltp_feed))
+
+        self.ctx.log.warning("fill_avg_px_zero", sid=sid)
+        return None
+
+    async def _await_fill_avg_px(self, sid: str) -> Decimal | None:
+        """Poll broker until filled then fall through to resolve_fill_price.
+
+        Returns a Decimal > 0 on success, or None if all fallback layers are cold.
+        Callers MUST check for None and abort the leg open rather than recording
+        entry_price=0 which would make MTM compute as -ltp×qty.
+        """
+        return await self._resolve_fill_price(sid)
 
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
         # Stop-gate check: block re-entry for 3 bars after a stop on this side
         if opt_type in self._stop_gate:
-            self._emit_event(StrangleEventType.STOP_GATE_WAIT,
-                opt_type=opt_type, reason="open_blocked")
+            self._emit_event(StrangleEventType.STOP_GATE_WAIT, opt_type=opt_type, reason="open_blocked")
             return
 
         if self.ctx.session_maker is None:
@@ -690,31 +834,66 @@ class DirectionalStrangle(Strategy):
         segment = inst.exchange_segment
         strike = float(inst.strike) if inst.strike is not None else 0.0
 
-        await self._subscribe_option(sid, segment)
-        await self._record_day_baseline(sid)
+        # The cap check + order placement run under sid's lock so two concurrent
+        # opens on the same sid (e.g. a rollup racing a bucket-change) can't both
+        # pass the cap check and jointly exceed it — see _reserve_leg_lots.
+        async with self._lock_for(sid):
+            reserved_lots = await self._reserve_leg_lots(sid, opt_type, lots, "short leg")
+            if reserved_lots is None:
+                return
+            lots = reserved_lots
 
-        order = await self._place(sid, segment, "SELL", lots)
-        if order is None or order.status in ("CANCELLED", "REJECTED"):
-            return
+            await self._subscribe_option(sid, segment)
+            await self._record_day_baseline(sid)
 
-        avg_px = await self._await_fill_avg_px(sid)
-        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
-        self._short_legs.append(OpenLeg(
-            security_id=sid, segment=segment, opt_type=opt_type,
-            strike=strike, lots=lots, entry_price=avg_px,
-            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
-            expiry=inst.expiry,
-        ))
-        self._emit_event(StrangleEventType.LEG_OPEN,
-            sid=sid, opt_type=opt_type, strike=strike,
-            lots=lots, entry_price=float(avg_px), is_hedge=False,
-            expiry=inst.expiry.isoformat() if inst.expiry else None)
+            order = await self._place(sid, segment, "SELL", lots)
+            if order is None or order.status in ("CANCELLED", "REJECTED"):
+                return
+
+            avg_px = await self._await_fill_avg_px(sid)
+            if avg_px is None or avg_px <= 0:
+                # Cannot resolve entry price — abort and square the leg.
+                await self.ctx.orders.cancel_open_entry_orders(sid)
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.MISSING_LTP,
+                    sid,
+                    "Entry price unresolved",
+                    f"short leg {sid} aborted: entry price could not be resolved after all fallbacks",
+                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                )
+                return
+            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            leg = OpenLeg(
+                security_id=sid,
+                segment=segment,
+                opt_type=opt_type,
+                strike=strike,
+                lots=lots,
+                entry_price=avg_px,
+                entry_time=datetime.now(tz=_IST),
+                entry_reason=_reason,
+                expiry=inst.expiry,
+            )
+            self._short_legs.append(leg)
+            self._emit_event(
+                StrangleEventType.LEG_OPEN,
+                sid=sid,
+                opt_type=opt_type,
+                strike=strike,
+                lots=lots,
+                entry_price=float(avg_px),
+                is_hedge=False,
+                expiry=inst.expiry.isoformat() if inst.expiry else None,
+            )
 
         if self._hedge_enabled:
-            await self._open_hedge(opt_type, spot, lots, segment)
+            await self._open_hedge(opt_type, spot, lots, segment, short_leg=leg)
 
-    async def _open_hedge(self, opt_type: str, spot: float,
-                          lots: int, segment: str) -> None:
+    async def _open_hedge(
+        self, opt_type: str, spot: float, lots: int, segment: str, short_leg: OpenLeg | None = None
+    ) -> None:
         """Buy cheapest far-OTM wing priced in [hedge_prem_min, hedge_prem_max].
 
         Scans OTM strikes from hedge_scan_start to hedge_scan_end steps out from spot,
@@ -724,57 +903,109 @@ class DirectionalStrangle(Strategy):
         if self.ctx.session_maker is None:
             return
 
-        best_inst = None      # furthest-OTM within band (preferred)
-        cheapest_inst = None  # absolute cheapest (fallback)
-        cheapest_px = float("inf")
+        async def _scan() -> Any | None:
+            best = None
+            cheapest = None
+            cheapest_px = float("inf")
+            for offset in range(self._hedge_scan_start, self._hedge_scan_end + 1):
+                async with self.ctx.session_maker() as session:
+                    inst = await resolve_otm_option(
+                        session,
+                        underlying=self.underlying,
+                        spot=spot,
+                        option_type=opt_type,
+                        otm_steps=offset,
+                        strike_step=self._strike_step,
+                    )
+                if inst is None:
+                    continue
+                h_sid = inst.security_id
+                await self._subscribe_option(h_sid, segment)
+                ltp, _ = await self.ctx.market.ltp_with_age(h_sid) if self.ctx.market else (None, None)
+                if ltp is None or float(ltp) <= 0:
+                    continue
+                px = float(ltp)
+                if px < cheapest_px:
+                    cheapest_px, cheapest = px, inst
+                if self._hedge_prem_min <= px <= self._hedge_prem_max:
+                    best = inst
+            return best or cheapest
 
-        for offset in range(self._hedge_scan_start, self._hedge_scan_end + 1):
-            async with self.ctx.session_maker() as session:
-                inst = await resolve_otm_option(
-                    session, underlying=self.underlying, spot=spot,
-                    option_type=opt_type, otm_steps=offset,
-                    strike_step=self._strike_step,
-                )
-            if inst is None:
-                continue
-            h_sid = inst.security_id
-            await self._subscribe_option(h_sid, segment)
-            ltp, _ = (
-                await self.ctx.market.ltp_with_age(h_sid)
-                if self.ctx.market else (None, None)
-            )
-            if ltp is None or float(ltp) <= 0:
-                continue
-            px = float(ltp)
-            if px < cheapest_px:
-                cheapest_px, cheapest_inst = px, inst
-            if self._hedge_prem_min <= px <= self._hedge_prem_max:
-                best_inst = inst  # keep updating — last hit = furthest-OTM in band
+        target = await _scan()
+        if target is None:
+            await asyncio.sleep(self._hedge_price_wait_s)
+            target = await _scan()
 
-        target = best_inst or cheapest_inst
         if target is None:
             self.ctx.log.warning("hedge_no_instrument", opt_type=opt_type, spot=spot)
+            if short_leg is not None:
+                await self._close_short_leg(
+                    short_leg, "naked_hedge_averted", event_type=StrangleEventType.LEG_CLOSE
+                )
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.NAKED_POSITION,
+                self.sid,
+                "Naked short averted",
+                "hedge unpriced after wait",
+                {"strategy_id": self.strategy_id, "opt_type": opt_type},
+            )
             return
 
         h_sid = target.security_id
-        await self._record_day_baseline(h_sid)
-        order = await self._place(h_sid, segment, "BUY", lots)
-        if order is None or order.status in ("CANCELLED", "REJECTED"):
-            return
 
-        avg_px = await self._await_fill_avg_px(h_sid)
-        h_strike = float(target.strike) if target.strike is not None else 0.0
-        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
-        self._hedge_legs.append(OpenLeg(
-            security_id=h_sid, segment=segment, opt_type=opt_type,
-            strike=h_strike, lots=lots, entry_price=avg_px, is_hedge=True,
-            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
-            expiry=target.expiry,
-        ))
-        self._emit_event(StrangleEventType.LEG_OPEN,
-            sid=h_sid, opt_type=opt_type, strike=h_strike,
-            lots=lots, entry_price=float(avg_px), is_hedge=True,
-            expiry=target.expiry.isoformat() if target.expiry else None)
+        async with self._lock_for(h_sid):
+            reserved_lots = await self._reserve_leg_lots(h_sid, opt_type, lots, "hedge leg")
+            if reserved_lots is None:
+                return
+            lots = reserved_lots
+
+            await self._record_day_baseline(h_sid)
+            order = await self._place(h_sid, segment, "BUY", lots)
+            if order is None or order.status in ("CANCELLED", "REJECTED"):
+                return
+
+            avg_px = await self._await_fill_avg_px(h_sid)
+            if avg_px is None or avg_px <= 0:
+                # Cannot resolve entry price for hedge — abort.
+                await self.ctx.orders.cancel_open_entry_orders(h_sid)
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.MISSING_LTP,
+                    h_sid,
+                    "Hedge entry price unresolved",
+                    f"hedge leg {h_sid} aborted: entry price could not be resolved",
+                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                )
+                return
+            h_strike = float(target.strike) if target.strike is not None else 0.0
+            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            self._hedge_legs.append(
+                OpenLeg(
+                    security_id=h_sid,
+                    segment=segment,
+                    opt_type=opt_type,
+                    strike=h_strike,
+                    lots=lots,
+                    entry_price=avg_px,
+                    is_hedge=True,
+                    entry_time=datetime.now(tz=_IST),
+                    entry_reason=_reason,
+                    expiry=target.expiry,
+                )
+            )
+            self._emit_event(
+                StrangleEventType.LEG_OPEN,
+                sid=h_sid,
+                opt_type=opt_type,
+                strike=h_strike,
+                lots=lots,
+                entry_price=float(avg_px),
+                is_hedge=True,
+                expiry=target.expiry.isoformat() if target.expiry else None,
+            )
 
     # ------------------------------------------------------------------ #
     # Momentum long — ITM+1 on COMPLETE_BULL / COMPLETE_BEAR             #
@@ -787,54 +1018,105 @@ class DirectionalStrangle(Strategy):
         if self.ctx.session_maker is None:
             return
 
-        async with self.ctx.session_maker() as session:
-            # otm_steps=-1 selects the first ITM strike (one step into the money)
-            inst = await resolve_otm_option(
-                session,
-                underlying=self.underlying,
-                spot=spot,
-                option_type=opt_type,
-                otm_steps=-1,
-                strike_step=self._strike_step,
-            )
-        if inst is None:
+        async def _scan() -> tuple[Any, Any]:
+            async with self.ctx.session_maker() as session:
+                # otm_steps=-1 selects the first ITM strike (one step into the money)
+                inst = await resolve_otm_option(
+                    session,
+                    underlying=self.underlying,
+                    spot=spot,
+                    option_type=opt_type,
+                    otm_steps=-1,
+                    strike_step=self._strike_step,
+                )
+            if inst is None:
+                return None, None
+
+            h_sid = inst.security_id
+            await self._subscribe_option(h_sid, inst.exchange_segment)
+            ltp, _ = await self.ctx.market.ltp_with_age(h_sid) if self.ctx.market else (None, None)
+            return inst, ltp
+
+        inst, ltp = await _scan()
+        if inst is not None and (ltp is None or float(ltp) <= 0):
+            await asyncio.sleep(self._hedge_price_wait_s)
+            inst, ltp = await _scan()
+
+        if inst is None or ltp is None or float(ltp) <= 0:
             self.ctx.log.warning("momentum_no_instrument", opt_type=opt_type, spot=spot)
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.NAKED_POSITION,
+                self.sid,
+                "Momentum unpriced",
+                "momentum unpriced after wait",
+                {"strategy_id": self.strategy_id, "opt_type": opt_type},
+            )
             return
 
         sid = inst.security_id
         segment = inst.exchange_segment
         strike = float(inst.strike) if inst.strike is not None else 0.0
 
-        await self._subscribe_option(sid, segment)
+        premium = float(ltp)
+        lots = max(1, round(self._momentum_premium_target / (premium * self._lot_size))) if premium > 0 else 1
 
-        ltp, _ = (
-            await self.ctx.market.ltp_with_age(sid)
-            if self.ctx.market else (None, None)
-        )
-        premium = float(ltp) if ltp and ltp > 0 else 0.0
-        lots = (
-            max(1, round(self._momentum_premium_target / (premium * self._lot_size)))
-            if premium > 0 else 1
-        )
+        async with self._lock_for(sid):
+            # NOTE: _max_leg_lots() is derived from the ratio table (short/hedge
+            # sizing), not momentum's premium-target formula — it's used here purely
+            # as a safety backstop against unbounded growth, not a tuned momentum
+            # ceiling. momentum_enabled is False in every live config today.
+            reserved_lots = await self._reserve_leg_lots(sid, opt_type, lots, "momentum leg")
+            if reserved_lots is None:
+                return
+            lots = reserved_lots
 
-        await self._record_day_baseline(sid)
-        order = await self._place(sid, segment, "BUY", lots)
-        if order is None or order.status in ("CANCELLED", "REJECTED"):
-            return
+            await self._record_day_baseline(sid)
+            order = await self._place(sid, segment, "BUY", lots)
+            if order is None or order.status in ("CANCELLED", "REJECTED"):
+                return
 
-        avg_px = await self._await_fill_avg_px(sid)
-        _reason = f"{self._current_bucket}@{self._last_score:.2f}"
-        self._momentum_legs.append(OpenLeg(
-            security_id=sid, segment=segment, opt_type=opt_type,
-            strike=strike, lots=lots, entry_price=avg_px, is_momentum=True,
-            entry_time=datetime.now(tz=_IST), entry_reason=_reason,
-            expiry=inst.expiry,
-        ))
-        self._emit_event(StrangleEventType.LEG_OPEN,
-            sid=sid, opt_type=opt_type, strike=strike,
-            lots=lots, entry_price=float(avg_px), is_momentum=True,
-            premium=premium, target=self._momentum_premium_target,
-            expiry=inst.expiry.isoformat() if inst.expiry else None)
+            avg_px = await self._await_fill_avg_px(sid)
+            if avg_px is None or avg_px <= 0:
+                await self.ctx.orders.cancel_open_entry_orders(sid)
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.MISSING_LTP,
+                    sid,
+                    "Momentum entry price unresolved",
+                    f"momentum leg {sid} aborted: entry price could not be resolved",
+                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                )
+                return
+            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            self._momentum_legs.append(
+                OpenLeg(
+                    security_id=sid,
+                    segment=segment,
+                    opt_type=opt_type,
+                    strike=strike,
+                    lots=lots,
+                    entry_price=avg_px,
+                    is_momentum=True,
+                    entry_time=datetime.now(tz=_IST),
+                    entry_reason=_reason,
+                    expiry=inst.expiry,
+                )
+            )
+            self._emit_event(
+                StrangleEventType.LEG_OPEN,
+                sid=sid,
+                opt_type=opt_type,
+                strike=strike,
+                lots=lots,
+                entry_price=float(avg_px),
+                is_momentum=True,
+                premium=premium,
+                target=self._momentum_premium_target,
+                expiry=inst.expiry.isoformat() if inst.expiry else None,
+            )
 
     async def _maybe_close_momentum(self, score: float) -> None:
         """Close all momentum longs when |score| falls below threshold."""
@@ -843,21 +1125,54 @@ class DirectionalStrangle(Strategy):
         if abs(score) < self._momentum_score_threshold:
             for leg in list(self._momentum_legs):
                 await self._close_momentum_leg(leg, "score_exit")
-            self._momentum_legs.clear()
 
     async def _close_momentum_leg(self, leg: OpenLeg, reason: str) -> None:
+        ltp = self._ltp_cache.get(leg.security_id)
+        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.CLOSE_UNPRICED,
+                leg.security_id,
+                "Close rejected",
+                f"Momentum leg unpriced (LTP {ltp}) on close attempt",
+                {"strategy_id": self.strategy_id, "reason": reason},
+            )
+            return
+
         await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
         net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
         if net_qty == 0:
+            self._momentum_legs = [l for l in self._momentum_legs if l is not leg]
             return
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
-            await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+            # Same direction-correctness guard as _close_short_leg/_close_hedge_leg:
+            # derive the side from the actual net_qty sign, not from "this is the
+            # momentum list" — protects against a misclassified rehydrated leg.
+            if net_qty < 0:
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.POSITION_SIZE_CAPPED,
+                    leg.security_id,
+                    "Leg direction mismatch on close",
+                    f"Leg {leg.security_id} tracked as momentum(long) but broker net_qty is {net_qty} "
+                    "(short) — closing with BUY instead of SELL to avoid growing the position",
+                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
+                )
+            side = "BUY" if net_qty < 0 else "SELL"
+            await self._place(leg.security_id, leg.segment, side, sell_lots)
         exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(StrangleEventType.LEG_CLOSE,
-            sid=leg.security_id, reason=reason, is_momentum=True,
-            **self._leg_exit_fields(leg, exit_px, reason))
+        self._emit_event(
+            StrangleEventType.LEG_CLOSE,
+            sid=leg.security_id,
+            reason=reason,
+            is_momentum=True,
+            **self._leg_exit_fields(leg, exit_px, reason),
+        )
+        self._momentum_legs = [l for l in self._momentum_legs if l is not leg]
 
     # ------------------------------------------------------------------ #
     # Rollup                                                               #
@@ -876,44 +1191,68 @@ class DirectionalStrangle(Strategy):
 
             spot = self._last_spot
             if spot is None or self.ctx.session_maker is None:
-                self._emit_event(StrangleEventType.ROLLED,
-                    opt_type=old_opt_type, old_strike=old_strike,
-                    old_ltp=round(old_ltp, 2), lots=old_lots, result="skipped_no_spot")
+                self._emit_event(
+                    StrangleEventType.ROLLED,
+                    opt_type=old_opt_type,
+                    old_strike=old_strike,
+                    old_ltp=round(old_ltp, 2),
+                    lots=old_lots,
+                    result="skipped_no_spot",
+                )
                 return
 
             # Check if the new OTM strike has sufficient premium before opening
             async with self.ctx.session_maker() as session:
                 new_inst = await resolve_otm_option(
-                    session, underlying=self.underlying, spot=spot,
-                    option_type=old_opt_type, otm_steps=self._otm_steps,
+                    session,
+                    underlying=self.underlying,
+                    spot=spot,
+                    option_type=old_opt_type,
+                    otm_steps=self._otm_steps,
                     strike_step=self._strike_step,
                 )
             if new_inst is None:
-                self._emit_event(StrangleEventType.ROLLED,
-                    opt_type=old_opt_type, old_strike=old_strike,
-                    old_ltp=round(old_ltp, 2), lots=old_lots, result="no_instrument")
+                self._emit_event(
+                    StrangleEventType.ROLLED,
+                    opt_type=old_opt_type,
+                    old_strike=old_strike,
+                    old_ltp=round(old_ltp, 2),
+                    lots=old_lots,
+                    result="no_instrument",
+                )
                 return
 
             ltp, _ = (
-                await self.ctx.market.ltp_with_age(new_inst.security_id)
-                if self.ctx.market else (None, None)
+                await self.ctx.market.ltp_with_age(new_inst.security_id) if self.ctx.market else (None, None)
             )
             new_ltp = float(ltp) if ltp and ltp > 0 else 0.0
             new_strike = float(new_inst.strike or 0)
 
             if new_ltp < self._roll_target_min_prem:
-                self._emit_event(StrangleEventType.ROLLED,
-                    opt_type=old_opt_type, old_strike=old_strike, old_ltp=round(old_ltp, 2),
-                    new_strike=new_strike, new_ltp=round(new_ltp, 2),
-                    lots=old_lots, result="skipped_low_prem")
+                self._emit_event(
+                    StrangleEventType.ROLLED,
+                    opt_type=old_opt_type,
+                    old_strike=old_strike,
+                    old_ltp=round(old_ltp, 2),
+                    new_strike=new_strike,
+                    new_ltp=round(new_ltp, 2),
+                    lots=old_lots,
+                    result="skipped_low_prem",
+                )
                 return
 
             # Open the new short (stop-gate check is inside _open_short)
             await self._open_short(spot, old_opt_type, old_lots)
-            self._emit_event(StrangleEventType.ROLLED,
-                opt_type=old_opt_type, old_strike=old_strike, old_ltp=round(old_ltp, 2),
-                new_strike=new_strike, new_ltp=round(new_ltp, 2),
-                lots=old_lots, result="ok")
+            self._emit_event(
+                StrangleEventType.ROLLED,
+                opt_type=old_opt_type,
+                old_strike=old_strike,
+                old_ltp=round(old_ltp, 2),
+                new_strike=new_strike,
+                new_ltp=round(new_ltp, 2),
+                lots=old_lots,
+                result="ok",
+            )
         finally:
             self._rolling.discard(sid)
 
@@ -922,7 +1261,12 @@ class DirectionalStrangle(Strategy):
     # ------------------------------------------------------------------ #
 
     def _leg_exit_fields(
-        self, leg: OpenLeg, exit_px: float, reason: str, *, close_lots: int | None = None,
+        self,
+        leg: OpenLeg,
+        exit_px: float,
+        reason: str,
+        *,
+        close_lots: int | None = None,
     ) -> dict[str, Any]:
         """Full round-trip economics for a terminal (or partial) leg close.
 
@@ -958,15 +1302,17 @@ class DirectionalStrangle(Strategy):
         (`on_bar`) emits the single day summary event (SQUARE_OFF/DAY_LOSS_CAP)
         with the day's final realized total, whether or not any legs were open.
         """
+        # Each _close_*_leg call prunes itself from its list on a successful
+        # close. A leg that is rejected (e.g. unpriced LTP) deliberately stays
+        # in its list so the next bar retries it — do NOT blanket-clear here,
+        # or a rejected close silently orphans the underlying broker position
+        # (still open in Postgres) while the strategy forgets it ever existed.
         for leg in list(self._short_legs):
             await self._close_short_leg(leg, reason)
         for leg in list(self._hedge_legs):
             await self._close_hedge_leg(leg, reason)
         for leg in list(self._momentum_legs):
             await self._close_momentum_leg(leg, reason)
-        self._short_legs.clear()
-        self._hedge_legs.clear()
-        self._momentum_legs.clear()
         self._current_bucket = None
         self._stop_gate.clear()
 
@@ -975,12 +1321,14 @@ class DirectionalStrangle(Strategy):
             await self._close_short_leg(leg, reason)
         for leg in list(self._hedge_legs):
             await self._close_hedge_leg(leg, reason)
-        self._short_legs.clear()
-        self._hedge_legs.clear()
         self._current_bucket = None
 
     async def _close_short_leg(
-        self, leg: OpenLeg, reason: str, *, event_type: str = StrangleEventType.LEG_CLOSE,
+        self,
+        leg: OpenLeg,
+        reason: str,
+        *,
+        event_type: str = StrangleEventType.LEG_CLOSE,
     ) -> None:
         """Close a short leg and emit exactly one terminal event for it.
 
@@ -988,6 +1336,19 @@ class DirectionalStrangle(Strategy):
         (TAKE_PROFIT/STOP_ALL) instead of the generic LEG_CLOSE — callers must
         NOT also emit their own terminal event, or the ledger double-counts.
         """
+        ltp = self._ltp_cache.get(leg.security_id)
+        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.CLOSE_UNPRICED,
+                leg.security_id,
+                "Close rejected",
+                f"Short leg unpriced (LTP {ltp}) on close attempt",
+                {"strategy_id": self.strategy_id, "reason": reason},
+            )
+            return
+
         await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
         net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
         if net_qty == 0:
@@ -995,19 +1356,55 @@ class DirectionalStrangle(Strategy):
             return
         close_lots = abs(net_qty) // self._lot_size
         if close_lots > 0:
-            await self._place(leg.security_id, leg.segment, "BUY", close_lots)
+            # Derive the closing side from the ACTUAL broker position sign, not
+            # from "this is the short-leg list" — a rehydrated leg can be
+            # misclassified (see _rehydrate_legs), and blindly placing BUY here
+            # against an already-long position would GROW it instead of
+            # flattening it. net_qty<0 is the expected short case; net_qty>0
+            # means this leg is not really short and we alert instead of
+            # compounding the position.
+            if net_qty > 0:
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.POSITION_SIZE_CAPPED,
+                    leg.security_id,
+                    "Leg direction mismatch on close",
+                    f"Leg {leg.security_id} tracked as short but broker net_qty is +{net_qty} "
+                    "(long) — closing with SELL instead of BUY to avoid growing the position",
+                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
+                )
+            side = "SELL" if net_qty > 0 else "BUY"
+            await self._place(leg.security_id, leg.segment, side, close_lots)
         exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(event_type,
-            sid=leg.security_id, reason=reason,
-            **self._leg_exit_fields(leg, exit_px, reason))
+        self._emit_event(
+            event_type, sid=leg.security_id, reason=reason, **self._leg_exit_fields(leg, exit_px, reason)
+        )
         self._short_legs = [l for l in self._short_legs if l is not leg]
 
     async def _close_hedge_leg(
-        self, leg: OpenLeg, reason: str, *, event_type: str = StrangleEventType.LEG_CLOSE,
+        self,
+        leg: OpenLeg,
+        reason: str,
+        *,
+        event_type: str = StrangleEventType.LEG_CLOSE,
     ) -> None:
         """Close a hedge leg and emit exactly one terminal event for it (see
         `_close_short_leg` docstring for the `event_type` contract)."""
+        ltp = self._ltp_cache.get(leg.security_id)
+        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.CLOSE_UNPRICED,
+                leg.security_id,
+                "Close rejected",
+                f"Hedge leg unpriced (LTP {ltp}) on close attempt",
+                {"strategy_id": self.strategy_id, "reason": reason},
+            )
+            return
+
         await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
         net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
         if net_qty == 0:
@@ -1015,12 +1412,27 @@ class DirectionalStrangle(Strategy):
             return
         sell_lots = abs(net_qty) // self._lot_size
         if sell_lots > 0:
-            await self._place(leg.security_id, leg.segment, "SELL", sell_lots)
+            # Same direction-correctness guard as _close_short_leg: derive the
+            # side from the actual net_qty sign, not from "this is the hedge
+            # list" — protects against a misclassified rehydrated leg.
+            if net_qty < 0:
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.POSITION_SIZE_CAPPED,
+                    leg.security_id,
+                    "Leg direction mismatch on close",
+                    f"Leg {leg.security_id} tracked as hedge but broker net_qty is {net_qty} "
+                    "(short) — closing with BUY instead of SELL to avoid growing the position",
+                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
+                )
+            side = "BUY" if net_qty < 0 else "SELL"
+            await self._place(leg.security_id, leg.segment, side, sell_lots)
         exit_px = self._ltp_cache.get(leg.security_id) or 0.0
         await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(event_type,
-            sid=leg.security_id, reason=reason,
-            **self._leg_exit_fields(leg, exit_px, reason))
+        self._emit_event(
+            event_type, sid=leg.security_id, reason=reason, **self._leg_exit_fields(leg, exit_px, reason)
+        )
         self._hedge_legs = [l for l in self._hedge_legs if l is not leg]
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
@@ -1042,19 +1454,27 @@ class DirectionalStrangle(Strategy):
             mtm: float | None = None
             if ltp is not None:
                 mtm = round(_leg_pnl(lg, ltp, lg.lots, self._lot_size), 2)
-            legs.append({
-                "security_id": lg.security_id,
-                "opt_type": lg.opt_type,
-                "strike": lg.strike,
-                "lots": lg.lots,
-                "entry_price": float(lg.entry_price),
-                "entry_time": lg.entry_time.isoformat() if lg.entry_time else None,
-                "entry_reason": lg.entry_reason,
-                "ltp": ltp,
-                "mtm": mtm,
-                "is_hedge": lg.is_hedge,
-                "is_momentum": lg.is_momentum,
-            })
+            legs.append(
+                {
+                    "security_id": lg.security_id,
+                    "opt_type": lg.opt_type,
+                    "strike": lg.strike,
+                    "lots": lg.lots,
+                    "entry_price": float(lg.entry_price),
+                    "entry_time": lg.entry_time.isoformat() if lg.entry_time else None,
+                    "entry_reason": lg.entry_reason,
+                    "ltp": ltp,
+                    "mtm": mtm,
+                    "day_high": lg.day_high,
+                    "day_low": lg.day_low,
+                    "is_hedge": lg.is_hedge,
+                    "is_momentum": lg.is_momentum,
+                    # Origin tag so the console can separate system-placed legs from
+                    # manual broker positions (future: group-by-broker). All strategy
+                    # legs are system-originated.
+                    "origin": "system",
+                }
+            )
         day_realized_f = float(day_realized)
         return {
             "mode": self._mode,
@@ -1106,9 +1526,11 @@ class DirectionalStrangle(Strategy):
             self._halt_checked = False
             self._orb_high = None
             self._orb_low = None
+            self._orb_unseeded = False
             self._vix_day_open = None
             self._vix_day_high = None
             self._vix_recent.clear()
+            self._vix_spike_emitted = False
             self._day_baseline.clear()
             self._touched_sids.clear()
             self._stop_gate.clear()
@@ -1152,6 +1574,78 @@ class DirectionalStrangle(Strategy):
         pe, ce = self._ratio_table.get(bucket, (1, 1))
         return pe * self._scale_lots, ce * self._scale_lots
 
+    def _max_leg_lots(self) -> int:
+        """Largest lots a single fresh entry could ever request, per config.
+
+        Used as a hard per-sid position-size ceiling — see `_reserve_leg_lots`.
+        """
+        if not self._ratio_table:
+            return self._scale_lots
+        widest = max((max(pe, ce) for pe, ce in self._ratio_table.values()), default=1)
+        return widest * self._scale_lots
+
+    def _lock_for(self, sid: str) -> asyncio.Lock:
+        """Per-sid lock guarding the cap-check-then-place sequence in
+        _open_short/_open_hedge/_open_momentum, so two concurrent opens on the
+        same sid can't both pass `_reserve_leg_lots` and jointly exceed the cap."""
+        lock = self._leg_locks.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._leg_locks[sid] = lock
+        return lock
+
+    async def _reserve_leg_lots(self, sid: str, opt_type: str, lots: int, leg_kind: str) -> int | None:
+        """Cap check for a fresh leg open on `sid` — caller MUST hold `_lock_for(sid)`
+        across this call *and* the subsequent order placement (see call sites).
+
+        A single sid must never exceed `_max_leg_lots()`. Without this, a stale or
+        duplicated in-memory leg feeding a rollup (or any other unforeseen path that
+        re-adds to an already-open sid) can silently compound a position across
+        days/rolls instead of failing loud — this is exactly how a handful of legs
+        grew to hundreds of lots in production before this guard existed.
+
+        Returns the (possibly clipped) lots to open, or None if the cap already
+        refuses any further addition — the caller must abort without opening.
+        """
+        existing_lots = abs(await self.ctx.orders.get_net_qty(sid)) // self._lot_size
+        max_lots = self._max_leg_lots()
+        if existing_lots >= max_lots:
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.POSITION_SIZE_CAPPED,
+                sid,
+                "Position size capped",
+                f"{leg_kind} {sid} already at {existing_lots} lots (cap {max_lots}); refused to add {lots} more",
+                {
+                    "strategy_id": self.strategy_id,
+                    "opt_type": opt_type,
+                    "existing_lots": existing_lots,
+                    "requested_lots": lots,
+                    "cap": max_lots,
+                },
+            )
+            return None
+        if existing_lots + lots > max_lots:
+            capped_lots = max_lots - existing_lots
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.POSITION_SIZE_CAPPED,
+                sid,
+                "Position size capped",
+                f"{leg_kind} {sid} would grow to {existing_lots + lots} lots (cap {max_lots}); clipped to {capped_lots}",
+                {
+                    "strategy_id": self.strategy_id,
+                    "opt_type": opt_type,
+                    "existing_lots": existing_lots,
+                    "requested_lots": lots,
+                    "cap": max_lots,
+                },
+            )
+            return capped_lots
+        return lots
+
     async def _subscribe_option(self, sid: str, segment: str) -> None:
         if self.ctx.market is not None and sid not in self._subscribed_option_sids:
             if await self.ctx.market.subscribe(sid, segment):
@@ -1167,7 +1661,9 @@ class DirectionalStrangle(Strategy):
         if self.ctx.session_maker is None:
             return None
         from decimal import Decimal as D
+
         from sqlalchemy import select
+
         from pdp.instruments.models import Instrument
 
         async with self.ctx.session_maker() as sess:
@@ -1175,12 +1671,14 @@ class DirectionalStrangle(Strategy):
             if expiry is None:
                 return None
             result = await sess.execute(
-                select(Instrument).where(
+                select(Instrument)
+                .where(
                     Instrument.underlying == self.underlying,
                     Instrument.expiry == expiry,
                     Instrument.option_type == opt_type.upper(),
                     Instrument.strike == D(str(strike)),
-                ).limit(1)
+                )
+                .limit(1)
             )
             return result.scalar_one_or_none()
 
@@ -1197,6 +1695,222 @@ class DirectionalStrangle(Strategy):
             )
         except Exception as exc:
             self.ctx.log.warning(
-                "order_rejected", security_id=security_id, side=side, qty=qty, exc=str(exc),
+                "order_rejected",
+                security_id=security_id,
+                side=side,
+                qty=qty,
+                exc=str(exc),
             )
             return None
+
+    # ------------------------------------------------------------------ #
+    # Startup repair + rehydration                                         #
+    # ------------------------------------------------------------------ #
+
+    async def _repair_zero_avg_positions(self) -> None:
+        """One-off startup repair: re-base any open PG positions with avg_price == 0.
+
+        A zero avg_price causes every MTM computation to produce a phantom loss
+        (-ltp × qty). On startup we detect these rows and attempt to set avg_price
+        from the LTP cache (or market feed) so real-time P&L is correct going forward.
+        """
+        if self.ctx.session_maker is None:
+            return
+        try:
+            from decimal import Decimal as D
+
+            from sqlalchemy import select, update
+
+            from pdp.orders.models import Position
+
+            async with self.ctx.session_maker() as session:
+                async with session.begin():
+                    result = await session.scalars(
+                        select(Position).where(
+                            Position.strategy_id == self.strategy_id,
+                            Position.net_qty != 0,
+                            Position.avg_price == D("0"),
+                        )
+                    )
+                    zero_rows = result.all()
+
+            repaired = 0
+            for pos in zero_rows:
+                sid = pos.security_id
+                # Try LTP cache first, then market feed
+                ref_price: float | None = self._ltp_cache.get(sid)
+                if not ref_price and self.ctx.market is not None:
+                    ltp_dec, _ = await self.ctx.market.ltp_with_age(sid)
+                    if ltp_dec and ltp_dec > 0:
+                        ref_price = float(ltp_dec)
+                if ref_price and ref_price > 0:
+                    async with self.ctx.session_maker() as session:
+                        async with session.begin():
+                            await session.execute(
+                                update(Position)
+                                .where(
+                                    Position.strategy_id == self.strategy_id,
+                                    Position.security_id == sid,
+                                    Position.avg_price == D("0"),
+                                )
+                                .values(avg_price=D(str(ref_price)))
+                            )
+                    repaired += 1
+                    self.ctx.log.info("zero_avg_repaired", sid=sid, new_avg=ref_price)
+                else:
+                    self.ctx.log.warning("zero_avg_repair_no_ltp", sid=sid)
+            if zero_rows:
+                self.ctx.log.info(
+                    "zero_avg_repair_done",
+                    found=len(zero_rows),
+                    repaired=repaired,
+                    strategy_id=self.strategy_id,
+                )
+        except Exception as exc:
+            self.ctx.log.warning("zero_avg_repair_failed", exc=str(exc))
+
+    async def _rehydrate_legs(self) -> None:
+        """Rebuild open-leg lists from PG positions + last leg_open Mongo events.
+
+        Called once on startup. Idempotent: if lists are already populated (hot
+        reload scenario), does nothing. Skips positions with net_qty == 0.
+
+        Reconstructs entry_price, lots, strike, opt_type, is_hedge, is_momentum,
+        and expiry from the durable store so the execution console survives restarts.
+        """
+        if self._short_legs or self._hedge_legs or self._momentum_legs:
+            # Already populated — skip (idempotent guard)
+            return
+        if self.ctx.session_maker is None:
+            return
+        try:
+            from decimal import Decimal as D
+
+            from sqlalchemy import select
+
+            from pdp.instruments.models import Instrument
+            from pdp.orders.models import Position
+
+            async with self.ctx.session_maker() as session:
+                result = await session.scalars(
+                    select(Position).where(
+                        Position.strategy_id == self.strategy_id,
+                        Position.net_qty != 0,
+                    )
+                )
+                open_positions = result.all()
+
+            if not open_positions:
+                return
+
+            # Build a set of sids we need to look up leg_open events for
+            open_sids = {p.security_id for p in open_positions}
+
+            # Try to read leg_open events from Mongo for classification
+            leg_open_by_sid: dict[str, dict] = {}
+            try:
+                from pdp.mongo.collections import get_events_collection
+
+                if hasattr(self.ctx, "_mongo_db") and self.ctx._mongo_db is not None:  # type: ignore[attr-defined]
+                    col = get_events_collection(self.ctx._mongo_db)  # type: ignore[attr-defined]
+                    cursor = col.find(
+                        {
+                            "event_type": "leg_open",
+                            "strategy_id": self.strategy_id,
+                            "sid": {"$in": list(open_sids)},
+                        },
+                        sort=[("ts", -1)],
+                    )
+                    async for doc in cursor:
+                        sid = doc.get("sid", "")
+                        if sid and sid not in leg_open_by_sid:
+                            leg_open_by_sid[sid] = doc
+            except Exception as exc:
+                self.ctx.log.warning("rehydrate_mongo_read_failed", exc=str(exc))
+
+            # Instrument rows are the authoritative source for strike/opt_type/expiry
+            # (never TTL-purged, unlike Mongo leg_open events) — used as a fallback
+            # whenever the event lookup above came up empty for a sid.
+            inst_by_sid: dict[str, Instrument] = {}
+            missing_sids = open_sids - set(leg_open_by_sid)
+            if missing_sids:
+                async with self.ctx.session_maker() as session:
+                    inst_result = await session.scalars(
+                        select(Instrument).where(Instrument.security_id.in_(missing_sids))
+                    )
+                    for inst in inst_result.all():
+                        inst_by_sid[inst.security_id] = inst
+
+            # Reconstruct OpenLeg for each open PG position
+            rehydrated = 0
+            for pos in open_positions:
+                sid = pos.security_id
+                evt = leg_open_by_sid.get(sid, {})
+                inst = inst_by_sid.get(sid)
+
+                is_hedge = bool(evt.get("is_hedge", False))
+                is_momentum = bool(evt.get("is_momentum", False))
+                opt_type = str(evt.get("opt_type") or (inst.option_type if inst else None) or "PE")
+                strike = float(evt.get("strike") or (inst.strike if inst else None) or 0.0)
+                lots = abs(pos.net_qty) // self._lot_size or 1
+                entry_price = pos.avg_price if pos.avg_price and pos.avg_price > D("0") else D("0")
+                entry_time_raw = evt.get("entry_time")
+                try:
+                    entry_time = (
+                        datetime.fromisoformat(str(entry_time_raw)).astimezone(_IST)
+                        if entry_time_raw
+                        else None
+                    )
+                except (ValueError, TypeError):
+                    entry_time = None
+                expiry_raw = evt.get("expiry")
+                try:
+                    from datetime import date as date_type
+
+                    expiry = date_type.fromisoformat(str(expiry_raw)) if expiry_raw else None
+                except (ValueError, TypeError):
+                    expiry = None
+                if expiry is None and inst is not None:
+                    expiry = inst.expiry
+
+                # Subscribe the market feed so on_tick gets LTPs for these legs
+                await self._subscribe_option(sid, pos.exchange_segment)
+
+                leg = OpenLeg(
+                    security_id=sid,
+                    segment=pos.exchange_segment,
+                    opt_type=opt_type,
+                    strike=strike,
+                    lots=lots,
+                    entry_price=entry_price,
+                    is_hedge=is_hedge,
+                    is_momentum=is_momentum,
+                    entry_time=entry_time,
+                    entry_reason=str(evt.get("entry_reason", "rehydrated")),
+                    expiry=expiry,
+                )
+
+                if is_momentum:
+                    self._momentum_legs.append(leg)
+                elif is_hedge:
+                    self._hedge_legs.append(leg)
+                else:
+                    self._short_legs.append(leg)
+                # Baseline against the position's realized_pnl AT rehydrate time —
+                # without this, _day_realized() has no baseline for this sid and
+                # counts the leg's entire historical realized P&L as if it all
+                # happened today (phantom day P&L on every restart).
+                await self._record_day_baseline(sid)
+                rehydrated += 1
+
+            self.ctx.log.info(
+                "rehydrate_legs_done",
+                rehydrated=rehydrated,
+                short=len(self._short_legs),
+                hedge=len(self._hedge_legs),
+                momentum=len(self._momentum_legs),
+                strategy_id=self.strategy_id,
+            )
+        except Exception as exc:
+            self.ctx.log.warning("rehydrate_legs_failed", exc=str(exc))
+

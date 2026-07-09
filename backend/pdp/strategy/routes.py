@@ -6,13 +6,27 @@ from typing import Any
 
 import msgspec
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
+from pdp.deps import parse_ist_date, require_auth
 from pdp.strategy import unified_registry
 from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost
-from pdp.strategy.schemas import strategy_info_from_dict
+from pdp.strategy.schemas import (
+    strategy_info_from_dict,
+    StrategyListOut,
+    StrategyRegisterOut,
+    StrategyActionOut,
+    StrangleStatusOut,
+    StrangleLegsOut,
+    StrangleActivityOut,
+    StrangleStatsOut,
+    StranglePnlOut,
+    StrangleTradesOut,
+    StrangleMonitorOut,
+    LevelsResponseOut,
+)
 
 log = structlog.get_logger()
 
@@ -43,6 +57,7 @@ def _serialise(obj: Any) -> Any:
         return [_serialise(v) for v in obj]
     try:
         from decimal import Decimal
+
         if isinstance(obj, Decimal):
             return float(obj)
     except ImportError:
@@ -52,8 +67,8 @@ def _serialise(obj: Any) -> Any:
     return obj
 
 
-@router.get("")
-async def list_strategies(request: Request) -> JSONResponse:
+@router.get("", response_model=StrategyListOut)
+async def list_strategies(request: Request) -> StrategyListOut:
     """List every registered strategy — live-host state merged with the unified registry.
 
     Each entry carries the canonical id, engine/kind, underlying, and editable param schema
@@ -66,18 +81,20 @@ async def list_strategies(request: Request) -> JSONResponse:
     strategies: list[dict[str, Any]] = []
     for entry in unified_registry.load_all(strategies_dir=host.strategies_dir):
         live = live_by_id.get(entry.id)
-        strategies.append({
-            "id": entry.id,
-            "kind": entry.kind,
-            "underlying": entry.underlying,
-            "source": entry.source,
-            "status": str(live["status"]) if live else "BACKTEST_ONLY",
-            "dropped_ticks": live["dropped_ticks"] if live else 0,
-            "watchlist": live["watchlist"] if live else [],
-            "params_schema": [dataclasses.asdict(p) for p in entry.params_schema],
-            "defaults": entry.defaults,
-        })
-    return JSONResponse(content={"strategies": strategies})
+        strategies.append(
+            {
+                "id": entry.id,
+                "kind": entry.kind,
+                "underlying": entry.underlying,
+                "source": entry.source,
+                "status": str(live["status"]) if live else "BACKTEST_ONLY",
+                "dropped_ticks": live["dropped_ticks"] if live else 0,
+                "watchlist": live["watchlist"] if live else [],
+                "params_schema": [dataclasses.asdict(p) for p in entry.params_schema],
+                "defaults": entry.defaults,
+            }
+        )
+    return StrategyListOut(strategies=strategies)
 
 
 class RegisterStrategyRequest(BaseModel):
@@ -86,8 +103,8 @@ class RegisterStrategyRequest(BaseModel):
     params: dict[str, Any]
 
 
-@router.post("/register")
-async def register_strategy(body: RegisterStrategyRequest) -> JSONResponse:
+@router.post("/register", response_model=StrategyRegisterOut, status_code=201, dependencies=[Depends(require_auth)])
+async def register_strategy(body: RegisterStrategyRequest) -> StrategyRegisterOut:
     """Register a new strategy config, immediately visible in `GET /api/v1/strategies` and
     usable as a `POST /api/v1/strangle-backtests/runs` launch target — no code change needed.
     """
@@ -98,18 +115,18 @@ async def register_strategy(body: RegisterStrategyRequest) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return JSONResponse(status_code=201, content={
-        "id": entry.id,
-        "kind": entry.kind,
-        "underlying": entry.underlying,
-        "source": entry.source,
-        "params_schema": [dataclasses.asdict(p) for p in entry.params_schema],
-        "defaults": entry.defaults,
-    })
+    return StrategyRegisterOut(
+        id=entry.id,
+        kind=entry.kind,
+        underlying=entry.underlying,
+        source=entry.source,
+        params_schema=[dataclasses.asdict(p) for p in entry.params_schema],
+        defaults=entry.defaults,
+    )
 
 
-@router.post("/{strategy_id}/start")
-async def start_strategy(strategy_id: str, request: Request) -> JSONResponse:
+@router.post("/{strategy_id}/start", response_model=StrategyActionOut, dependencies=[Depends(require_auth)])
+async def start_strategy(strategy_id: str, request: Request) -> StrategyActionOut:
     host = _host(request)
     try:
         await host.start(strategy_id)
@@ -121,27 +138,29 @@ async def start_strategy(strategy_id: str, request: Request) -> JSONResponse:
     items = [d for d in host.list_all() if d["id"] == strategy_id]
     if items:
         info = strategy_info_from_dict(items[0])
-        return JSONResponse(content=msgspec.to_builtins(info))
-    return JSONResponse(content={"id": strategy_id, "status": "RUNNING"})
+        return StrategyActionOut(**msgspec.to_builtins(info))
+    return StrategyActionOut(id=strategy_id, status="RUNNING")
 
 
-@router.post("/{strategy_id}/stop")
-async def stop_strategy(strategy_id: str, request: Request) -> JSONResponse:
+@router.post("/{strategy_id}/stop", response_model=StrategyActionOut, dependencies=[Depends(require_auth)])
+async def stop_strategy(strategy_id: str, request: Request) -> StrategyActionOut:
     host = _host(request)
     try:
         await host.stop(strategy_id)
     except NotRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    return JSONResponse(content={"id": strategy_id, "status": "STOPPED"})
+    return StrategyActionOut(id=strategy_id, status="STOPPED")
 
 
 # ------------------------------------------------------------------ #
 # Strangle execution console — read-only API                          #
 # ------------------------------------------------------------------ #
 
+
 def _get_strangle(request: Request, strategy_id: str | None = None):
     from pdp.strategies.directional_strangle import DirectionalStrangle
+
     host: StrategyHost = request.app.state.strategy_host
     for sid, state in host._running.items():
         if isinstance(state.instance, DirectionalStrangle):
@@ -149,69 +168,76 @@ def _get_strangle(request: Request, strategy_id: str | None = None):
                 return state.instance
     detail = (
         f"DirectionalStrangle '{strategy_id}' not running"
-        if strategy_id else "DirectionalStrangle not running"
+        if strategy_id
+        else "DirectionalStrangle not running"
     )
     raise HTTPException(status_code=404, detail=detail)
 
 
-@strangle_router.get("/status")
+@strangle_router.get("/status", response_model=StrangleStatusOut)
 async def strangle_status(
     request: Request,
     strategy_id: str | None = Query(default=None),
-) -> JSONResponse:
+) -> StrangleStatusOut:
     strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
-    return JSONResponse(content=data)
+    return StrangleStatusOut(**data)
 
 
-@strangle_router.get("/legs")
+@strangle_router.get("/legs", response_model=StrangleLegsOut)
 async def strangle_legs(
     request: Request,
     strategy_id: str | None = Query(default=None),
-) -> JSONResponse:
+) -> StrangleLegsOut:
     strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
-    return JSONResponse(content={"legs": data["legs"]})
+    return StrangleLegsOut(legs=data["legs"])
 
 
-@strangle_router.get("/activity")
+@strangle_router.get("/activity", response_model=StrangleActivityOut)
 async def strangle_activity(
     request: Request,
     n: int = Query(default=50, ge=1, le=200),
     strategy_id: str | None = Query(default=None),
-) -> JSONResponse:
+) -> StrangleActivityOut:
     strategy = _get_strangle(request, strategy_id)
     events = list(strategy._activity)
-    events.reverse()       # newest-first
-    return JSONResponse(content={"events": events[:n], "total": len(events)})
+    events.reverse()  # newest-first
+    return StrangleActivityOut(events=events[:n], total=len(events))
 
 
-@strangle_router.get("/stats")
+@strangle_router.get("/stats", response_model=StrangleStatsOut)
 async def strangle_stats(
     request: Request,
     strategy_id: str | None = Query(default=None),
-) -> JSONResponse:
+) -> StrangleStatsOut:
     strategy = _get_strangle(request, strategy_id)
     data = await strategy.state()
-    open_pe_lots = sum(lg["lots"] for lg in data["legs"]
-                       if not lg["is_hedge"] and not lg["is_momentum"] and lg["opt_type"] == "PE")
-    open_ce_lots = sum(lg["lots"] for lg in data["legs"]
-                       if not lg["is_hedge"] and not lg["is_momentum"] and lg["opt_type"] == "CE")
+    open_pe_lots = sum(
+        lg["lots"]
+        for lg in data["legs"]
+        if not lg["is_hedge"] and not lg["is_momentum"] and lg["opt_type"] == "PE"
+    )
+    open_ce_lots = sum(
+        lg["lots"]
+        for lg in data["legs"]
+        if not lg["is_hedge"] and not lg["is_momentum"] and lg["opt_type"] == "CE"
+    )
     open_hedge_lots = sum(lg["lots"] for lg in data["legs"] if lg["is_hedge"])
     trade_count = sum(1 for e in strategy._activity if e.get("event_type") in ("leg_close", "take_profit"))
-    return JSONResponse(content={
-        "day_realized": data["day_realized"],
-        "day_unrealized": data["day_unrealized"],
-        "day_pnl": data["day_pnl"],
-        "trade_count": trade_count,
-        "open_pe_lots": open_pe_lots,
-        "open_ce_lots": open_ce_lots,
-        "open_hedge_lots": open_hedge_lots,
-    })
+    return StrangleStatsOut(
+        day_realized=data["day_realized"],
+        day_unrealized=data["day_unrealized"],
+        day_pnl=data["day_pnl"],
+        trade_count=trade_count,
+        open_pe_lots=open_pe_lots,
+        open_ce_lots=open_ce_lots,
+        open_hedge_lots=open_hedge_lots,
+    )
 
 
-@strangle_router.get("/pnl")
-async def strangle_pnl(request: Request) -> JSONResponse:
+@strangle_router.get("/pnl", response_model=StranglePnlOut)
+async def strangle_pnl(request: Request) -> StranglePnlOut:
     """Per-index live P&L breakdown — the ONLY P&L source for dashboard + Execution tab.
 
     Returns one row per running strangle strategy (grouped by underlying) plus a
@@ -219,11 +245,10 @@ async def strangle_pnl(request: Request) -> JSONResponse:
     the terminal square_off/day_loss_cap event for that index today.
     """
     from pdp.strategies.directional_strangle import DirectionalStrangle
+
     host: StrategyHost = request.app.state.strategy_host
     strategies = [
-        state.instance
-        for state in host._running.values()
-        if isinstance(state.instance, DirectionalStrangle)
+        state.instance for state in host._running.values() if isinstance(state.instance, DirectionalStrangle)
     ]
     if not strategies:
         raise HTTPException(status_code=404, detail="No DirectionalStrangle running")
@@ -259,65 +284,71 @@ async def strangle_pnl(request: Request) -> JSONResponse:
         total_pnl += data["day_pnl"]
         total_open += data["n_open_legs"]
 
-    return JSONResponse(content={
-        "by_index": rows,
-        "totals": {
+    return StranglePnlOut(
+        by_index=rows,
+        totals={
             "day_realized": round(total_realized, 2),
             "day_unrealized": round(total_unrealized, 2),
             "day_pnl": round(total_pnl, 2),
             "n_open_legs": total_open,
         },
-    })
+    )
 
 
-@strangle_router.get("/trades")
+@strangle_router.get("/trades", response_model=StrangleTradesOut)
 async def strangle_trades(
     request: Request,
     strategy_id: str | None = Query(default=None),
     date: str | None = Query(default=None, description="YYYY-MM-DD; defaults to today IST"),
-) -> JSONResponse:
+) -> StrangleTradesOut:
     """Per-day entry→exit trade ledger grouped by index.
 
-    Pairs each leg_open with its terminal close event from the persisted daily
-    JSONL log.  Returns round-trip rows with full economics; open legs have null
-    exit fields.  Unresolved symbols are lazily resolved before returning.
+    Pairs each leg_open with its terminal close event from the durable Mongo
+    events collection (DB-first), falling back to the JSONL log file when the
+    durable source is empty (pre-migration days or Mongo unavailable).
+
+    Returns round-trip rows with full economics; open legs have null exit fields.
+    Unresolved symbols are lazily resolved before returning.
     """
     from datetime import date as date_type
-    from zoneinfo import ZoneInfo
 
     from pdp.instruments.symbols import symbol_for
+    from pdp.mongo.collections import get_events_collection
     from pdp.strategies.directional_strangle import DirectionalStrangle
     from pdp.strategy.trade_ledger import (
         compute_totals,
         group_by_index,
         pair_trades,
-        read_day_events,
+        read_durable_day_events,
     )
 
-    _ist = ZoneInfo("Asia/Kolkata")
-    query_date = date_type.fromisoformat(date) if date else datetime.now(_ist).date()
+    query_date = parse_ist_date(date)
+
+    # Resolve Mongo collection from app state (graceful None if not available)
+    mongo_col = None
+    try:
+        mongo_db = getattr(request.app.state, "mongo_db", None)
+        if mongo_db is not None:
+            mongo_col = get_events_collection(mongo_db)
+    except Exception:
+        pass
 
     host: StrategyHost = request.app.state.strategy_host
     strategies = [
         (sid, state.instance)
         for sid, state in host._running.items()
-        if isinstance(state.instance, DirectionalStrangle)
-        and (strategy_id is None or sid == strategy_id)
+        if isinstance(state.instance, DirectionalStrangle) and (strategy_id is None or sid == strategy_id)
     ]
 
     all_rows: list[dict[str, Any]] = []
     for sid, strategy in strategies:
-        events = read_day_events(sid, query_date)
+        events = await read_durable_day_events(sid, query_date, mongo_collection=mongo_col)
         rows = pair_trades(events)
         # Lazy symbol resolution for rows with symbol=null
         for row in rows:
             if row.get("symbol") is None and row.get("expiry") and row.get("strike"):
                 raw_expiry = row["expiry"]
-                exp = (
-                    date_type.fromisoformat(raw_expiry)
-                    if isinstance(raw_expiry, str)
-                    else raw_expiry
-                )
+                exp = date_type.fromisoformat(raw_expiry) if isinstance(raw_expiry, str) else raw_expiry
                 und = row.get("underlying") or strategy.underlying
                 ot = row.get("opt_type", "PE")
                 try:
@@ -325,23 +356,29 @@ async def strangle_trades(
                 except Exception as exc:
                     log.warning(
                         "strangle_trades_symbol_resolve_failed",
-                        sid=row.get("security_id"), exc=str(exc),
+                        sid=row.get("security_id"),
+                        exc=str(exc),
                     )
         all_rows.extend(rows)
 
     by_index = group_by_index(all_rows)
     totals = compute_totals(all_rows)
 
-    return JSONResponse(content=_serialise({
-        "date": query_date.isoformat(),
-        "by_index": by_index,
-        "totals": totals,
-    }))
+    res = _serialise(
+        {
+            "date": query_date.isoformat(),
+            "by_index": by_index,
+            "totals": totals,
+        }
+    )
+    return StrangleTradesOut(**res)
+
 
 
 # ------------------------------------------------------------------ #
 # Strangle realtime monitor — GET /api/v1/strangle/monitor            #
 # ------------------------------------------------------------------ #
+
 
 async def _get_ltp_redis(redis: Any, security_id: str) -> float | None:
     """Read LTP from Redis ltp:{sid} hash. Returns None if not found."""
@@ -361,8 +398,13 @@ async def _get_greeks_for_strike(
 ) -> dict[str, Any]:
     """Read delta/vega/gamma/theta/OI/PCR from the latest option_chains snapshot."""
     result: dict[str, Any] = {
-        "delta": None, "vega": None, "gamma": None, "theta": None,
-        "oi": None, "pcr": None, "oi_change_day": None,
+        "delta": None,
+        "vega": None,
+        "gamma": None,
+        "theta": None,
+        "oi": None,
+        "pcr": None,
+        "oi_change_day": None,
     }
     if chains_col is None:
         return result
@@ -394,6 +436,7 @@ async def _get_greeks_for_strike(
 
         # PCR for this strike
         from pdp.options.analytics import compute_pcr
+
         result["pcr"] = compute_pcr([strike_row])
 
         # OI change since day start
@@ -488,8 +531,11 @@ async def _build_levels_cells(store: Any, sid: str, session_date: date) -> dict[
             return None
         c = doc.get("camarilla") or {}
         return {
-            "pp": c.get("pp"), "r3": c.get("r3"), "r4": c.get("r4"),
-            "s3": c.get("s3"), "s4": c.get("s4"),
+            "pp": c.get("pp"),
+            "r3": c.get("r3"),
+            "r4": c.get("r4"),
+            "s3": c.get("s3"),
+            "s4": c.get("s4"),
         }
 
     daily = await store.get(sid, "daily", session_date)
@@ -507,20 +553,23 @@ async def _build_levels_cells(store: Any, sid: str, session_date: date) -> dict[
     w_src = (weekly or {}).get("source") or {}
     m_src = (monthly or {}).get("source") or {}
     result["period"] = {
-        "pdh": d_src.get("h"), "pdl": d_src.get("l"),
-        "pwh": w_src.get("h"), "pwl": w_src.get("l"),
-        "pmh": m_src.get("h"), "pml": m_src.get("l"),
+        "pdh": d_src.get("h"),
+        "pdl": d_src.get("l"),
+        "pwh": w_src.get("h"),
+        "pwl": w_src.get("l"),
+        "pmh": m_src.get("h"),
+        "pml": m_src.get("l"),
     }
 
     return result
 
 
-@strangle_router.get("/monitor")
+@strangle_router.get("/monitor", response_model=StrangleMonitorOut)
 async def strangle_monitor(
     request: Request,
     strategy_id: str | None = Query(default=None),
     n_events: int = Query(default=20, ge=1, le=100),
-) -> JSONResponse:
+) -> StrangleMonitorOut:
     """Realtime directional-strangle monitor snapshot.
 
     Returns a single JSON doc with:
@@ -532,6 +581,7 @@ async def strangle_monitor(
     - indicators: EMA/ST/PSAR matrix x timeframes + Camarilla + period levels
     """
     from pdp.strategies.directional_strangle import DirectionalStrangle
+
     host = request.app.state.strategy_host
     strategies = []
     for sid, state_obj in host._running.items():
@@ -545,9 +595,7 @@ async def strangle_monitor(
     redis = request.app.state.redis
     engine = getattr(request.app.state, "indicator_engine", None)
     chains_col = (
-        request.app.state.mongo_db["option_chains"]
-        if hasattr(request.app.state, "mongo_db")
-        else None
+        request.app.state.mongo_db["option_chains"] if hasattr(request.app.state, "mongo_db") else None
     )
 
     states = [await s.state() for s in strategies]
@@ -565,7 +613,10 @@ async def strangle_monitor(
 
     # ── Legs grouped by underlying ──────────────────────────────────────────
     today_ist_start = datetime.now(UTC).replace(
-        hour=3, minute=45, second=0, microsecond=0,
+        hour=3,
+        minute=45,
+        second=0,
+        microsecond=0,
     )
 
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
@@ -588,19 +639,16 @@ async def strangle_monitor(
                 leg_enriched.update(greeks)
 
             legs_by_underlying.setdefault(und, []).append(leg_enriched)
-            unrealized_by_underlying[und] = (
-                unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
-            )
+            unrealized_by_underlying[und] = unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
 
     # ── Status — per-underlying + overall ──────────────────────────────────
     primary_state = next(
-        (s for s_idx, s in enumerate(states) if strategies[s_idx].underlying == "NIFTY"),
-        states[0]
+        (s for s_idx, s in enumerate(states) if strategies[s_idx].underlying == "NIFTY"), states[0]
     )
     # Per-underlying status so Flutter can show individual buckets/scores (must come before groups)
     underlying_status = {
         strategies[i].underlying: {
-            "bucket": s.get("bucket"),   # None → JSON null (Flutter shows '--')
+            "bucket": s.get("bucket"),  # None → JSON null (Flutter shows '--')
             "score": s.get("score"),
             "done_for_day": s.get("done_for_day", False),
             "n_open_shorts": s.get("n_open_shorts", 0),
@@ -630,7 +678,7 @@ async def strangle_monitor(
         "day_pnl": sum(s.get("day_pnl", 0.0) for s in states),
     }
     status = {
-        "bucket": primary_state.get("bucket"),   # None → JSON null, not "None" string
+        "bucket": primary_state.get("bucket"),  # None → JSON null, not "None" string
         "score": primary_state.get("score"),
         "done_for_day": all(s.get("done_for_day", False) for s in states),
         "started_at": primary_state.get("started_at"),
@@ -644,7 +692,7 @@ async def strangle_monitor(
     all_events = []
     for s in strategies:
         all_events.extend(list(s._activity))
-    
+
     # Sort events by ts (descending)
     all_events.sort(key=lambda x: x.get("ts", "") or x.get("timestamp", ""), reverse=True)
     recent_events = all_events[:n_events]
@@ -656,6 +704,7 @@ async def strangle_monitor(
     matrix_sids = list(_INDEX_SIDS.values())
 
     from pdp.indicators.levels_store import LevelsStore
+
     levels_store = (
         LevelsStore(request.app.state.mongo_db["index_levels"])
         if hasattr(request.app.state, "mongo_db")
@@ -685,14 +734,15 @@ async def strangle_monitor(
         "recent_events": recent_events,
         "indicators": indicators,
     }
-    return JSONResponse(content=_serialise(payload))
+    return StrangleMonitorOut(**_serialise(payload))
 
 
 # ------------------------------------------------------------------ #
 # Levels warehouse — GET /api/v1/levels/{underlying}                  #
 # ------------------------------------------------------------------ #
 
-@levels_router.get("/{underlying}")
+
+@levels_router.get("/{underlying}", response_model=LevelsResponseOut)
 async def get_levels(
     request: Request,
     underlying: str,
@@ -700,7 +750,7 @@ async def get_levels(
     date: str | None = Query(default=None, description="YYYY-MM-DD (single doc)"),
     start: str | None = Query(default=None, description="YYYY-MM-DD range start"),
     end: str | None = Query(default=None, description="YYYY-MM-DD range end"),
-) -> JSONResponse:
+) -> LevelsResponseOut:
     """Fetch persisted price levels from index_levels.
 
     Single-doc mode:  ?period=daily&date=2026-06-30
@@ -719,6 +769,7 @@ async def get_levels(
 
     if date:
         from datetime import date as date_type
+
         session_date = date_type.fromisoformat(date)
         doc = await store.get(security_id, period, session_date)
         if doc is None:
@@ -726,12 +777,12 @@ async def get_levels(
                 status_code=404,
                 detail=f"No {period} levels for {uid} on {date}",
             )
-        return JSONResponse(content=_serialise(doc))
+        return LevelsResponseOut(**_serialise(doc))
 
     # Range mode
     from datetime import date as date_type
+
     start_d = date_type.fromisoformat(start) if start else date_type.today().replace(day=1)
     end_d = date_type.fromisoformat(end) if end else date_type.today()
     docs = await store.range(security_id, period, start_d, end_d)
-    return JSONResponse(content={"docs": [_serialise(d) for d in docs], "count": len(docs)})
-
+    return LevelsResponseOut(docs=[_serialise(d) for d in docs], count=len(docs))

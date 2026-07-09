@@ -5,6 +5,7 @@ the every-minute detail behind one day. Since the sim is deterministic for a fix
 config + window + data, replaying that single day off the run's pinned config
 reproduces the same `BarStatus` trace + decision events without ever storing them.
 """
+
 from __future__ import annotations
 
 import os
@@ -53,7 +54,11 @@ def replay_day(config: dict[str, Any], underlying: str, target_date: str) -> dic
         days.sort()
 
     window = load_window(
-        mdb, cal, days, security_id=cfg.security_id, underlying=underlying,
+        mdb,
+        cal,
+        days,
+        security_id=cfg.security_id,
+        underlying=underlying,
     )
     if td not in window.valid_days:
         return {"found": False, "status_log": [], "decisions": []}
@@ -63,8 +68,9 @@ def replay_day(config: dict[str, Any], underlying: str, target_date: str) -> dic
     pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, days, underlying=underlying)
 
     day_lot = lot_size_for_date(underlying, td)
-    day_cfg = cfg if day_lot == cfg.lot_size else StrangleConfig.from_dict(
-        {**cfg.to_dict(), "lot_size": day_lot})
+    day_cfg = (
+        cfg if day_lot == cfg.lot_size else StrangleConfig.from_dict({**cfg.to_dict(), "lot_size": day_lot})
+    )
 
     data = build_strangle_day(window, day_cfg, td, vix_by_day, pcr_by_day)
     if data is None:
@@ -82,7 +88,5 @@ def replay_day(config: dict[str, Any], underlying: str, target_date: str) -> dic
     return {
         "found": True,
         "status_log": [format_status_line(st) for st in trace],
-        "decisions": [
-            {**d, "ts_ist": d["ts_ist"].isoformat()} for d in decisions
-        ],
+        "decisions": [{**d, "ts_ist": d["ts_ist"].isoformat()} for d in decisions],
     }

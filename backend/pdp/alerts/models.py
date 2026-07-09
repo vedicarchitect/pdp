@@ -8,7 +8,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from pdp.db.base import Base
-from pdp.alerts.enums import AlertChannel, AlertCondition, AlertStatus
 
 
 class AlertRecord(Base):
@@ -16,7 +15,9 @@ class AlertRecord(Base):
     __table_args__ = (
         Index("ix_alerts_user_status", "user_id", "status"),
         Index("ix_alerts_security_condition", "security_id", "condition"),
-        UniqueConstraint("user_id", "security_id", "condition", "threshold", name="uq_alerts_user_sec_cond_thresh"),
+        UniqueConstraint(
+            "user_id", "security_id", "condition", "threshold", name="uq_alerts_user_sec_cond_thresh"
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
