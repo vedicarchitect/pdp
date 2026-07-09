@@ -54,6 +54,11 @@ app/windows/flutter/ephemeral/
 
 # Local claude
 .claude/settings.local.json
+
+# Skills single-source: canonical copy lives in .claude/skills/ (committed).
+# .agents/skills is a machine-local directory junction to it (recreate per machine:
+#   cmd /c mklink /J .agents\skills .claude\skills   ) — never committed.
+.agents/skills/
 pdp.code-workspace
 backend/backtest/mutliplerunschecklog.txt
 test-results/

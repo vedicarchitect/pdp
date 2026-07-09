@@ -1,41 +1,33 @@
-/// Realtime directional-strangle execution monitor tab.
+/// Positions tab — Kite-style execution monitor.
 ///
-/// Layout:
-///   ┌──────────────────────────────────────────────────────────┐
-///   │  3 × Index price cards  (NIFTY | BANKNIFTY | SENSEX)    │
-///   ├──────────────────────────────────────────────────────────┤
-///   │  Strategy status bar (bucket / score / P&L / done)       │
-///   ├──────────────────────────────────────────────────────────┤
-///   │  Open legs table (entry → Greeks → MtM)                  │
-///   ├──────────────────────────────────────────────────────────┤
-///   │  Indicator matrix (5m/15m/30m/1H/1D) per index SID      │
-///   ├──────────────────────────────────────────────────────────┤
-///   │  Recent events log (last 20 closed legs / exits)         │
-///   └──────────────────────────────────────────────────────────┘
+/// Layout (responsive):
+///   Wide:  ┌─ index prices (full width) ───────────────────────────┐
+///          │ POSITIONS (per-underlying)      │  INDICATOR PANEL     │
+///          │  Open/Active table              │  (side split)        │
+///          │  Closed table                   │                      │
+///   Narrow: same, stacked (indicators below positions).
+///
+/// Open legs come from the live /monitor snapshot (entry · ltp · P&L · day-hi/lo ·
+/// entry reason). Closed trades come from /strangle/trades (entry → exit · P&L ·
+/// exit reason). System-placed legs only; manual broker positions live in the
+/// Broker (Dhan) tab.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:fl_chart/fl_chart.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../shared/widgets/pnl_text.dart';
 import '../../application/manage_providers.dart';
 import '../../domain/execution_models.dart';
+import '../indicator_panel.dart';
 
-// Timeframes shown in the indicator matrix
-const _matrixTfs = ['5m', '15m', '30m', '1H', '1D'];
-
-// Index display order
 const _indexOrder = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 
-// Map of index name → security_id
-const _indexSids = {
-  'NIFTY': '13',
-  'BANKNIFTY': '25',
-  'SENSEX': '51',
-};
+// Below this width the indicator panel stacks under the positions instead of
+// docking to the right.
+const _splitBreakpoint = 900.0;
 
 class StrategyExecutionTab extends ConsumerWidget {
   const StrategyExecutionTab({super.key});
@@ -45,11 +37,9 @@ class StrategyExecutionTab extends ConsumerWidget {
     final monitorAsync = ref.watch(monitorStreamProvider);
 
     return RefreshIndicator(
-      onRefresh: () async {
-        ref.invalidate(monitorStreamProvider);
-      },
+      onRefresh: () async => ref.invalidate(monitorStreamProvider),
       child: monitorAsync.when(
-        data: (snap) => _MonitorBody(snap: snap),
+        data: (snap) => _PositionsBody(snap: snap),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (err, _) => _ErrorView(error: err, ref: ref),
       ),
@@ -57,12 +47,9 @@ class StrategyExecutionTab extends ConsumerWidget {
   }
 }
 
-// ─── Error view ───────────────────────────────────────────────────────────────
-
 class _ErrorView extends StatelessWidget {
   final Object error;
   final WidgetRef ref;
-
   const _ErrorView({required this.error, required this.ref});
 
   @override
@@ -73,15 +60,10 @@ class _ErrorView extends StatelessWidget {
         children: [
           const Icon(Icons.signal_wifi_off, size: 48, color: Colors.orange),
           const SizedBox(height: 12),
-          Text(
-            'Monitor unavailable',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
+          Text('Monitor unavailable', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          Text(
-            'Strategy may not be running',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
+          Text('Strategy may not be running',
+              style: Theme.of(context).textTheme.bodySmall),
           const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: () => ref.invalidate(monitorStreamProvider),
@@ -94,132 +76,116 @@ class _ErrorView extends StatelessWidget {
   }
 }
 
-// ─── Main body ────────────────────────────────────────────────────────────────
-
-class _MonitorBody extends StatelessWidget {
+class _PositionsBody extends ConsumerWidget {
   final MonitorSnapshot snap;
+  const _PositionsBody({required this.snap});
 
-  const _MonitorBody({required this.snap});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
+    final trades = tradesAsync.asData?.value;
+
+    final positions = _PositionsColumn(snap: snap, trades: trades);
+    final indicators = IndicatorPanel(indicators: snap.indicators);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= _splitBreakpoint;
+        return Column(
+          children: [
+            _IndexPriceRow(indices: snap.indices),
+            const Divider(height: 1),
+            Expanded(
+              child: wide
+                  ? Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(flex: 3, child: positions),
+                        const VerticalDivider(width: 1),
+                        SizedBox(width: 440, child: indicators),
+                      ],
+                    )
+                  : ListView(
+                      padding: EdgeInsets.zero,
+                      children: [
+                        positions,
+                        const Divider(),
+                        SizedBox(height: 360, child: indicators),
+                      ],
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ─── Left column: overall status + per-underlying open/closed ────────────────
+
+class _PositionsColumn extends StatelessWidget {
+  final MonitorSnapshot snap;
+  final StrangleTrades? trades;
+  const _PositionsColumn({required this.snap, required this.trades});
 
   @override
   Widget build(BuildContext context) {
-    final totalLegs = snap.legs.length;
+    final unders = <String>{
+      ...snap.groups.map((g) => g.underlying),
+      ...?trades?.byIndex.keys,
+    }.toList()
+      ..sort((a, b) {
+        final ia = _indexOrder.indexOf(a);
+        final ib = _indexOrder.indexOf(b);
+        return (ia == -1 ? 99 : ia).compareTo(ib == -1 ? 99 : ib);
+      });
+
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
-        _IndexPriceRow(indices: snap.indices),
-        const SizedBox(height: 8),
         _OverallStatusBar(snap: snap),
         const SizedBox(height: 8),
-        if (snap.groups.isNotEmpty) ...[
-          _SectionHeader(title: 'Positions ($totalLegs legs)'),
-          ...snap.groups.map((g) => _UnderlyingSection(group: g)),
-          const SizedBox(height: 4),
-        ] else
-          const _EmptyCard(message: 'No open legs'),
-        const _SectionHeader(title: 'Indicator Matrix'),
-        _IndicatorMatrix(indicators: snap.indicators),
-        const SizedBox(height: 8),
-        // Meaningful market-structure events (EMA cross / SuperTrend flip / Camarilla
-        // + level breaks) stream in the Live Events sidebar. The strategy heartbeat
-        // log (bias_evaluated / leg_status) is intentionally not shown here.
+        if (unders.isEmpty)
+          const _EmptyCard(message: 'No positions today')
+        else
+          ...unders.map((u) {
+            final group = snap.groups.where((g) => g.underlying == u).firstOrNull;
+            final rows = trades?.byIndex[u] ?? const [];
+            return _UnderlyingSection(
+              underlying: u,
+              group: group,
+              closed: rows.where((r) => !r.open).toList(),
+            );
+          }),
+        const SizedBox(height: 24),
       ],
     );
   }
 }
 
-// ─── Index price cards ────────────────────────────────────────────────────────
-
-class _IndexPriceRow extends StatelessWidget {
-  final List<IndexPrice> indices;
-
-  const _IndexPriceRow({required this.indices});
-
-  @override
-  Widget build(BuildContext context) {
-    final indexMap = {for (final i in indices) i.name: i};
-    return Row(
-      children: _indexOrder.map((name) {
-        final price = indexMap[name];
-        return Expanded(
-          child: _IndexCard(name: name, price: price),
-        );
-      }).toList(),
-    );
-  }
-}
-
-class _IndexCard extends StatelessWidget {
-  final String name;
-  final IndexPrice? price;
-
-  const _IndexCard({required this.name, required this.price});
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Card(
-      margin: const EdgeInsets.all(3),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(name,
-                style: Theme.of(context)
-                    .textTheme
-                    .labelSmall
-                    ?.copyWith(color: cs.primary)),
-            const SizedBox(height: 2),
-            Text(
-              price != null ? _fmt(price!.spot) : '--',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            if (price?.future != null)
-              Text(
-                'Fut: ${_fmt(price!.future!)}',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _fmt(double v) => v.toStringAsFixed(2);
-}
-
-// ─── Overall status bar (total P&L + primary bucket) ─────────────────────────
-
 class _OverallStatusBar extends StatelessWidget {
   final MonitorSnapshot snap;
-
   const _OverallStatusBar({required this.snap});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final pnlColor = snap.dayPnl >= 0 ? AppColors.profit : AppColors.loss;
     final bkt = snap.bucket ?? '--';
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
-            Chip(
-              label: Text(bkt, style: const TextStyle(fontWeight: FontWeight.bold)),
-              backgroundColor: _bucketColor(bkt).withValues(alpha: 0.15),
-              side: BorderSide(color: _bucketColor(bkt), width: 1.5),
-            ),
+            _BucketChip(bucket: bkt),
             const SizedBox(width: 8),
             if (snap.score != null)
               Text('Score: ${snap.score!.toStringAsFixed(2)}',
                   style: Theme.of(context).textTheme.bodySmall),
             const Spacer(),
-            _PnlChip(label: 'Total P&L', value: snap.dayPnl, color: pnlColor, context: context),
+            Text('Day P&L  ', style: Theme.of(context).textTheme.bodySmall),
+            PnlText(snap.dayPnl,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
             const SizedBox(width: 6),
             if (snap.doneForDay)
               Chip(
@@ -234,127 +200,299 @@ class _OverallStatusBar extends StatelessWidget {
   }
 }
 
-// ─── Per-underlying section (header + legs table) ─────────────────────────────
+// ─── Per-underlying: header + Open table + Closed table ──────────────────────
 
-class _UnderlyingSection extends ConsumerWidget {
-  final UnderlyingGroup group;
+class _UnderlyingSection extends StatelessWidget {
+  final String underlying;
+  final UnderlyingGroup? group;
+  final List<StrangleTradeRow> closed;
 
-  const _UnderlyingSection({required this.group});
+  const _UnderlyingSection({
+    required this.underlying,
+    required this.group,
+    required this.closed,
+  });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final bkt = group.bucket ?? '--';
-    
-    // Read P&L and Trades from providers
-    final pnlAsync = ref.watch(stranglePnlProvider);
-    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-    final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
-
-    // Resolve true P&L from canonical /pnl endpoint (Task 6.4)
-    double displayPnl = group.dayPnl; // fallback
-    bool isDone = group.doneForDay;
-    String? squaredOffAt;
-    
-    pnlAsync.whenData((pnl) {
-      final match = pnl.byIndex.where((r) => r.underlying == group.underlying).firstOrNull;
-      if (match != null) {
-        displayPnl = match.dayPnl;
-        isDone = match.doneForDay;
-        squaredOffAt = match.squaredOffAt;
-      }
-    });
-
-    final pnlColor = displayPnl >= 0 ? AppColors.profit : AppColors.loss;
+  Widget build(BuildContext context) {
+    final openLegs = group?.legs ?? const [];
+    final bkt = group?.bucket ?? '--';
+    final dayPnl = group?.dayPnl ?? 0.0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.only(top: 8, bottom: 4),
           child: Row(
             children: [
-              Text(group.underlying,
+              Text(underlying,
                   style: Theme.of(context)
                       .textTheme
-                      .labelLarge
+                      .titleSmall
                       ?.copyWith(fontWeight: FontWeight.bold)),
               const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: _bucketColor(bkt).withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: _bucketColor(bkt).withValues(alpha: 0.5)),
-                ),
-                child: Text(bkt,
-                    style: TextStyle(
-                        fontSize: 11,
-                        color: _bucketColor(bkt),
-                        fontWeight: FontWeight.w600)),
-              ),
-              if (group.score != null) ...[
-                const SizedBox(width: 6),
-                Text(group.score!.toStringAsFixed(2),
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: _bucketColor(bkt))),
-              ],
+              _BucketChip(bucket: bkt),
               const Spacer(),
-              if (isDone && squaredOffAt != null)
-                // Task 6.3: Squared off banner
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: pnlColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: pnlColor.withValues(alpha: 0.5)),
-                  ),
-                  child: Text(
-                    'Squared off ${squaredOffAt!.substring(0, 5)} — final ₹${displayPnl.toStringAsFixed(0)}',
-                    style: TextStyle(color: pnlColor, fontWeight: FontWeight.bold, fontSize: 11),
-                  ),
-                )
-              else
-                Text(
-                  '${displayPnl >= 0 ? '+' : ''}${displayPnl.toStringAsFixed(0)}',
-                  style: TextStyle(
-                      color: pnlColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13),
-                ),
+              PnlText(dayPnl,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
             ],
           ),
         ),
-        
-        // Open Legs (Live monitor data)
-        if (group.legs.isNotEmpty)
-          _LegsTable(legs: group.legs)
+        _GroupLabel('Open / Active (${openLegs.length})'),
+        if (openLegs.isEmpty)
+          const _MutedLine('no open legs')
         else
-          const Padding(
-            padding: EdgeInsets.only(left: 8, bottom: 4),
-            child: Text('no open legs',
-                style: TextStyle(fontSize: 12, color: Colors.grey)),
-          ),
-          
-        const SizedBox(height: 12),
-        
-        // Task 6.1: Today's Trades
-        tradesAsync.when(
-          data: (trades) {
-            final idxTrades = trades.byIndex[group.underlying] ?? [];
-            if (idxTrades.isEmpty) return const SizedBox.shrink();
-            return _TodayTradesTable(trades: idxTrades);
-          },
-          loading: () => const Center(child: LinearProgressIndicator()),
-          error: (err, _) => Text('Error loading trades: $err', style: const TextStyle(color: Colors.red, fontSize: 11)),
-        ),
+          _OpenLegsTable(legs: openLegs),
         const SizedBox(height: 6),
+        _GroupLabel('Closed today (${closed.length})'),
+        if (closed.isEmpty)
+          const _MutedLine('no closed trades')
+        else
+          _ClosedTradesTable(rows: closed),
+        const SizedBox(height: 4),
+        const Divider(),
       ],
     );
   }
 }
 
+class _OpenLegsTable extends StatelessWidget {
+  final List<LegRow> legs;
+  const _OpenLegsTable({required this.legs});
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        headingRowHeight: 30,
+        dataRowMinHeight: 32,
+        dataRowMaxHeight: 46,
+        columnSpacing: 12,
+        columns: const [
+          DataColumn(label: Text('Type')),
+          DataColumn(label: Text('Strike'), numeric: true),
+          DataColumn(label: Text('Lots'), numeric: true),
+          DataColumn(label: Text('Entry'), numeric: true),
+          DataColumn(label: Text('LTP'), numeric: true),
+          DataColumn(label: Text('P&L'), numeric: true),
+          DataColumn(label: Text('Day H'), numeric: true),
+          DataColumn(label: Text('Day L'), numeric: true),
+          DataColumn(label: Text('Entry reason')),
+        ],
+        rows: legs.map((leg) {
+          final mtm = leg.mtm ?? 0;
+          final tag = leg.isHedge ? 'H' : leg.isMomentum ? 'M' : leg.optType;
+          final tagColor = leg.optType == 'CE' ? Colors.indigo : Colors.deepOrange;
+          return DataRow(cells: [
+            DataCell(_Tag(tag: tag, color: tagColor)),
+            DataCell(Text(leg.strike.toStringAsFixed(0))),
+            DataCell(Text('${leg.lots}')),
+            DataCell(Text(leg.entryPrice > 0 ? leg.entryPrice.toStringAsFixed(1) : '—')),
+            DataCell(Text(leg.ltp != null ? leg.ltp!.toStringAsFixed(1) : '--')),
+            DataCell(Text(
+              leg.mtm != null ? leg.mtm!.toStringAsFixed(0) : '--',
+              style: TextStyle(
+                  color: mtm >= 0 ? AppColors.profit : AppColors.loss,
+                  fontWeight: FontWeight.w600),
+            )),
+            DataCell(Text(leg.dayHigh != null ? leg.dayHigh!.toStringAsFixed(1) : '--')),
+            DataCell(Text(leg.dayLow != null ? leg.dayLow!.toStringAsFixed(1) : '--')),
+            DataCell(_ReasonNote(text: leg.entryReason)),
+          ]);
+        }).toList(),
+      ),
+    );
+  }
+}
+
+class _ClosedTradesTable extends StatelessWidget {
+  final List<StrangleTradeRow> rows;
+  const _ClosedTradesTable({required this.rows});
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        headingRowHeight: 30,
+        dataRowMinHeight: 32,
+        dataRowMaxHeight: 46,
+        columnSpacing: 12,
+        columns: const [
+          DataColumn(label: Text('Type')),
+          DataColumn(label: Text('Strike'), numeric: true),
+          DataColumn(label: Text('Lots'), numeric: true),
+          DataColumn(label: Text('Entry'), numeric: true),
+          DataColumn(label: Text('Exit'), numeric: true),
+          DataColumn(label: Text('P&L'), numeric: true),
+          DataColumn(label: Text('Exit reason')),
+        ],
+        rows: rows.map((r) {
+          final pnl = r.pnl ?? 0;
+          final tag = r.isHedge ? 'H' : (r.optType ?? '');
+          final tagColor = r.optType == 'CE' ? Colors.indigo : Colors.deepOrange;
+          return DataRow(cells: [
+            DataCell(_Tag(tag: tag, color: tagColor)),
+            DataCell(Text(r.strike?.toStringAsFixed(0) ?? '--')),
+            DataCell(Text('${r.lots.toInt()}')),
+            DataCell(Text(r.entryPrice?.toStringAsFixed(1) ?? '--')),
+            DataCell(Text(r.exitPrice?.toStringAsFixed(1) ?? '--')),
+            DataCell(PnlText(pnl,
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12))),
+            DataCell(_ReasonNote(text: r.exitReason)),
+          ]);
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// ─── Small shared widgets ────────────────────────────────────────────────────
+
+class _IndexPriceRow extends StatelessWidget {
+  final List<IndexPrice> indices;
+  const _IndexPriceRow({required this.indices});
+
+  @override
+  Widget build(BuildContext context) {
+    final indexMap = {for (final i in indices) i.name: i};
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Row(
+        children: _indexOrder.map((name) {
+          final price = indexMap[name];
+          return Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('$name  ',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelMedium
+                          ?.copyWith(color: cs.primary)),
+                  Text(
+                    price != null ? price.spot.toStringAsFixed(2) : '--',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+class _BucketChip extends StatelessWidget {
+  final String bucket;
+  const _BucketChip({required this.bucket});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _bucketColor(bucket);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(bucket,
+          style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+class _Tag extends StatelessWidget {
+  final String tag;
+  final Color color;
+  const _Tag({required this.tag, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(tag,
+          style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11)),
+    );
+  }
+}
+
+class _ReasonNote extends StatelessWidget {
+  final String? text;
+  const _ReasonNote({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = (text == null || text!.isEmpty) ? '--' : text!;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 160),
+      child: Tooltip(
+        message: t,
+        child: Text(t,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11)),
+      ),
+    );
+  }
+}
+
+class _GroupLabel extends StatelessWidget {
+  final String text;
+  const _GroupLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 2),
+      child: Text(text,
+          style: Theme.of(context)
+              .textTheme
+              .labelSmall
+              ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+    );
+  }
+}
+
+class _MutedLine extends StatelessWidget {
+  final String text;
+  const _MutedLine(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 2),
+      child: Text(text, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+    );
+  }
+}
+
+class _EmptyCard extends StatelessWidget {
+  final String message;
+  const _EmptyCard({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Center(
+            child: Text(message, style: Theme.of(context).textTheme.bodySmall)),
+      ),
+    );
+  }
+}
 
 Color _bucketColor(String bucket) {
   switch (bucket.toLowerCase()) {
@@ -374,485 +512,3 @@ Color _bucketColor(String bucket) {
       return Colors.grey;
   }
 }
-
-class _PnlChip extends StatelessWidget {
-  final String label;
-  final double value;
-  final Color color;
-  final BuildContext context;
-
-  const _PnlChip({
-    required this.label,
-    required this.value,
-    required this.color,
-    required this.context,
-  });
-
-  @override
-  Widget build(BuildContext ctx) {
-    final sign = value >= 0 ? '+' : '';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
-      ),
-      child: Text(
-        '$label: $sign${value.toStringAsFixed(0)}',
-        style: TextStyle(
-          color: color,
-          fontWeight: FontWeight.w600,
-          fontSize: 12,
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Legs table ───────────────────────────────────────────────────────────────
-
-class _LegsTable extends StatelessWidget {
-  final List<LegRow> legs;
-
-  const _LegsTable({required this.legs});
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: DataTable(
-        headingRowHeight: 32,
-        dataRowMinHeight: 36,
-        dataRowMaxHeight: 52,
-        columnSpacing: 10,
-        columns: const [
-          DataColumn(label: Text('Type')),
-          DataColumn(label: Text('Strike'), numeric: true),
-          DataColumn(label: Text('Lots'), numeric: true),
-          DataColumn(label: Text('Entry'), numeric: true),
-          DataColumn(label: Text('LTP'), numeric: true),
-          DataColumn(label: Text('MtM'), numeric: true),
-          DataColumn(label: Text('Δ'), numeric: true),
-          DataColumn(label: Text('θ'), numeric: true),
-          DataColumn(label: Text('OI'), numeric: true),
-          DataColumn(label: Text('PCR'), numeric: true),
-          DataColumn(label: Text('Reason')),
-        ],
-        rows: legs.map((leg) => _legRow(context, leg)).toList(),
-      ),
-    );
-  }
-
-  DataRow _legRow(BuildContext context, LegRow leg) {
-    final isCall = leg.optType == 'CE';
-    final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
-    final mtmColor = (leg.mtm ?? 0) >= 0 ? AppColors.profit : AppColors.loss;
-    final tag = leg.isHedge
-        ? 'H'
-        : leg.isMomentum
-            ? 'M'
-            : leg.optType;
-
-    return DataRow(cells: [
-      DataCell(_Tag(tag: tag, color: typeColor)),
-      DataCell(Text(leg.strike.toStringAsFixed(0))),
-      DataCell(Text('${leg.lots}')),
-      DataCell(Text(leg.entryPrice > 0 ? leg.entryPrice.toStringAsFixed(1) : '—')),
-      DataCell(Text(leg.ltp != null ? leg.ltp!.toStringAsFixed(1) : '--')),
-      DataCell(Text(
-        leg.mtm != null ? leg.mtm!.toStringAsFixed(0) : '--',
-        style: TextStyle(color: mtmColor, fontWeight: FontWeight.w600),
-      )),
-      DataCell(Text(
-        leg.delta != null ? leg.delta!.toStringAsFixed(3) : '--',
-      )),
-      DataCell(Text(
-        leg.theta != null ? leg.theta!.toStringAsFixed(2) : '--',
-      )),
-      DataCell(Text(
-        leg.oi != null ? _compactInt(leg.oi!) : '--',
-      )),
-      DataCell(Text(
-        leg.pcr != null ? leg.pcr!.toStringAsFixed(2) : '--',
-      )),
-      DataCell(Text(
-        leg.entryReason ?? '--',
-        style: const TextStyle(fontSize: 11),
-      )),
-    ]);
-  }
-
-  String _compactInt(int v) {
-    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
-    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
-    return '$v';
-  }
-}
-
-class _Tag extends StatelessWidget {
-  final String tag;
-  final Color color;
-
-  const _Tag({required this.tag, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withValues(alpha: 0.5)),
-      ),
-      child: Text(
-        tag,
-        style: TextStyle(
-          color: color,
-          fontWeight: FontWeight.bold,
-          fontSize: 11,
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Indicator matrix ─────────────────────────────────────────────────────────
-
-class _IndicatorMatrix extends StatelessWidget {
-  final Map<String, SidIndicators> indicators;
-
-  const _IndicatorMatrix({required this.indicators});
-
-  @override
-  Widget build(BuildContext context) {
-    final sidOrder = _indexOrder.map((n) => _indexSids[n]!).toList();
-    final sids = [
-      ...sidOrder.where(indicators.containsKey),
-      ...indicators.keys.where((k) => !sidOrder.contains(k)),
-    ];
-
-    if (sids.isEmpty) {
-      return const _EmptyCard(message: 'No indicator data');
-    }
-
-    return Column(
-      children: sids.map((sid) {
-        final ind = indicators[sid]!;
-        final name = _indexSids.entries
-            .firstWhere((e) => e.value == sid,
-                orElse: () => MapEntry(sid, sid))
-            .key;
-        return _SidMatrix(name: name, ind: ind);
-      }).toList(),
-    );
-  }
-}
-
-class _SidMatrix extends StatelessWidget {
-  final String name;
-  final SidIndicators ind;
-
-  const _SidMatrix({required this.name, required this.ind});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header row
-            Row(
-              children: [
-                Text(name,
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelMedium
-                        ?.copyWith(fontWeight: FontWeight.bold)),
-                const Spacer(),
-                const Text('Cam: 5-15m daily · 30m/1H weekly · 1D monthly',
-                    style: TextStyle(fontSize: 9, color: Colors.grey)),
-              ],
-            ),
-            const SizedBox(height: 6),
-            // TF grid — Camarilla per-TF (daily/weekly/monthly) + VWAP/VWMA (futures)
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: DataTable(
-                headingRowHeight: 28,
-                dataRowMinHeight: 32,
-                dataRowMaxHeight: 32,
-                columnSpacing: 8,
-                columns: const [
-                  DataColumn(label: Text('TF')),
-                  DataColumn(label: Text('ST'), numeric: true),
-                  DataColumn(label: Text('EMA9'), numeric: true),
-                  DataColumn(label: Text('EMA20'), numeric: true),
-                  DataColumn(label: Text('EMA50'), numeric: true),
-                  DataColumn(label: Text('EMA100'), numeric: true),
-                  DataColumn(label: Text('EMA200'), numeric: true),
-                  DataColumn(label: Text('PSAR'), numeric: true),
-                  DataColumn(label: Text('RSI'), numeric: true),
-                  DataColumn(label: Text('VWAP'), numeric: true),
-                  DataColumn(label: Text('VWMA'), numeric: true),
-                  DataColumn(label: Text('CamR4'), numeric: true),
-                  DataColumn(label: Text('CamS4'), numeric: true),
-                ],
-                rows: _matrixTfs
-                    .map((tf) => _tfRow(context, tf, ind.tf[tf], ind.camForTf(tf)))
-                    .toList(),
-              ),
-            ),
-            // PDH/PDL/PWH/PWL/PMH/PML
-            if (ind.pdh != null || ind.pwh != null || ind.pmh != null) ...[
-              const SizedBox(height: 4),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  if (ind.pdh != null)
-                    _LevelPill(label: 'PDH', value: ind.pdh, color: Colors.blue),
-                  if (ind.pdl != null)
-                    _LevelPill(label: 'PDL', value: ind.pdl, color: Colors.blueGrey),
-                  if (ind.pwh != null)
-                    _LevelPill(label: 'PWH', value: ind.pwh, color: Colors.purple),
-                  if (ind.pwl != null)
-                    _LevelPill(label: 'PWL', value: ind.pwl, color: Colors.deepPurple),
-                  if (ind.pmh != null)
-                    _LevelPill(label: 'PMH', value: ind.pmh, color: Colors.teal),
-                  if (ind.pml != null)
-                    _LevelPill(label: 'PML', value: ind.pml, color: Colors.tealAccent),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  DataRow _tfRow(
-      BuildContext context, String tf, IndicatorCell? cell, CamarillaLevels? cam) {
-    final stDir = cell?.stDir;
-    final stIcon = stDir == 'up'
-        ? '▲'
-        : stDir == 'down'
-            ? '▼'
-            : '--';
-    final stColor = stDir == 'up'
-        ? Colors.green
-        : stDir == 'down'
-            ? Colors.red
-            : null;
-
-    // RSI coloured vs its signal (rsi > signal = bullish).
-    Color? rsiColor;
-    if (cell?.rsi != null && cell?.rsiMa != null) {
-      rsiColor = cell!.rsi! >= cell.rsiMa! ? Colors.green : Colors.red;
-    }
-    final rsiText = cell?.rsi != null
-        ? '${cell!.rsi!.toStringAsFixed(0)}/${_fmtOpt(cell.rsiMa)}'
-        : '--';
-
-    return DataRow(cells: [
-      DataCell(Text(tf,
-          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11))),
-      DataCell(Text(stIcon, style: TextStyle(color: stColor, fontSize: 11))),
-      DataCell(Text(_fmtOpt(cell?.ema9))),
-      DataCell(Text(_fmtOpt(cell?.ema20))),
-      DataCell(Text(_fmtOpt(cell?.ema50))),
-      DataCell(Text(_fmtOpt(cell?.ema100))),
-      DataCell(Text(_fmtOpt(cell?.ema200))),
-      DataCell(Text(_fmtOpt(cell?.psar))),
-      DataCell(Text(rsiText,
-          style: TextStyle(color: rsiColor, fontSize: 11))),
-      DataCell(Text(_fmtOpt(cell?.vwap))),
-      DataCell(Text(_fmtOpt(cell?.vwma))),
-      DataCell(Text(_fmtOpt(cam?.r4),
-          style: const TextStyle(color: Colors.redAccent, fontSize: 11))),
-      DataCell(Text(_fmtOpt(cam?.s4),
-          style: const TextStyle(color: Colors.greenAccent, fontSize: 11))),
-    ]);
-  }
-
-  String _fmtOpt(double? v) => v != null ? v.toStringAsFixed(0) : '--';
-}
-
-class _LevelPill extends StatelessWidget {
-  final String label;
-  final double? value;
-  final Color color;
-
-  const _LevelPill({required this.label, required this.value, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    if (value == null) return const SizedBox.shrink();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
-      ),
-      child: Text(
-        '$label ${value!.toStringAsFixed(0)}',
-        style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-class _SectionHeader extends StatelessWidget {
-  final String title;
-
-  const _SectionHeader({required this.title});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4, top: 4),
-      child: Text(title,
-          style: Theme.of(context)
-              .textTheme
-              .labelLarge
-              ?.copyWith(color: Theme.of(context).colorScheme.primary)),
-    );
-  }
-}
-
-class _EmptyCard extends StatelessWidget {
-  final String message;
-
-  const _EmptyCard({required this.message});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Center(
-          child: Text(message,
-              style: Theme.of(context).textTheme.bodySmall),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Today's Trades (Task 6.1, 6.2) ──────────────────────────────────────────
-
-class _TodayTradesTable extends StatelessWidget {
-  final List<StrangleTradeRow> trades;
-
-  const _TodayTradesTable({required this.trades});
-
-  @override
-  Widget build(BuildContext context) {
-    if (trades.isEmpty) return const SizedBox.shrink();
-
-    // Cumulative PnL for sparkline
-    double cumPnl = 0;
-    final spots = <FlSpot>[];
-    for (int i = 0; i < trades.length; i++) {
-      final t = trades[i];
-      if (!t.open && t.pnl != null) {
-        cumPnl += t.pnl!;
-        spots.add(FlSpot(i.toDouble(), cumPnl));
-      }
-    }
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text("Today's Trades", style: Theme.of(context).textTheme.titleSmall),
-                const Spacer(),
-                if (spots.isNotEmpty)
-                  SizedBox(
-                    width: 100,
-                    height: 30,
-                    child: LineChart(
-                      LineChartData(
-                        minX: 0,
-                        maxX: trades.length.toDouble() - 1,
-                        titlesData: const FlTitlesData(show: false),
-                        borderData: FlBorderData(show: false),
-                        gridData: const FlGridData(show: false),
-                        lineBarsData: [
-                          LineChartBarData(
-                            spots: spots,
-                            isCurved: true,
-                            color: cumPnl >= 0 ? AppColors.profit : AppColors.loss,
-                            barWidth: 2,
-                            dotData: const FlDotData(show: false),
-                            belowBarData: BarAreaData(
-                              show: true,
-                              color: cumPnl >= 0 ? AppColors.profitFaint : AppColors.lossFaint,
-                            ),
-                          )
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: trades.length,
-              itemBuilder: (context, index) {
-                final t = trades[index];
-                final isCall = t.optType == 'CE';
-                final typeColor = isCall ? Colors.indigo : Colors.deepOrange;
-                final tag = t.isHedge ? 'H' : (t.optType ?? '');
-                final pnlVal = t.pnl ?? 0.0;
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Row(
-                    children: [
-                      _Tag(tag: tag, color: typeColor),
-                      const SizedBox(width: 8),
-                      Text('${t.strike?.toStringAsFixed(0)} ${t.optType}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
-                      const SizedBox(width: 12),
-                      Text('${t.lots.toStringAsFixed(0)}x', style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          t.open
-                              ? '${t.entryPrice?.toStringAsFixed(1)} → OPEN'
-                              : '${t.entryPrice?.toStringAsFixed(1)} → ${t.exitPrice?.toStringAsFixed(1)}',
-                          style: const TextStyle(fontSize: 12),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                      if (!t.open)
-                        PnlText(
-                          pnlVal,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                        )
-                      else
-                        const Text('OPEN', style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.bold, fontSize: 12)),
-                    ],
-                  ),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-

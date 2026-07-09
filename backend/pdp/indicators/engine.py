@@ -15,6 +15,7 @@ New surface:
   - ``get_rsi(sid, tf)``      → RSIState | None
   (etc. — one getter per family)
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -46,11 +47,25 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 # Snapshot field names that correspond to indicator family names
-_SUITE_FAMILIES = frozenset({
-    "ema", "rsi", "psar", "vwap", "vwma",
-    "pivots", "period_levels", "fvg", "volume_profile", "market_profile",
-    "macd", "candlestick", "elliott", "fib_levels", "elder_impulse",
-})
+_SUITE_FAMILIES = frozenset(
+    {
+        "ema",
+        "rsi",
+        "psar",
+        "vwap",
+        "vwma",
+        "pivots",
+        "period_levels",
+        "fvg",
+        "volume_profile",
+        "market_profile",
+        "macd",
+        "candlestick",
+        "elliott",
+        "fib_levels",
+        "elder_impulse",
+    }
+)
 
 
 class IndicatorEngine:
@@ -70,6 +85,7 @@ class IndicatorEngine:
         # Suite: per-(sid, tf) bundle of family trackers
         self._suite_trackers: dict[tuple[str, str], dict[str, Any]] = {}
         self._snapshots: dict[tuple[str, str], Snapshot] = {}
+        self._bar_counts: dict[tuple[str, str], int] = {}
         # ML signal cache: populated by the ML inference layer after on_bar
         self._ml_signals: dict[tuple[str, str], Any] = {}
 
@@ -138,11 +154,16 @@ class IndicatorEngine:
                 kwargs[family] = ftracker.update(h, lo, c, v, t)
             self._snapshots[key] = Snapshot(**kwargs)
 
+        self._bar_counts[key] = self._bar_counts.get(key, 0) + 1
         return state
 
     def get(self, security_id: str, timeframe: str) -> SuperTrendState | None:
         """Latest computed SuperTrend for the pair, or None if not yet seeded."""
         return self._latest.get((security_id, timeframe))
+
+    def is_warm(self, security_id: str, timeframe: str, min_bars: int = 200) -> bool:
+        """Return True if the tracker for this pair has consumed at least min_bars."""
+        return self._bar_counts.get((security_id, timeframe), 0) >= min_bars
 
     def seed_from_bars(self, bars: list[BarClosed]) -> int:
         """Feed a chronologically-ordered list of historical bars through on_bar().

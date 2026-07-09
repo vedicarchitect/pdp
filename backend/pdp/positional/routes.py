@@ -1,4 +1,5 @@
 """Positional monitor REST endpoints — EOD snapshot storage and history."""
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
@@ -17,6 +18,7 @@ from pdp.mongo.collections import get_positional_snapshots_collection
 from pdp.orders.models import Position
 from pdp.positional.models import PositionalSnapshotDocument
 from pdp.settings import get_settings
+from pdp.positional.schemas import PositionalSnapshotOut
 
 log = structlog.get_logger()
 
@@ -27,11 +29,17 @@ def _get_mongo_db(request: Request) -> AsyncIOMotorDatabase:  # type: ignore[typ
     return request.app.state.mongo_db
 
 
-@router.post("/snapshot", status_code=201)
+@router.post(
+    "/snapshot",
+    response_model=PositionalSnapshotOut,
+    status_code=201,
+    summary="Create EOD snapshot",
+    description="Captures and stores the end-of-day portfolio snapshot.",
+)
 async def create_snapshot(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> JSONResponse:
+) -> PositionalSnapshotOut:
     settings = get_settings()
     mongo_db = _get_mongo_db(request)
     col = get_positional_snapshots_collection(mongo_db)
@@ -59,14 +67,14 @@ async def create_snapshot(
     await col.update_one({"date": today}, {"$set": doc_dict}, upsert=True)
 
     log.info("positional_snapshot_created", date=today, day_pnl=day_pnl, mode=mode)
-    return JSONResponse(content=doc_dict, status_code=201)
+    return PositionalSnapshotOut(**doc_dict)
 
 
-@router.get("/snapshots")
+@router.get("/snapshots", response_model=list[PositionalSnapshotOut])
 async def get_snapshots(
     request: Request,
     days: int = Query(default=90, ge=1, le=365),
-) -> JSONResponse:
+) -> list[PositionalSnapshotOut]:
     mongo_db = _get_mongo_db(request)
     col = get_positional_snapshots_collection(mongo_db)
 
@@ -77,4 +85,4 @@ async def get_snapshots(
         if isinstance(doc.get("created_at"), datetime):
             doc["created_at"] = doc["created_at"].isoformat()
 
-    return JSONResponse(content=docs)
+    return [PositionalSnapshotOut(**doc) for doc in docs]

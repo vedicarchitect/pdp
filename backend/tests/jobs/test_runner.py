@@ -13,9 +13,7 @@ from pdp.jobs.runner import JobRunner
 pytestmark = pytest.mark.asyncio
 
 
-async def dummy_handler(
-    job_id: UUID, params: dict[str, Any], progress_cb
-) -> dict[str, Any]:
+async def dummy_handler(job_id: UUID, params: dict[str, Any], progress_cb) -> dict[str, Any]:
     await progress_cb(job_id, 10, "started")
     await asyncio.sleep(0.1)
     if params.get("should_fail"):
@@ -24,9 +22,7 @@ async def dummy_handler(
     return {"status": "ok"}
 
 
-async def long_handler(
-    job_id: UUID, params: dict[str, Any], progress_cb
-) -> dict[str, Any]:
+async def long_handler(job_id: UUID, params: dict[str, Any], progress_cb) -> dict[str, Any]:
     await progress_cb(job_id, 10, "started")
     await asyncio.sleep(10.0)
     return {"status": "ok"}
@@ -41,6 +37,7 @@ def redis_client():
 @pytest.fixture
 def db_session_factory():
     from pdp.db.session import get_session_maker
+
     return get_session_maker()
 
 

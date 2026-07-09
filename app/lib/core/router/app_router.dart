@@ -8,7 +8,6 @@ import '../../features/manage/presentation/strategy_execution_screen.dart';
 import '../../features/portfolio/presentation/portfolio_screen.dart';
 import '../../features/intel/presentation/market_intel_screen.dart';
 import '../../features/journal/presentation/journal_screen.dart';
-import '../../features/risk/presentation/risk_positions_screen.dart';
 import '../../features/screener/presentation/screener_screen.dart';
 import '../../features/shell/app_shell.dart';
 import '../../features/shell/placeholder_screen.dart';
@@ -61,10 +60,6 @@ final GoRouter appRouter = GoRouter(
         GoRoute(
           path: '/screener',
           builder: (context, state) => const ScreenerScreen(),
-        ),
-        GoRoute(
-          path: '/risk',
-          builder: (context, state) => const RiskPositionsScreen(),
         ),
         GoRoute(
           path: '/more',

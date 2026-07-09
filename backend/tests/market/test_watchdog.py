@@ -5,20 +5,21 @@ from __future__ import annotations
 import asyncio
 import time as _time
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pdp.market.watchdog import FeedWatchdog, _in_market_hours
 from pdp.risk.feed_halt import FeedStaleHalt
 
-
 # ---------------------------------------------------------------------------
 # _in_market_hours — pure-function tests (monkeypatched datetime)
 # ---------------------------------------------------------------------------
 
+
 def _ist_time(hour: int, minute: int) -> datetime:
     import zoneinfo
+
     tz = zoneinfo.ZoneInfo("Asia/Kolkata")
     return datetime.now(tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
@@ -61,6 +62,7 @@ def test_in_market_hours_at_close():
 # ---------------------------------------------------------------------------
 # FeedWatchdog stale detection
 # ---------------------------------------------------------------------------
+
 
 def _make_stale_router(age_seconds: float = 200.0) -> MagicMock:
     router = MagicMock()
@@ -118,6 +120,29 @@ async def test_watchdog_skips_stale_check_outside_market_hours():
 
     feed_halt.on_feed_stale.assert_not_called()
     assert watchdog._was_stale is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_emits_feed_stale_critical_on_onset():
+    """On the stale onset transition the watchdog publishes a CRITICAL FEED_STALE event."""
+    from pdp.events.models import EventType
+
+    feed_halt = MagicMock(spec=FeedStaleHalt)
+    router = _make_stale_router(age_seconds=200)
+    adapter = _make_adapter()
+    event_service = MagicMock()
+
+    watchdog = FeedWatchdog(
+        router, adapter, stale_seconds=1, feed_halt=feed_halt, event_service=event_service
+    )
+
+    with patch("pdp.market.watchdog._in_market_hours", return_value=True):
+        await watchdog.start()
+        await asyncio.sleep(1.3)
+        await watchdog.stop()
+
+    event_service.emit_critical.assert_called_once()
+    assert event_service.emit_critical.call_args[0][0] == EventType.FEED_STALE
 
 
 @pytest.mark.asyncio

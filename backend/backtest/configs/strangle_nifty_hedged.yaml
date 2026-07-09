@@ -5,7 +5,7 @@ momentum_enabled: false
 momentum_premium_target: 50000.0
 momentum_score_threshold: 0.5
 day_loss_limit: 15000.0
-dte_max: null
+dte_max: 15
 entry_after_ist: '10:15'
 extreme_atm: true
 hedge_enabled: true

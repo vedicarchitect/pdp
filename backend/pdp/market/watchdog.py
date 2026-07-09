@@ -45,11 +45,15 @@ class FeedWatchdog:
         adapter: DhanTickerAdapter,
         stale_seconds: int = 60,
         feed_halt: FeedStaleHalt | None = None,
+        event_service: object | None = None,
     ) -> None:
         self._tick_router = tick_router
         self._adapter = adapter
         self._stale_seconds = stale_seconds
         self._feed_halt = feed_halt
+        # Set lazily by the startup wiring — EventService is created after the
+        # watchdog; the reference is only needed at runtime when staleness fires.
+        self.event_service = event_service
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._was_stale = False
@@ -87,12 +91,35 @@ class FeedWatchdog:
                 if self._feed_halt is not None:
                     self._feed_halt.on_feed_stale()
                 if not self._was_stale:
+                    self._emit_feed_stale(age)
                     await self._reconnect()
                 self._was_stale = True
             else:
                 if self._was_stale and self._feed_halt is not None:
                     self._feed_halt.on_feed_recovered()
                 self._was_stale = False
+
+    def _emit_feed_stale(self, age: float) -> None:
+        """Publish a CRITICAL FEED_STALE event on the stale→onset transition.
+
+        Fired only on the edge (not every poll); the EventService dedup gate
+        keyed on the stable dedup_key further coalesces repeats.
+        """
+        es = self.event_service
+        if es is None:
+            return
+        try:
+            from pdp.events.models import EventType
+
+            es.emit_critical(
+                EventType.FEED_STALE,
+                "feed",
+                "Market feed stale",
+                f"No ticks for {age:.0f}s (threshold {self._stale_seconds}s) during market hours",
+                {"stale_seconds": round(age, 1), "threshold": self._stale_seconds},
+            )
+        except Exception as exc:  # never let alerting break the watchdog loop
+            log.warning("feed_stale_emit_failed", exc=str(exc))
 
     async def _reconnect(self) -> None:
         """Signal the adapter to reconnect by stopping and restarting its feed task."""

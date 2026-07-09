@@ -8,6 +8,7 @@ Session-warmup suite (live-supertrend-session-warmup tasks 2.1–2.3):
   _prior_trading_day unit tests, session-aware Mongo query verification, and
   thin-Mongo → Dhan-fallback trigger.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
@@ -92,6 +93,7 @@ _DHAN_CREDS = SimpleNamespace(
 
 # ── Original tests ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_warmup_primes_supertrend_direction_from_mongo():
     """After warmup over a clean uptrend, the engine reports a non-None direction
@@ -161,7 +163,9 @@ async def test_warmup_feeds_bars_in_chronological_order():
     test_state = engine_test.get("13", "5m")
     assert test_state is not None, "engine must be primed even with reversed input"
     assert test_state.direction == ref_state.direction, "direction must match in-order reference"
-    assert test_state.bar_time == ref_state.bar_time, "last processed bar must be the chronologically-last bar"
+    assert test_state.bar_time == ref_state.bar_time, (
+        "last processed bar must be the chronologically-last bar"
+    )
 
 
 @pytest.mark.asyncio
@@ -207,9 +211,10 @@ async def test_warmup_only_primes_indicator_state_no_signals():
 
 # 2.1 — _prior_trading_day unit tests
 
+
 def test_prior_trading_day_monday_returns_friday():
     """A Monday restart should seed from the prior Friday session."""
-    monday = date(2026, 6, 15)   # 2026-06-15 is a Monday
+    monday = date(2026, 6, 15)  # 2026-06-15 is a Monday
     result = _prior_trading_day(set(), _today=monday)
     assert result == date(2026, 6, 12)  # 2026-06-12 is Friday
 
@@ -230,6 +235,7 @@ def test_prior_trading_day_skips_holiday_cluster():
 
 # 2.2 — Mongo query uses prior-session since
 
+
 @pytest.mark.asyncio
 async def test_warmup_mongo_query_uses_prior_session_start():
     """The $gte timestamp in the Mongo query is the prior day's session start (03:45 UTC),
@@ -245,6 +251,7 @@ async def test_warmup_mongo_query_uses_prior_session_start():
     # Warmup looks back _TF_WARMUP_CALENDAR_DAYS["5m"] calendar days from the prior day,
     # anchored at that day's session start (03:45 UTC), so EMA(100) can seed.
     from pdp.indicators.warmup import _TF_WARMUP_CALENDAR_DAYS
+
     query = db.col.queries[0]
     since_ts = query["ts"]["$gte"]
     warmup_from = fixed_prior_day - timedelta(days=_TF_WARMUP_CALENDAR_DAYS["5m"] - 1)
@@ -253,6 +260,7 @@ async def test_warmup_mongo_query_uses_prior_session_start():
 
 
 # 2.3 — Thin Mongo triggers Dhan fallback
+
 
 @pytest.mark.asyncio
 async def test_warmup_thin_mongo_triggers_dhan_fallback():
@@ -268,8 +276,8 @@ async def test_warmup_thin_mongo_triggers_dhan_fallback():
 
     mock_fetch.assert_called_once()
     args = mock_fetch.call_args.args
-    assert args[1] == "13"    # security_id
-    assert args[3] == "5m"    # timeframe
+    assert args[1] == "13"  # security_id
+    assert args[3] == "5m"  # timeframe
 
 
 @pytest.mark.asyncio
@@ -279,6 +287,7 @@ async def test_warmup_full_mongo_skips_dhan_fallback():
     # Warmup demands enough bars to seed EMA(100) across the deepened 5m lookback
     # window; supply comfortably above that target so no top-up fires.
     from pdp.indicators.warmup import _TF_SESSION_BARS, _TF_WARMUP_CALENDAR_DAYS
+
     target = max(100, _TF_SESSION_BARS["5m"] * max(1, _TF_WARMUP_CALENDAR_DAYS["5m"] // 2))
     db = _FakeDB(_bar_docs([22000 + 20 * i for i in range(target + 10)]))
     watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["5m"]}]
@@ -290,6 +299,7 @@ async def test_warmup_full_mongo_skips_dhan_fallback():
 
 
 # 3.1 — Mid-day restart inherits prior-session direction (not cold-start)
+
 
 @pytest.mark.asyncio
 async def test_mid_day_restart_inherits_prior_session_direction():
@@ -307,7 +317,57 @@ async def test_mid_day_restart_inherits_prior_session_direction():
     assert state.direction == UP, "prior uptrend must carry over as UP, not cold-start None"
 
 
+# ---------------------------------------------------------------------------
+# Indicator engine is_warm
+# ---------------------------------------------------------------------------
+
+
+def test_engine_is_warm_tracks_bar_counts():
+    engine = IndicatorEngine()
+    sid = "13"
+    tf = "5m"
+
+    # initially cold
+    assert not engine.is_warm(sid, tf, min_bars=200)
+
+    # feed bars
+    for i in range(199):
+        bar = BarClosed(
+            security_id=sid,
+            timeframe=tf,
+            bar_time=datetime.now(UTC),
+            open=Decimal(100),
+            high=Decimal(100),
+            low=Decimal(100),
+            close=Decimal(100),
+            volume=0,
+            oi=0,
+        )
+        engine.seed_from_bars(sid, tf, [bar])
+
+    # still cold (199 bars)
+    assert not engine.is_warm(sid, tf, min_bars=200)
+
+    # feed 1 more
+    bar = BarClosed(
+        security_id=sid,
+        timeframe=tf,
+        bar_time=datetime.now(UTC),
+        open=Decimal(100),
+        high=Decimal(100),
+        low=Decimal(100),
+        close=Decimal(100),
+        volume=0,
+        oi=0,
+    )
+    engine.seed_from_bars(sid, tf, [bar])
+
+    # now warm
+    assert engine.is_warm(sid, tf, min_bars=200)
+
+
 # 3.2 — Warmup path == direct seed path (parity)
+
 
 @pytest.mark.asyncio
 async def test_warmup_direction_matches_direct_seed_parity():
@@ -320,11 +380,15 @@ async def test_warmup_direction_matches_direct_seed_parity():
     engine_ref = IndicatorEngine()
     bars_ref = [
         BarClosed(
-            security_id="13", timeframe="5m",
+            security_id="13",
+            timeframe="5m",
             bar_time=doc["ts"],
-            open=Decimal(str(doc["open"])), high=Decimal(str(doc["high"])),
-            low=Decimal(str(doc["low"])), close=Decimal(str(doc["close"])),
-            volume=0, oi=0,
+            open=Decimal(str(doc["open"])),
+            high=Decimal(str(doc["high"])),
+            low=Decimal(str(doc["low"])),
+            close=Decimal(str(doc["close"])),
+            volume=0,
+            oi=0,
         )
         for doc in docs
     ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Integer, JSON, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -12,9 +12,7 @@ from pdp.db.base import Base
 
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
-    __table_args__ = (
-        UniqueConstraint("id", name="uq_backtest_runs_id"),
-    )
+    __table_args__ = (UniqueConstraint("id", name="uq_backtest_runs_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     strategy_id: Mapped[str] = mapped_column(String, nullable=False, index=True)

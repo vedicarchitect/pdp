@@ -11,13 +11,15 @@ Combos are the cartesian product of every field's value list, applied on top of
 ``base_config``. Ranking is fixed at ``(-profit_factor, -net)`` (mirrors
 ``backtest/run.py:print_table``) regardless of the requested ``objective`` label.
 """
+
 from __future__ import annotations
 
 import itertools
 import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from pymongo import MongoClient
 
@@ -40,9 +42,11 @@ def load_vix_window(mdb: Any, vix_sid: str, days: list[date]) -> dict[date, list
         return out
     lo = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=UTC)
     hi = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=UTC)
-    for b in mdb["market_bars"].find(
-        {"metadata.security_id": vix_sid, "metadata.timeframe": "1m",
-         "ts": {"$gte": lo, "$lte": hi}}).sort("ts", 1):
+    for b in (
+        mdb["market_bars"]
+        .find({"metadata.security_id": vix_sid, "metadata.timeframe": "1m", "ts": {"$gte": lo, "$lte": hi}})
+        .sort("ts", 1)
+    ):
         ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
         out.setdefault((ts + _IST).date(), []).append(b)
     return out
@@ -138,8 +142,11 @@ def run_strangle_sweep(
     except Exception:
         cal = None
 
-    calc = NullCommissionCalculator(s.backtest_commission) if no_commission \
+    calc = (
+        NullCommissionCalculator(s.backtest_commission)
+        if no_commission
         else CommissionCalculator(s.backtest_commission)
+    )
 
     def commission_fn(side: str, turnover: float) -> float:
         return float(calc.calculate(side, Decimal(str(turnover))).total_inr)
@@ -158,12 +165,16 @@ def run_strangle_sweep(
     vix_sid = os.getenv("VIX_SECURITY_ID", "21")
     for ci, chunk in enumerate(chunks, 1):
         window = load_window(
-            mdb, cal, chunk, security_id=base_cfg.security_id,
+            mdb,
+            cal,
+            chunk,
+            security_id=base_cfg.security_id,
             underlying=base_cfg.underlying,
         )
         vix_by_day = load_vix_window(mdb, vix_sid, chunk)
-        pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk,
-                                     underlying=base_cfg.underlying)
+        pcr_by_day = load_pcr_window(
+            mdb["option_bars"], window.expiry_by_day, chunk, underlying=base_cfg.underlying
+        )
         loaded_chunks.append((window, vix_by_day, pcr_by_day))
         if on_progress:
             on_progress(5 + int(20 * ci / len(chunks)), f"loaded chunk {ci}/{len(chunks)}")
@@ -175,8 +186,11 @@ def run_strangle_sweep(
         for window, vix_by_day, pcr_by_day in loaded_chunks:
             for d in window.valid_days:
                 day_lot = lot_size_for_date(cfg.underlying, d)
-                day_cfg = cfg if day_lot == cfg.lot_size else StrangleConfig.from_dict(
-                    {**cfg.to_dict(), "lot_size": day_lot})
+                day_cfg = (
+                    cfg
+                    if day_lot == cfg.lot_size
+                    else StrangleConfig.from_dict({**cfg.to_dict(), "lot_size": day_lot})
+                )
                 data = build_strangle_day(window, day_cfg, d, vix_by_day, pcr_by_day)
                 if data is None:
                     continue

@@ -10,6 +10,7 @@ Offline usage (training):
 Online usage (inference):
     row = build_feature_row(bar, snapshot, supertrend)
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -97,12 +98,8 @@ def build_feature_row(
     row["close_vs_ema20"] = (c - ema20) / ema20 if ema20 != 0 else 0.0
     row["close_vs_ema50"] = (c - ema50) / ema50 if ema50 != 0 else 0.0
     # Slope proxied by close_vs_ema (change vs prior period handled offline via shift)
-    row["ema9_slope"] = row["close_vs_ema9"] - (
-        (prev_c - ema9) / ema9 if ema9 != 0 else 0.0
-    )
-    row["ema20_slope"] = row["close_vs_ema20"] - (
-        (prev_c - ema20) / ema20 if ema20 != 0 else 0.0
-    )
+    row["ema9_slope"] = row["close_vs_ema9"] - ((prev_c - ema9) / ema9 if ema9 != 0 else 0.0)
+    row["ema20_slope"] = row["close_vs_ema20"] - ((prev_c - ema20) / ema20 if ema20 != 0 else 0.0)
 
     # RSI
     rsi_state = snapshot.rsi if snapshot else None
@@ -168,8 +165,14 @@ def build_feature_row(
     # Options features (phase 2 expiry head — all default to 0 when not provided)
     opts = options_features or {}
     for col in (
-        "max_pain", "pcr", "gex", "iv_atm", "india_vix",
-        "oi_wall_above", "oi_wall_below", "max_pain_distance",
+        "max_pain",
+        "pcr",
+        "gex",
+        "iv_atm",
+        "india_vix",
+        "oi_wall_above",
+        "oi_wall_below",
+        "max_pain_distance",
     ):
         row[col] = opts.get(col, 0.0)
 
@@ -203,4 +206,5 @@ def build_feature_rows(
 def feature_names() -> list[str]:
     """Return the canonical feature column order (mirrors FEATURE_SCHEMA in registry)."""
     from pdp.ml.registry import FEATURE_SCHEMA
+
     return list(FEATURE_SCHEMA)

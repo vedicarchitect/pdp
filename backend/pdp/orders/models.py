@@ -101,7 +101,10 @@ class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (
         UniqueConstraint(
-            "strategy_id", "security_id", "exchange_segment", "product",
+            "strategy_id",
+            "security_id",
+            "exchange_segment",
+            "product",
             name="uq_positions_strategy_sid_seg_product",
         ),
     )

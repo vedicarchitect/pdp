@@ -1,6 +1,7 @@
 import '../../../core/network/api_client.dart';
 import '../domain/models.dart';
 import '../domain/execution_models.dart';
+import '../domain/broker_models.dart';
 
 class ManageRepository {
   final ApiClient _api;
@@ -60,5 +61,29 @@ class ManageRepository {
   Future<StranglePnl> getStranglePnl() async {
     final res = await _api.getJson('/api/v1/strangle/pnl');
     return StranglePnl.fromJson(res);
+  }
+
+  /// Broker (Dhan) account view — holdings + positions + funds fetched in
+  /// parallel. Endpoints read the PG mirror, so they return empty lists (not
+  /// errors) when broker sync hasn't run / no Dhan credentials are configured.
+  Future<BrokerAccount> getBrokerAccount() async {
+    final results = await Future.wait([
+      _api.getJson('/api/v1/broker-sync/holdings'),
+      _api.getJson('/api/v1/broker-sync/positions'),
+      _api.getJson('/api/v1/broker-sync/funds'),
+    ]);
+    List<Map<String, dynamic>> items(Map<String, dynamic> res) =>
+        ((res['items'] as List?) ?? const [])
+            .map((e) => e as Map<String, dynamic>)
+            .toList();
+
+    final holdings = items(results[0]).map(BrokerHolding.fromJson).toList();
+    final positions = items(results[1]).map(BrokerPosition.fromJson).toList();
+    final funds = items(results[2]);
+    return BrokerAccount(
+      holdings: holdings,
+      positions: positions,
+      fund: funds.isNotEmpty ? BrokerFund.fromJson(funds.first) : null,
+    );
   }
 }

@@ -3,6 +3,7 @@
 Uses the ``option_bars`` MongoDB collection (fixed strike contracts) to replay
 multi-leg options strategies with SL/target/trailing/re-entry logic.
 """
+
 from __future__ import annotations
 
 import calendar
@@ -29,6 +30,7 @@ _WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satur
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TradeRecord:
@@ -61,6 +63,7 @@ class OptionsBacktestResult:
 # ---------------------------------------------------------------------------
 # Internal state
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _LegState:
@@ -105,6 +108,7 @@ class _Position:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _strike_step(underlying: str) -> int:
     u = underlying.upper()
@@ -232,6 +236,7 @@ def _resolve_strike(
 # Replay engine
 # ---------------------------------------------------------------------------
 
+
 class OptionsReplayEngine:
     def __init__(self, mongo_db: Any) -> None:
         self._db = mongo_db
@@ -285,7 +290,9 @@ class OptionsReplayEngine:
             res = self._replay_day(d, config, step, entry_t, exit_t, spot_bars, opt_bars, comm_calc)
             total_comm += res["commissions"]
             if res["n_trades"] > 0:
-                daily.append((d, res["net_pnl"], res["n_trades"], res["n_reentries"], res["last_exit_reason"]))
+                daily.append(
+                    (d, res["net_pnl"], res["n_trades"], res["n_reentries"], res["last_exit_reason"])
+                )
                 trade_log.extend(res["trades"])
 
         return _build_result(config, from_date, to_date, daily, trade_log, total_comm)
@@ -432,7 +439,9 @@ class OptionsReplayEngine:
                 and combined <= pos.trailing_sl_level
             ):
                 exit_reason = "trailing_sl"
-            elif risk.combined_target and combined >= _sl_threshold(risk.combined_target, pos.net_entry_premium):
+            elif risk.combined_target and combined >= _sl_threshold(
+                risk.combined_target, pos.net_entry_premium
+            ):
                 exit_reason = "combined_target"
             if not exit_reason and risk.per_leg_sl:
                 for leg in pos.legs:
@@ -469,7 +478,9 @@ class OptionsReplayEngine:
                             commissions += comm
                             n_reentries += 1
                             net_entry = sum(leg.entry_price * leg.config.lots for leg in legs)
-                            pos = _Position(legs=legs, re_entry_count=n_reentries, net_entry_premium=net_entry)
+                            pos = _Position(
+                                legs=legs, re_entry_count=n_reentries, net_entry_premium=net_entry
+                            )
                             n_trades += 1
 
         # End-of-day: close any remaining position
@@ -510,14 +521,16 @@ class OptionsReplayEngine:
             price = _lookup_price(opt_bars, leg_cfg.type, strike, bar_time)
             if price is None:
                 return [], False, 0.0
-            legs.append(_LegState(
-                config=leg_cfg,
-                strike=strike,
-                expiry=expiry,
-                entry_price=price,
-                entry_time=bar_time.strftime("%H:%M"),
-                current_price=price,
-            ))
+            legs.append(
+                _LegState(
+                    config=leg_cfg,
+                    strike=strike,
+                    expiry=expiry,
+                    entry_price=price,
+                    entry_time=bar_time.strftime("%H:%M"),
+                    current_price=price,
+                )
+            )
             turnover = Decimal(str(price * leg_cfg.lots * lot_size))
             comm = comm_calc.calculate(leg_cfg.side.lower(), turnover)
             total_comm += float(comm.total_inr)
@@ -577,6 +590,7 @@ class OptionsReplayEngine:
 # Aggregation
 # ---------------------------------------------------------------------------
 
+
 def _build_result(
     config: OptionsStrategyConfig,
     from_date: date,
@@ -605,11 +619,13 @@ def _build_result(
         if dd > max_dd:
             max_dd = dd
             max_dd_pct = (dd / running_peak * 100) if running_peak > 0 else 0.0
-        equity_curve.append({
-            "date": d.isoformat(),
-            "cumulative_pnl": round(cumulative, 2),
-            "drawdown": round(drawdown, 2),
-        })
+        equity_curve.append(
+            {
+                "date": d.isoformat(),
+                "cumulative_pnl": round(cumulative, 2),
+                "drawdown": round(drawdown, 2),
+            }
+        )
 
     # Sharpe (annualised, daily P&L series)
     daily_pnls = [r[1] for r in daily]

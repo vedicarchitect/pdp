@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 from uuid import UUID
 
 # Resolve script paths relative to the backend root regardless of CWD at runtime.
@@ -50,9 +51,7 @@ async def _run_script(
 
     if process.returncode != 0:
         error_msg = "\n".join(list(logs)[-10:])
-        raise RuntimeError(
-            f"Script failed with exit code {process.returncode}:\n{error_msg}"
-        )
+        raise RuntimeError(f"Script failed with exit code {process.returncode}:\n{error_msg}")
 
     await progress_cb(job_id, 100, "Completed successfully")
     return {"lines_total": line_count, "log_tail": list(logs)}
@@ -156,9 +155,7 @@ async def validate_warehouse(
     params: dict[str, Any],
     progress_cb: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    return await _run_script(
-        job_id, "scripts/validate_options_warehouse.py", [], progress_cb
-    )
+    return await _run_script(job_id, "scripts/validate_options_warehouse.py", [], progress_cb)
 
 
 async def snapshot_instruments(
@@ -166,6 +163,4 @@ async def snapshot_instruments(
     params: dict[str, Any],
     progress_cb: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    return await _run_script(
-        job_id, "scripts/snapshot_instruments.py", [], progress_cb
-    )
+    return await _run_script(job_id, "scripts/snapshot_instruments.py", [], progress_cb)

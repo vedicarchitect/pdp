@@ -6,6 +6,7 @@ The registry is the single source of truth for:
 - Artifact file layout and version naming.
 - Schema-drift detection: comparing a live feature set against the artifact's recorded schema.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,36 +20,65 @@ from pathlib import Path
 
 FEATURE_SCHEMA: list[str] = [
     # --- price structure ---
-    "close", "high", "low", "open",
-    "bar_range", "body", "upper_shadow", "lower_shadow",
-    "close_pct_change", "high_pct_change",
+    "close",
+    "high",
+    "low",
+    "open",
+    "bar_range",
+    "body",
+    "upper_shadow",
+    "lower_shadow",
+    "close_pct_change",
+    "high_pct_change",
     # --- EMA suite ---
-    "ema_9", "ema_20", "ema_50",
-    "close_vs_ema9", "close_vs_ema20", "close_vs_ema50",
-    "ema9_slope", "ema20_slope",
+    "ema_9",
+    "ema_20",
+    "ema_50",
+    "close_vs_ema9",
+    "close_vs_ema20",
+    "close_vs_ema50",
+    "ema9_slope",
+    "ema20_slope",
     # --- RSI ---
-    "rsi", "rsi_ma",
+    "rsi",
+    "rsi_ma",
     # --- VWAP ---
     "close_vs_vwap",
     # --- SuperTrend ---
     "st_direction",
     # --- MACD ---
-    "macd", "macd_signal", "macd_histogram", "macd_histogram_slope",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "macd_histogram_slope",
     # --- Candlestick ---
-    "cs_signal", "cs_doji", "cs_hammer", "cs_shooting_star",
-    "cs_bullish_engulfing", "cs_bearish_engulfing",
-    "cs_bullish_harami", "cs_bearish_harami",
-    "cs_morning_star", "cs_evening_star",
-    "cs_bullish_marubozu", "cs_bearish_marubozu",
+    "cs_signal",
+    "cs_doji",
+    "cs_hammer",
+    "cs_shooting_star",
+    "cs_bullish_engulfing",
+    "cs_bearish_engulfing",
+    "cs_bullish_harami",
+    "cs_bearish_harami",
+    "cs_morning_star",
+    "cs_evening_star",
+    "cs_bullish_marubozu",
+    "cs_bearish_marubozu",
     # --- Elliott Wave ---
-    "ew_trend", "ew_confidence",
+    "ew_trend",
+    "ew_confidence",
     # --- Fibonacci levels ---
-    "fib_distance", "fib_nearest_level",
+    "fib_distance",
+    "fib_nearest_level",
     # --- Elder Impulse ---
-    "elder_regime_green", "elder_regime_red",
-    "elder_ema13_rising", "elder_macd_hist_rising",
+    "elder_regime_green",
+    "elder_regime_red",
+    "elder_ema13_rising",
+    "elder_macd_hist_rising",
     # --- Pivot levels ---
-    "close_vs_pp", "close_vs_r1", "close_vs_s1",
+    "close_vs_pp",
+    "close_vs_r1",
+    "close_vs_s1",
 ]
 
 # ── Label schema ───────────────────────────────────────────────────────────────
@@ -56,12 +86,11 @@ FEATURE_SCHEMA: list[str] = [
 LABEL_SCHEMA_DIRECTIONAL: list[str] = ["down", "flat", "up"]
 
 # Expiry head: 5-class expiry-close-zone bucketed distance from spot
-LABEL_SCHEMA_EXPIRY: list[str] = [
-    "far_below", "near_below", "at_spot", "near_above", "far_above"
-]
+LABEL_SCHEMA_EXPIRY: list[str] = ["far_below", "near_below", "at_spot", "near_above", "far_above"]
 
 
 # ── Artifact layout ────────────────────────────────────────────────────────────
+
 
 def artifact_dir(model_dir: str, version: str) -> Path:
     """Return the versioned artifact directory path."""
@@ -82,17 +111,18 @@ def artifact_report_path(model_dir: str, version: str) -> Path:
 
 # ── Artifact metadata ──────────────────────────────────────────────────────────
 
+
 @dataclass
 class ArtifactMeta:
     version: str
     feature_schema: list[str]
     label_schema: list[str]
-    head: str            # "directional" or "expiry"
+    head: str  # "directional" or "expiry"
     security_id: str
     timeframe: str
-    training_from: str   # ISO date
-    training_to: str     # ISO date
-    horizon: int         # bars ahead used for label
+    training_from: str  # ISO date
+    training_to: str  # ISO date
+    horizon: int  # bars ahead used for label
     git_sha: str = "local"
     extra: dict = field(default_factory=dict)
 
@@ -124,11 +154,23 @@ class ArtifactMeta:
             training_to=d["training_to"],
             horizon=d["horizon"],
             git_sha=d.get("git_sha", "local"),
-            extra={k: v for k, v in d.items() if k not in {
-                "version", "feature_schema", "label_schema", "head",
-                "security_id", "timeframe", "training_from", "training_to",
-                "horizon", "git_sha",
-            }},
+            extra={
+                k: v
+                for k, v in d.items()
+                if k
+                not in {
+                    "version",
+                    "feature_schema",
+                    "label_schema",
+                    "head",
+                    "security_id",
+                    "timeframe",
+                    "training_from",
+                    "training_to",
+                    "horizon",
+                    "git_sha",
+                }
+            },
         )
 
     def save(self, model_dir: str) -> None:
@@ -143,6 +185,7 @@ class ArtifactMeta:
 
 
 # ── Drift guard ────────────────────────────────────────────────────────────────
+
 
 class SchemaDriftError(Exception):
     """Raised when the live feature schema does not match the artifact's schema."""
@@ -161,7 +204,9 @@ def check_schema(live_features: list[str], artifact_meta: ArtifactMeta) -> None:
             f"Extra in live: {sorted(extra)}. Missing from live: {sorted(missing)}."
         )
 
+
 # ── Active Model Management ──────────────────────────────────────────────────
+
 
 def get_active_model_version(model_dir: str) -> str | None:
     active_link = Path(model_dir) / "active.txt"
@@ -180,7 +225,7 @@ def list_artifacts(model_dir: str) -> list[tuple[ArtifactMeta, dict]]:
     base_dir = Path(model_dir)
     if not base_dir.exists():
         return []
-        
+
     results = []
     for d in base_dir.iterdir():
         if d.is_dir() and (d / "meta.json").exists():
@@ -191,7 +236,7 @@ def list_artifacts(model_dir: str) -> list[tuple[ArtifactMeta, dict]]:
                 results.append((meta, report))
             except Exception:
                 pass
-                
+
     # Sort by version descending
     results.sort(key=lambda x: x[0].version, reverse=True)
     return results

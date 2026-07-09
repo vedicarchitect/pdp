@@ -5,6 +5,7 @@ These tests do NOT require a running database — they exercise the pure logic
 of PaperBroker._fill, position upsert, and charges by injecting mock sessions
 and stubs.  DB integration tests (with a real Postgres) are deferred to CI.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -22,7 +23,6 @@ from pdp.orders.models import (
     PreflightResult,
     Product,
     Side,
-    TradeMode,
 )
 from pdp.orders.paper import PaperBroker, _should_fill
 from pdp.orders.router import OrderRouter
@@ -73,6 +73,7 @@ def _cost_row() -> BrokerCost:
 # Fill logic tests (pure, no DB)                                      #
 # ------------------------------------------------------------------ #
 
+
 class TestFillLogic:
     def test_market_order_fills_on_any_tick(self) -> None:
         o = _open_order(order_type=OrderType.MARKET)
@@ -101,6 +102,7 @@ class TestFillLogic:
 # ------------------------------------------------------------------ #
 # Position math tests                                                 #
 # ------------------------------------------------------------------ #
+
 
 class TestPositionMathDirect:
     """Test position upsert logic without DB by calling internals directly."""
@@ -227,6 +229,7 @@ class TestPositionMathDirect:
 # Charges                                                             #
 # ------------------------------------------------------------------ #
 
+
 class TestChargesIntegration:
     def test_optidx_charges_positive(self) -> None:
         from pdp.orders.paper import ChargesCalculator
@@ -250,6 +253,7 @@ class TestChargesIntegration:
 # ------------------------------------------------------------------ #
 # cancel_open_entry_orders                                            #
 # ------------------------------------------------------------------ #
+
 
 def _make_settings(live: bool = False) -> MagicMock:
     s = MagicMock()
@@ -309,6 +313,7 @@ class TestCancelOpenEntryOrders:
 # R2 — zero-avg guard + immediate-fill from Redis cache (hardening)   #
 # ------------------------------------------------------------------ #
 
+
 class TestZeroAvgGuard:
     """upsert_position must not compute realized P&L when old_avg == 0."""
 
@@ -326,7 +331,7 @@ class TestZeroAvgGuard:
             exchange_segment="NSE_FNO",
             product=Product.NRML,
             net_qty=-50,
-            avg_price=Decimal("0"),   # race condition: fill recorded zero
+            avg_price=Decimal("0"),  # race condition: fill recorded zero
             realized_pnl=Decimal("0"),
             unrealized_pnl=Decimal("0"),
         )
@@ -358,7 +363,7 @@ class TestZeroAvgGuard:
             product=Product.NRML,
             net_qty=100,
             avg_price=Decimal("0"),
-            realized_pnl=Decimal("50"),   # pre-existing realized from earlier
+            realized_pnl=Decimal("50"),  # pre-existing realized from earlier
             unrealized_pnl=Decimal("0"),
         )
         session = AsyncMock()
@@ -458,6 +463,7 @@ class TestImmediateFillFromCache:
 # W3 — Paper advisory: preflight failure must not block paper orders  #
 # ------------------------------------------------------------------ #
 
+
 def _make_paper_broker() -> PaperBroker:
     broker = PaperBroker.__new__(PaperBroker)
     broker._open_orders = {}
@@ -507,9 +513,7 @@ class TestPaperAdvisory:
 
         router = OrderRouter(settings=settings, paper=paper)
         # Force _preflight to return a violation
-        router._preflight = AsyncMock(
-            return_value=PreflightResult(ok=False, violations=["lot_check_failed"])
-        )
+        router._preflight = AsyncMock(return_value=PreflightResult(ok=False, violations=["lot_check_failed"]))
 
         order = await _place(router, _make_mock_session())
 
@@ -543,6 +547,7 @@ class TestPaperAdvisory:
 # ------------------------------------------------------------------ #
 # W4 — Feed-halt gate: live orders blocked when halt engaged          #
 # ------------------------------------------------------------------ #
+
 
 class TestFeedHaltGate:
     @pytest.mark.asyncio

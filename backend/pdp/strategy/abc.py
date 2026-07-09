@@ -39,8 +39,9 @@ class Strategy(ABC):
 
     strategy_id: str = ""
     params: dict = {}  # noqa: RUF012
-    _mode: str = "paper"         # "paper" | "live"; set by host from settings
+    _mode: str = "paper"  # "paper" | "live"; set by host from settings
     _slog: StrategyDailyLog | None = None  # set by host; None → logging is a no-op
+    _disarmed: bool = False  # set by host; True → ignore events
 
     @abstractmethod
     async def on_init(self, ctx: StrategyContext) -> None:
@@ -73,28 +74,32 @@ class Strategy(ABC):
         """Emit the run-start config header once at the beginning of each run."""
         if self._slog is None:
             return
-        self._slog.write({
-            "event": "run_start",
-            "strategy_id": self.strategy_id,
-            "mode": mode,
-            "timeframe": timeframe,
-            "params": params,
-            "watchlist": watchlist,
-            "ts": datetime.now(tz=_IST).isoformat(),
-        })
+        self._slog.write(
+            {
+                "event": "run_start",
+                "strategy_id": self.strategy_id,
+                "mode": mode,
+                "timeframe": timeframe,
+                "params": params,
+                "watchlist": watchlist,
+                "ts": datetime.now(tz=_IST).isoformat(),
+            }
+        )
 
     def log_decision(self, action: str, reason: str, **fields: Any) -> None:
         """Log a trading decision (open / scale / flip / leg_stop / day_stop / …)."""
         if self._slog is None:
             return
-        self._slog.write({
-            "event": "decision",
-            "strategy_id": self.strategy_id,
-            "action": action,
-            "reason": reason,
-            **fields,
-            "ts": datetime.now(tz=_IST).isoformat(),
-        })
+        self._slog.write(
+            {
+                "event": "decision",
+                "strategy_id": self.strategy_id,
+                "action": action,
+                "reason": reason,
+                **fields,
+                "ts": datetime.now(tz=_IST).isoformat(),
+            }
+        )
 
     def log_heartbeat(self, bar_time: datetime | None = None) -> None:
         """Emit a periodic state snapshot; call once per bar within the trading window."""

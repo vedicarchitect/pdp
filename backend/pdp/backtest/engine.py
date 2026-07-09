@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from pymongo import MongoClient
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.market.bars import BarClosed
-from pdp.strategy.abc import FillEvent, Strategy
+from pdp.strategy.abc import Strategy
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -293,21 +291,25 @@ class BacktestEngine:
             proceeds = Decimal(str(quantity)) * current_price
             pnl = proceeds - (position.quantity * position.entry_price)
 
-            self.trade_log.append({
-                "symbol": symbol,
-                "quantity": quantity,
-                "entry_price": float(position.entry_price),
-                "entry_time": position.entry_time,
-                "exit_price": float(current_price),
-                "exit_time": datetime.now(UTC),
-                "realized_pnl": float(pnl),
-            })
+            self.trade_log.append(
+                {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "entry_price": float(position.entry_price),
+                    "entry_time": position.entry_time,
+                    "exit_price": float(current_price),
+                    "exit_time": datetime.now(UTC),
+                    "realized_pnl": float(pnl),
+                }
+            )
 
             self.current_equity += proceeds
             self._max_equity = max(self._max_equity, self.current_equity)
 
             del self.positions[symbol]
-            log.info("order_filled", symbol=symbol, side="SELL", quantity=quantity, price=float(current_price))
+            log.info(
+                "order_filled", symbol=symbol, side="SELL", quantity=quantity, price=float(current_price)
+            )
             return True
 
         return False

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from uuid import UUID
 
 from pdp.db.session import get_session_maker
 from pdp.jobs.models import Job, JobStatus
@@ -42,9 +42,7 @@ async def job_websocket(websocket: WebSocket, job_id: UUID):
                 if job.status == JobStatus.CANCELLED.value
                 else f"Failed: {job.error or 'unknown'}"
             )
-            await websocket.send_text(
-                json.dumps({"progress": job.progress or 0, "message": msg})
-            )
+            await websocket.send_text(json.dumps({"progress": job.progress or 0, "message": msg}))
             return
 
         log.info("job_ws_connected", job_id=str(job_id))

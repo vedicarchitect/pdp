@@ -4,6 +4,7 @@ Subscribes to OrdersHub fill events, buffers per IST trading day in memory, and 
 upserts each day's entries + rollup stats to MongoDB ``paper_journal``. Read via the journal
 REST routes and the frontend panel.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -110,8 +111,19 @@ class JournalService:
     def get_stats(self, day: str | None = None) -> dict[str, Any]:
         day = day or _ist_today()
         return {"date": day, "stats": compute_daily_stats(self._trades_by_day.get(day, []))}
-        
+
     async def update_metadata(self, day: str, notes: str, tags: list[str], screenshots: list[str]) -> None:
+        # C2 fix: if this day's trades haven't been loaded into memory yet (e.g. editing
+        # a past day's notes after a restart), pull them from Mongo first so the next
+        # flush doesn't overwrite the stored trades with an empty list.
+        if day not in self._trades_by_day and self._mongo is not None:
+            try:
+                doc = await self._mongo["paper_journal"].find_one({"date": day})
+                if doc and isinstance(doc.get("trades"), list):
+                    self._trades_by_day[day] = doc["trades"]
+                    log.debug("journal_metadata_trades_hydrated", day=day, count=len(doc["trades"]))
+            except Exception as exc:
+                log.warning("journal_metadata_hydrate_failed", day=day, exc=str(exc))
         self._notes_by_day[day] = notes
         self._tags_by_day[day] = tags
         self._screenshots_by_day[day] = screenshots
@@ -124,7 +136,7 @@ class JournalService:
     async def _load_today(self) -> None:
         if self._mongo is None:
             return
-        
+
         try:
             doc = await self._mongo["paper_journal"].find_one({"date": _ist_today()})
             if doc:
@@ -147,7 +159,7 @@ class JournalService:
     async def _flush(self) -> None:
         if self._mongo is None or not self._dirty_days:
             return
-            
+
         days = list(self._dirty_days)
         self._dirty_days.clear()
         for day in days:
@@ -164,9 +176,7 @@ class JournalService:
                 "updated_at": datetime.now(UTC),
             }
             try:
-                await self._mongo["paper_journal"].update_one(
-                    {"date": day}, {"$set": doc}, upsert=True
-                )
+                await self._mongo["paper_journal"].update_one({"date": day}, {"$set": doc}, upsert=True)
             except Exception as exc:
                 log.warning("journal_flush_failed", day=day, exc=str(exc))
                 self._dirty_days.add(day)  # retry next cycle

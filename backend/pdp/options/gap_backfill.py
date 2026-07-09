@@ -24,6 +24,7 @@ the 44 option calls are dispatched concurrently via ``ThreadPoolExecutor(max_wor
 so the wall-clock time per day drops from ~47 s (sequential) to ~12 s (~4x faster).  All docs are
 collected in memory and written in a single ``bulk_write`` per day to minimise MongoDB round trips.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as _dtime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,20 +49,21 @@ log = structlog.get_logger()
 IST = timedelta(hours=5, minutes=30)
 _IST_MS = int(IST.total_seconds() * 1000)
 
-_API_RATE = 3.0     # max requests per second (Dhan limit is 5; we stay under)
-_MAX_WORKERS = 1     # concurrent option-fetch threads per day
+_API_RATE = 3.0  # max requests per second (Dhan limit is 5; we stay under)
+_MAX_WORKERS = 1  # concurrent option-fetch threads per day
 _RETRY_ATTEMPTS = 1  # retries on DH-904 / transient errors
 _RETRY_BASE_SLEEP = 2.0  # seconds; doubles each retry (2→4→8→16)
 
 
 # ── Global token-bucket rate limiter ─────────────────────────────────────────
 
+
 class _RateLimiter:
     """Thread-safe token bucket: at most ``rate`` acquire() calls per second."""
 
     def __init__(self, rate: float) -> None:
         self._rate = rate
-        self._tokens: float = rate      # start full so first burst is immediate
+        self._tokens: float = rate  # start full so first burst is immediate
         self._last: float = time.monotonic()
         self._lock = threading.Lock()
 
@@ -84,6 +87,7 @@ _rate_limiter = _RateLimiter(_API_RATE)
 
 
 # ── Trade-day / band enumeration ─────────────────────────────────────────────
+
 
 def labels(band: int) -> list[tuple[str, int]]:
     """ATM-relative labels with their grid offsets: ATM, ATM±1 .. ATM±band."""
@@ -115,14 +119,20 @@ def trading_days(start: date, end: date, holiday_set: set[date]) -> list[date]:
 
 # ── Dhan payload helpers ──────────────────────────────────────────────────────
 
+
 def unwrap_side(resp: dict, opt_type: str) -> dict | None:
     """Drill into the (possibly double-wrapped) rolling-option payload for one side."""
     if not (isinstance(resp, dict) and resp.get("status") == "success"):
         return None
     key = "ce" if opt_type == "CE" else "pe"
     data = resp.get("data", {})
-    while (isinstance(data, dict) and "data" in data
-           and "ce" not in data and "pe" not in data and "open" not in data):
+    while (
+        isinstance(data, dict)
+        and "data" in data
+        and "ce" not in data
+        and "pe" not in data
+        and "open" not in data
+    ):
         data = data["data"]
     if isinstance(data, dict) and key in data:
         data = data[key]
@@ -135,10 +145,16 @@ def spot_by_minute(dhan: Any, ds: str, *, underlying_sid: int = 13) -> dict[date
     """Index 1m close keyed by UTC minute, to derive ATM per bar."""
     for attempt in range(_RETRY_ATTEMPTS):
         _rate_limiter.acquire()
-        r = dhan.intraday_minute_data(security_id=str(underlying_sid), exchange_segment="IDX_I",
-                                      instrument_type="INDEX", from_date=ds, to_date=ds, interval=1)
+        r = dhan.intraday_minute_data(
+            security_id=str(underlying_sid),
+            exchange_segment="IDX_I",
+            instrument_type="INDEX",
+            from_date=ds,
+            to_date=ds,
+            interval=1,
+        )
         if isinstance(r, dict) and r.get("error_code") == "DH-904":
-            sleep_s = _RETRY_BASE_SLEEP * (2 ** attempt)
+            sleep_s = _RETRY_BASE_SLEEP * (2**attempt)
             log.warning("gap_fill_spot_rate_limited", day=ds, attempt=attempt, retry_in=sleep_s)
             time.sleep(sleep_s)
             continue
@@ -146,9 +162,12 @@ def spot_by_minute(dhan: Any, ds: str, *, underlying_sid: int = 13) -> dict[date
         if isinstance(data, dict) and "data" in data and "open" not in data:
             data = data["data"]
         if not isinstance(data, dict):
-            log.warning("gap_fill_spot_unavailable", day=ds,
-                        status=r.get("status") if isinstance(r, dict) else None,
-                        remarks=r.get("remarks") if isinstance(r, dict) else None)
+            log.warning(
+                "gap_fill_spot_unavailable",
+                day=ds,
+                status=r.get("status") if isinstance(r, dict) else None,
+                remarks=r.get("remarks") if isinstance(r, dict) else None,
+            )
             return {}
         closes, tss = data.get("close", []), data.get("timestamp", data.get("start_Time", []))
         out: dict[datetime, float] = {}
@@ -156,16 +175,27 @@ def spot_by_minute(dhan: Any, ds: str, *, underlying_sid: int = 13) -> dict[date
             if c is None or i >= len(tss):
                 continue
             t = tss[i]
-            bt = datetime.fromtimestamp(t, tz=UTC) if isinstance(t, (int, float)) else \
-                datetime.fromisoformat(str(t)).astimezone(UTC)
+            bt = (
+                datetime.fromtimestamp(t, tz=UTC)
+                if isinstance(t, (int, float))
+                else datetime.fromisoformat(str(t)).astimezone(UTC)
+            )
             out[bt.replace(second=0, microsecond=0)] = float(c)
         return out
     return {}
 
 
-def bars_to_docs(data: dict, spot: dict[datetime, float], exp: date, ot: str,
-                 label: str, offset: int, *,
-                 underlying: str = "NIFTY", strike_step: int = 50) -> list[dict]:
+def bars_to_docs(
+    data: dict,
+    spot: dict[datetime, float],
+    exp: date,
+    ot: str,
+    label: str,
+    offset: int,
+    *,
+    underlying: str = "NIFTY",
+    strike_step: int = 50,
+) -> list[dict]:
     """Convert one rolling-option side payload into fixed-strike option_bars docs."""
     o, h, lo, c = data["open"], data["high"], data["low"], data["close"]
     vol, oi, iv = data.get("volume", []), data.get("oi", []), data.get("iv", [])
@@ -175,26 +205,52 @@ def bars_to_docs(data: dict, spot: dict[datetime, float], exp: date, ot: str,
         if not c[i] or i >= len(tss):
             continue
         t = tss[i]
-        bt = (datetime.fromtimestamp(t, tz=UTC) if isinstance(t, (int, float))
-              else datetime.fromisoformat(str(t)).astimezone(UTC)).replace(second=0, microsecond=0)
+        bt = (
+            datetime.fromtimestamp(t, tz=UTC)
+            if isinstance(t, (int, float))
+            else datetime.fromisoformat(str(t)).astimezone(UTC)
+        ).replace(second=0, microsecond=0)
         sp = spot.get(bt)
         if sp is None:
             continue
         strike = round(sp / strike_step) * strike_step + offset * strike_step
-        docs.append(build_option_bar_doc(
-            underlying=underlying, expiry_date=exp, strike=float(strike), option_type=ot,
-            timeframe="1m", ts=bt, open=o[i], high=h[i], low=lo[i], close=c[i],
-            volume=vol[i] if i < len(vol) else 0, oi=oi[i] if i < len(oi) else 0,
-            iv=iv[i] if i < len(iv) else 0.0,
-            expiry_flag="WEEK", strike_label=label,
-            trading_symbol=symbol_for(underlying, exp, float(strike), ot), source="dhan_api"))
+        docs.append(
+            build_option_bar_doc(
+                underlying=underlying,
+                expiry_date=exp,
+                strike=float(strike),
+                option_type=ot,
+                timeframe="1m",
+                ts=bt,
+                open=o[i],
+                high=h[i],
+                low=lo[i],
+                close=c[i],
+                volume=vol[i] if i < len(vol) else 0,
+                oi=oi[i] if i < len(oi) else 0,
+                iv=iv[i] if i < len(iv) else 0.0,
+                expiry_flag="WEEK",
+                strike_label=label,
+                trading_symbol=symbol_for(underlying, exp, float(strike), ot),
+                source="dhan_api",
+            )
+        )
     return docs
 
 
-def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
-             codes: list[int], label_offsets: list[tuple[str, int]], *,
-             underlying: str = "NIFTY", underlying_sid: int = 13,
-             strike_step: int = 50, exchange_segment: str = "NSE_FNO") -> int:
+def fill_day(
+    dhan: Any,
+    col: Any,
+    cal: NiftyExpiryCalendar,
+    ds: str,
+    codes: list[int],
+    label_offsets: list[tuple[str, int]],
+    *,
+    underlying: str = "NIFTY",
+    underlying_sid: int = 13,
+    strike_step: int = 50,
+    exchange_segment: str = "NSE_FNO",
+) -> int:
     """Backfill one trade day's band from Dhan; returns the number of new bars inserted.
 
     Spot data is fetched sequentially first (needed to derive strikes).  The 44 option-series
@@ -209,18 +265,23 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
 
     # Interior-gap check on spot bars: if there is a hole in the minute series
     # between the first and last bar the day is suspect; skip rather than persist holes.
-    spot_keys = sorted(spot.keys())
+    # Dhan's intraday endpoint can return a single stray tick well outside the
+    # 09:15-15:30 IST session (observed: one bar at 18:33 IST on an otherwise
+    # complete day) — used unfiltered, that stray bar becomes the "last" key and
+    # makes a complete session look like it has one giant gap after close. Clip
+    # to the session window (03:45-10:00 UTC = 09:15-15:30 IST, +5min buffer)
+    # before computing the gap so a genuine complete day isn't skipped.
+    _session_start = datetime.combine(date.fromisoformat(ds), _dtime(3, 45), tzinfo=UTC)
+    _session_end = datetime.combine(date.fromisoformat(ds), _dtime(10, 5), tzinfo=UTC)
+    spot_keys = sorted(k for k in spot if _session_start <= k <= _session_end)
     if spot_keys:
-        expected_minutes = int(
-            (spot_keys[-1] - spot_keys[0]).total_seconds() / 60
-        ) + 1
+        expected_minutes = int((spot_keys[-1] - spot_keys[0]).total_seconds() / 60) + 1
         if expected_minutes > 1:
             # Build a list of per-minute presence booleans and treat each as a "chunk"
             from datetime import timedelta as _td
+
             minute_chunks = [
-                [spot_keys[0] + _td(minutes=m)]
-                if (spot_keys[0] + _td(minutes=m)) in spot
-                else []
+                [spot_keys[0] + _td(minutes=m)] if (spot_keys[0] + _td(minutes=m)) in spot else []
                 for m in range(expected_minutes)
             ]
             if has_interior_gap(minute_chunks):
@@ -258,30 +319,46 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
             _rate_limiter.acquire()
             try:
                 resp = dhan.expired_options_data(
-                    security_id=underlying_sid, exchange_segment=exchange_segment,
-                    instrument_type="OPTIDX", expiry_flag="WEEK", expiry_code=code,
-                    strike=label, drv_option_type=drv,
+                    security_id=underlying_sid,
+                    exchange_segment=exchange_segment,
+                    instrument_type="OPTIDX",
+                    expiry_flag="WEEK",
+                    expiry_code=code,
+                    strike=label,
+                    drv_option_type=drv,
                     required_data=["open", "high", "low", "close", "volume", "oi", "iv"],
-                    from_date=ds, to_date=ds, interval=1)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("gap_fill_api_error", day=ds, code=code, label=label,
-                            ot=ot, attempt=attempt, exc=str(exc))
+                    from_date=ds,
+                    to_date=ds,
+                    interval=1,
+                )
+            except Exception as exc:
+                log.warning(
+                    "gap_fill_api_error", day=ds, code=code, label=label, ot=ot, attempt=attempt, exc=str(exc)
+                )
                 if attempt < _RETRY_ATTEMPTS - 1:
-                    time.sleep(_RETRY_BASE_SLEEP * (2 ** attempt))
+                    time.sleep(_RETRY_BASE_SLEEP * (2**attempt))
                     continue
                 return []
             # Detect DH-904 rate-limit response (dict, not exception)
             if isinstance(resp, dict) and resp.get("error_code") == "DH-904":
-                sleep_s = _RETRY_BASE_SLEEP * (2 ** attempt)
-                log.warning("gap_fill_rate_limited", day=ds, code=code, label=label,
-                            ot=ot, attempt=attempt, retry_in=sleep_s)
+                sleep_s = _RETRY_BASE_SLEEP * (2**attempt)
+                log.warning(
+                    "gap_fill_rate_limited",
+                    day=ds,
+                    code=code,
+                    label=label,
+                    ot=ot,
+                    attempt=attempt,
+                    retry_in=sleep_s,
+                )
                 time.sleep(sleep_s)
                 continue
             data = unwrap_side(resp, ot)
             if not data:
                 return []
-            return bars_to_docs(data, spot, exp, ot, label, offset,
-                                underlying=underlying, strike_step=strike_step)
+            return bars_to_docs(
+                data, spot, exp, ot, label, offset, underlying=underlying, strike_step=strike_step
+            )
         return []
 
     # Fan out concurrently; collect all docs; single bulk upsert.
@@ -291,7 +368,7 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
         for fut in as_completed(futures):
             try:
                 all_docs.extend(fut.result())
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 task = futures[fut]
                 log.warning("gap_fill_worker_error", day=ds, task=str(task), exc=str(exc))
 
@@ -299,6 +376,7 @@ def fill_day(dhan: Any, col: Any, cal: "NiftyExpiryCalendar", ds: str,
 
 
 # ── Interior-gap detection (market-feed-resilience) ──────────────────────────
+
 
 def nonempty_idx(chunks: list[list]) -> list[int]:
     """Return indices of non-empty chunks (those with at least one bar)."""
@@ -322,6 +400,7 @@ def has_interior_gap(chunks: list[list]) -> bool:
 
 
 # ── Gap detection ─────────────────────────────────────────────────────────────
+
 
 def collapse_date_ranges(days: list[date]) -> list[str]:
     """Collapse a sorted/unsorted date list into ``['YYYY-MM-DD..YYYY-MM-DD', 'YYYY-MM-DD', …]``
@@ -355,8 +434,15 @@ def _ist_day_window(d: date) -> tuple[datetime, datetime]:
     return lo, lo + timedelta(days=1)
 
 
-def days_missing(col: Any, days: list[date], codes: list[int], band: int,
-                 *, min_fraction: float = 0.5, underlying: str = "NIFTY") -> list[date]:
+def days_missing(
+    col: Any,
+    days: list[date],
+    codes: list[int],
+    band: int,
+    *,
+    min_fraction: float = 0.5,
+    underlying: str = "NIFTY",
+) -> list[date]:
     """Trade-days whose option_bars coverage is below ``min_fraction`` of the expected band.
 
     A single aggregation counts distinct contracts per IST-day across the window; any day with
@@ -370,12 +456,15 @@ def days_missing(col: Any, days: list[date], codes: list[int], band: int,
     win_lo, _ = _ist_day_window(min(days))
     _, win_hi = _ist_day_window(max(days))
     pipeline = [
-        {"$match": {"underlying": underlying, "timeframe": "1m",
-                    "ts": {"$gte": win_lo, "$lt": win_hi}}},
-        {"$group": {"_id": {"day": {"$dateTrunc": {"date": {"$add": ["$ts", _IST_MS]},
-                                                   "unit": "day"}},
-                            "contract": {"e": "$expiry_date", "s": "$strike",
-                                         "o": "$option_type"}}}},
+        {"$match": {"underlying": underlying, "timeframe": "1m", "ts": {"$gte": win_lo, "$lt": win_hi}}},
+        {
+            "$group": {
+                "_id": {
+                    "day": {"$dateTrunc": {"date": {"$add": ["$ts", _IST_MS]}, "unit": "day"}},
+                    "contract": {"e": "$expiry_date", "s": "$strike", "o": "$option_type"},
+                }
+            }
+        },
         {"$group": {"_id": "$_id.day", "contracts": {"$sum": 1}}},
     ]
     counts: dict[date, int] = {}
@@ -387,39 +476,81 @@ def days_missing(col: Any, days: list[date], codes: list[int], band: int,
 
 # ── High-level entry points ───────────────────────────────────────────────────
 
-def backfill_gaps(*, dhan: Any, col: Any, cal: "NiftyExpiryCalendar", days: list[date],
-                  codes: list[int], band: int, min_fraction: float = 0.5,
-                  only_missing: bool = True, underlying: str = "NIFTY",
-                  underlying_sid: int = 13, strike_step: int = 50,
-                  exchange_segment: str = "NSE_FNO") -> dict[str, Any]:
+
+def backfill_gaps(
+    *,
+    dhan: Any,
+    col: Any,
+    cal: NiftyExpiryCalendar,
+    days: list[date],
+    codes: list[int],
+    band: int,
+    min_fraction: float = 0.5,
+    only_missing: bool = True,
+    underlying: str = "NIFTY",
+    underlying_sid: int = 13,
+    strike_step: int = 50,
+    exchange_segment: str = "NSE_FNO",
+) -> dict[str, Any]:
     """Detect gaps over ``days`` and backfill them. Returns a summary dict.
 
     With ``only_missing`` (default) just the under-covered days are fetched; set it False to
     re-fetch every day in the window (still idempotent via first-write-wins).
     """
-    targets = (days_missing(col, days, codes, band, min_fraction=min_fraction, underlying=underlying)
-               if only_missing else days)
+    targets = (
+        days_missing(col, days, codes, band, min_fraction=min_fraction, underlying=underlying)
+        if only_missing
+        else days
+    )
     label_offsets = labels(band)
     total, filled = 0, 0
     for d in targets:
-        n = fill_day(dhan, col, cal, d.isoformat(), codes, label_offsets,
-                     underlying=underlying, underlying_sid=underlying_sid,
-                     strike_step=strike_step, exchange_segment=exchange_segment)
+        n = fill_day(
+            dhan,
+            col,
+            cal,
+            d.isoformat(),
+            codes,
+            label_offsets,
+            underlying=underlying,
+            underlying_sid=underlying_sid,
+            strike_step=strike_step,
+            exchange_segment=exchange_segment,
+        )
         total += n
         if n:
             filled += 1
         log.info("gap_fill_day_done", day=d.isoformat(), inserted=n, underlying=underlying)
-    log.info("gap_fill_done", scanned=len(days), gaps=len(targets),
-             days_filled=filled, total_inserted=total, underlying=underlying)
-    return {"scanned": len(days), "gaps": len(targets), "days_filled": filled,
-            "total_inserted": total, "gap_days": [d.isoformat() for d in targets]}
+    log.info(
+        "gap_fill_done",
+        scanned=len(days),
+        gaps=len(targets),
+        days_filled=filled,
+        total_inserted=total,
+        underlying=underlying,
+    )
+    return {
+        "scanned": len(days),
+        "gaps": len(targets),
+        "days_filled": filled,
+        "total_inserted": total,
+        "gap_days": [d.isoformat() for d in targets],
+    }
 
 
-def run_gap_backfill(*, settings: Any, cal: "NiftyExpiryCalendar", lookback_days: int,
-                     codes: list[int] | None = None, band: int | None = None,
-                     end: date | None = None, underlying: str = "NIFTY",
-                     underlying_sid: int = 13, strike_step: int = 50,
-                     exchange_segment: str = "NSE_FNO") -> dict[str, Any]:
+def run_gap_backfill(
+    *,
+    settings: Any,
+    cal: NiftyExpiryCalendar,
+    lookback_days: int,
+    codes: list[int] | None = None,
+    band: int | None = None,
+    end: date | None = None,
+    underlying: str = "NIFTY",
+    underlying_sid: int = 13,
+    strike_step: int = 50,
+    exchange_segment: str = "NSE_FNO",
+) -> dict[str, Any]:
     """Blocking, self-contained gap backfill over a rolling look-back window.
 
     Builds its own sync pymongo collection + Dhan REST client from ``settings`` (so it is safe to
@@ -442,10 +573,33 @@ def run_gap_backfill(*, settings: Any, cal: "NiftyExpiryCalendar", lookback_days
     from pymongo import MongoClient
 
     dhan = dhanhq(DhanContext(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN))
-    col = MongoClient(settings.MONGO_URI)[settings.MONGO_DB_NAME]["option_bars"]
-    log.info("gap_backfill_scan", **{"from": str(start), "to": str(end),
-                                      "trading_days": len(days), "codes": codes, "band": band,
-                                      "underlying": underlying})
-    return backfill_gaps(dhan=dhan, col=col, cal=cal, days=days, codes=codes, band=band,
-                         underlying=underlying, underlying_sid=underlying_sid,
-                         strike_step=strike_step, exchange_segment=exchange_segment)
+    col = MongoClient(
+        settings.MONGO_URI,
+        socketTimeoutMS=settings.MONGO_SOCKET_TIMEOUT_MS,
+        connectTimeoutMS=settings.MONGO_CONNECT_TIMEOUT_MS,
+        serverSelectionTimeoutMS=settings.MONGO_CONNECT_TIMEOUT_MS,
+        maxPoolSize=1,  # one-shot background job; a single connection is sufficient
+    )[settings.MONGO_DB_NAME]["option_bars"]
+    log.info(
+        "gap_backfill_scan",
+        **{
+            "from": str(start),
+            "to": str(end),
+            "trading_days": len(days),
+            "codes": codes,
+            "band": band,
+            "underlying": underlying,
+        },
+    )
+    return backfill_gaps(
+        dhan=dhan,
+        col=col,
+        cal=cal,
+        days=days,
+        codes=codes,
+        band=band,
+        underlying=underlying,
+        underlying_sid=underlying_sid,
+        strike_step=strike_step,
+        exchange_segment=exchange_segment,
+    )

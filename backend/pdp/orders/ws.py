@@ -37,10 +37,11 @@ class _Client:
 class OrdersHub:
     """Broadcasts order/trade/position events to all connected /ws/orders clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, redis: Any | None = None) -> None:
         self._clients: set[_Client] = set()
         self._position_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._fill_callbacks: list[Callable[[dict[str, Any]], None]] = []
+        self._redis = redis
 
     def register_position_callback(self, cb: Callable[[dict[str, Any]], None]) -> None:
         self._position_callbacks.append(cb)
@@ -61,9 +62,19 @@ class OrdersHub:
                     cb(payload)
                 except Exception as exc:
                     log.warning("fill_callback_error", exc=str(exc))
+                    
+        msg = json.dumps({"type": event_type, "payload": payload})
+        if self._redis is not None:
+            asyncio.create_task(self._redis.publish(f"orders.{event_type}", msg))
+
         if not self._clients:
             return
-        msg = json.dumps({"type": event_type, "payload": payload})
+        for client in self._clients:
+            client.push(msg)
+
+    def publish_raw(self, msg: str) -> None:
+        if not self._clients:
+            return
         for client in self._clients:
             client.push(msg)
 

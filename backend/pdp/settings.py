@@ -11,11 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class BacktestCommissionSettings(BaseModel):
     # Options (Equity) NSE — verified against Dhan charge schedule 2026-06-26
     brokerage_per_order: Decimal = Decimal("20.00")
-    stt_rate: Decimal = Decimal("0.0015")          # 0.15% on sell (premium); was wrong at 0.001
+    stt_rate: Decimal = Decimal("0.0015")  # 0.15% on sell (premium); was wrong at 0.001
     txn_charge_rate: Decimal = Decimal("0.000355299")  # 0.0355299% NSE options on premium
-    sebi_rate: Decimal = Decimal("0.000001")        # 0.0001% of turnover; was 10x too high
-    stamp_duty_rate: Decimal = Decimal("0.00003")   # 0.003% on buy turnover; was 0.004%
-    ipft_rate: Decimal = Decimal("0.000000001")     # 0.0000001% — negligible, included for completeness
+    sebi_rate: Decimal = Decimal("0.000001")  # 0.0001% of turnover; was 10x too high
+    stamp_duty_rate: Decimal = Decimal("0.00003")  # 0.003% on buy turnover; was 0.004%
+    ipft_rate: Decimal = Decimal("0.000000001")  # 0.0000001% — negligible, included for completeness
     gst_rate: Decimal = Decimal("0.18")
 
 
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     LIVE: bool = False
     BROKER: Literal["paper", "dhan"] = "paper"
+    PDP_ROLE: Literal["all", "api", "engine", "ops"] = "all"
 
     DATABASE_URL: str = Field(...)
     DATABASE_SYNC_URL: str = Field(...)
@@ -45,11 +46,10 @@ class Settings(BaseSettings):
     # Broker account sync (chunk 2: broker-account-sync)
     BROKER_SYNC_ENABLED: bool = False
     BROKER_SYNC_EOD_TIME: str = "15:45"  # IST HH:MM — daily archival fires after close
+    BROKER_INTRADAY_POLL_SECONDS: int = 300  # 5 minutes
     BROKER_ACCOUNT_LABEL: str = "primary"
 
-    DHAN_SCRIPMASTER_URL: str = (
-        "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-    )
+    DHAN_SCRIPMASTER_URL: str = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
     # Daily filtered scrip-master snapshots: only these underlyings (+ their index rows)
     # are persisted per day for historical (expired-contract) backtest lookups.
     SNAPSHOT_UNDERLYINGS: str = '["NIFTY","BANKNIFTY","SENSEX"]'
@@ -60,6 +60,27 @@ class Settings(BaseSettings):
     MONGO_URI: str = "mongodb://localhost:27017"
     MONGO_DB_NAME: str = "pdp"
     MONGO_CHAIN_TTL_DAYS: int = 30
+
+    # ── API authentication ────────────────────────────────────────────────
+    # Empty string = auth disabled (dev/local). Set a non-empty value in prod.
+    API_AUTH_KEY: str = ""
+
+    # ── PostgreSQL connection pool tuning ────────────────────────────────
+    # pool_recycle: recycle connections older than this many seconds so
+    # connections closed by the DB/proxy aren't reused stale.
+    DB_POOL_RECYCLE_SECONDS: int = 1800
+    # pool_timeout: seconds to wait for a connection from the pool before
+    # raising; prevents hung coroutines on pool exhaustion.
+    # raise after this many seconds waiting for a connection
+    DB_POOL_TIMEOUT_SECONDS: int = 30
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+
+    # ── MongoDB client timeouts & pool bounds ────────────────────────────
+    MONGO_SOCKET_TIMEOUT_MS: int = 20000  # ms; stalled op raises instead of hanging
+    MONGO_CONNECT_TIMEOUT_MS: int = 5000  # ms; initial connection timeout
+    MONGO_MAX_POOL_SIZE: int = 50  # Motor connection pool ceiling
+    MONGO_MAX_IDLE_TIME_MS: int = 60000  # ms; idle connection recycle threshold
 
     OPTIONS_POLL_INTERVAL_SECONDS: int = 30
     OPTIONS_RISK_FREE_RATE: float = 0.065
@@ -111,15 +132,15 @@ class Settings(BaseSettings):
     BACKTEST_ARCHIVE_LOCAL: bool = False
 
     # ML signal (candlestick-ml-signals capability)
-    ML_ENABLED: bool = False                         # master switch; False = no model loaded
-    ML_MODEL_DIR: str = "data/models"                # versioned artifact root
-    ML_ACTIVE_VERSION: str = ""                      # e.g. "v1"; empty = no model served
-    ML_HORIZON: int = 5                              # bars-ahead horizon for directional label
-    ML_UP_THRESHOLD: float = 0.002                   # return fraction → "up"
-    ML_DOWN_THRESHOLD: float = -0.002                # return fraction → "down"
-    ML_EXPIRY_HEAD_ENABLED: bool = False             # phase-2 expiry-close head (off by default)
-    ML_EXPIRY_NEAR_THRESHOLD: float = 0.005          # distance fraction → near_above/near_below
-    ML_EXPIRY_FAR_THRESHOLD: float = 0.015           # distance fraction → far_above/far_below
+    ML_ENABLED: bool = False  # master switch; False = no model loaded
+    ML_MODEL_DIR: str = "data/models"  # versioned artifact root
+    ML_ACTIVE_VERSION: str = ""  # e.g. "v1"; empty = no model served
+    ML_HORIZON: int = 5  # bars-ahead horizon for directional label
+    ML_UP_THRESHOLD: float = 0.002  # return fraction → "up"
+    ML_DOWN_THRESHOLD: float = -0.002  # return fraction → "down"
+    ML_EXPIRY_HEAD_ENABLED: bool = False  # phase-2 expiry-close head (off by default)
+    ML_EXPIRY_NEAR_THRESHOLD: float = 0.005  # distance fraction → near_above/near_below
+    ML_EXPIRY_FAR_THRESHOLD: float = 0.015  # distance fraction → far_above/far_below
 
     # ── Live event publisher (event-publisher capability) ──────────────────────
     # Continuously monitors manual Dhan positions + the underlying market and emits
@@ -127,10 +148,10 @@ class Settings(BaseSettings):
     EVENTS_ENABLED: bool = True
     # JSON list/dict strings parsed via pdp.events.config helpers (mirrors OPTIONS_UNDERLYINGS).
     EVENTS_SPOT_TIMEFRAMES: str = '["5m","15m","30m","1H","1D"]'
-    EVENTS_EMA_PAIRS: str = "[[9,20],[9,50],[20,50]]"     # fast/slow EMA crossover pairs
-    EVENTS_PRICE_EMA_PERIODS: str = "[50]"                # EMAs to watch for price crosses
-    EVENTS_WATCH_LEVELS: str = "{}"                        # {"NIFTY":[23600,24000]}
-    EVENTS_POSITION_RANGES: str = "{}"                    # {"NIFTY:strangle":[23500,24500]}
+    EVENTS_EMA_PAIRS: str = "[[9,20],[9,50],[20,50]]"  # fast/slow EMA crossover pairs
+    EVENTS_PRICE_EMA_PERIODS: str = "[50]"  # EMAs to watch for price crosses
+    EVENTS_WATCH_LEVELS: str = "{}"  # {"NIFTY":[23600,24000]}
+    EVENTS_POSITION_RANGES: str = "{}"  # {"NIFTY:strangle":[23500,24500]}
     EVENTS_PROXIMITY_BAND_PTS: float = 30.0
     EVENTS_CONFLUENCE_MIN: int = 2
     EVENTS_CONFLUENCE_BAND_PTS: float = 25.0
@@ -142,7 +163,7 @@ class Settings(BaseSettings):
     EVENTS_VOLUME_SPIKE_Z: float = 3.0
     EVENTS_PCR_BANDS: str = "[0.7,1.3]"
     EVENTS_GEX_WALL_PTS: float = 50.0
-    EVENTS_DELTA_NEUTRAL_BAND: float = 0.15              # fraction of net qty
+    EVENTS_DELTA_NEUTRAL_BAND: float = 0.15  # fraction of net qty
     EVENTS_GAP_PCT: float = 0.5
     EVENTS_STATS_INTERVAL_SECONDS: int = 300
     EVENTS_POSITION_SYNC_SECONDS: int = 30
@@ -155,13 +176,13 @@ class Settings(BaseSettings):
     EVENTS_VAPID_SUBJECT: str = "mailto:ops@pdp.local"
 
     # Indicator suite defaults (used as fallback; overridden per-entry via watchlist indicators: [...])
-    INDICATOR_EMA_PERIODS: str = "9,20,50,100,200"   # comma-separated ints
+    INDICATOR_EMA_PERIODS: str = "9,20,50,100,200"  # comma-separated ints
     INDICATOR_RSI_PERIOD: int = 14
     INDICATOR_PSAR_STEP: float = 0.02
     INDICATOR_PSAR_MAX_STEP: float = 0.2
     INDICATOR_VWMA_PERIOD: int = 20
-    INDICATOR_PROFILE_BUCKET_SIZE: float = 50.0       # price-bucket width for VP / MP
-    INDICATOR_PROFILE_VALUE_AREA_PCT: float = 0.70    # VP value-area coverage
+    INDICATOR_PROFILE_BUCKET_SIZE: float = 50.0  # price-bucket width for VP / MP
+    INDICATOR_PROFILE_VALUE_AREA_PCT: float = 0.70  # VP value-area coverage
 
     backtest_commission: BacktestCommissionSettings = BacktestCommissionSettings()
 
@@ -175,29 +196,29 @@ class Settings(BaseSettings):
     OPENSEARCH_PASSWORD: str = ""
     OPENSEARCH_VERIFY_CERTS: bool = False
     OPENSEARCH_INDEX_PREFIX: str = "pdp"
-    OPENSEARCH_BULK_INTERVAL: float = 2.0   # seconds between background bulk flushes
-    OPENSEARCH_BULK_MAX: int = 500          # flush early once this many docs are queued
-    OPENSEARCH_QUEUE_MAX: int = 10000       # drop-on-full beyond this (never blocks callers)
-    OPENSEARCH_LOG_LEVEL: str = "INFO"      # min structlog level shipped to pdp-logs-*
+    OPENSEARCH_BULK_INTERVAL: float = 2.0  # seconds between background bulk flushes
+    OPENSEARCH_BULK_MAX: int = 500  # flush early once this many docs are queued
+    OPENSEARCH_QUEUE_MAX: int = 10000  # drop-on-full beyond this (never blocks callers)
+    OPENSEARCH_LOG_LEVEL: str = "INFO"  # min structlog level shipped to pdp-logs-*
 
     # ── Ops safety net (ops-safety-net capability) ────────────────────────
     ERRORS_JSONL_PATH: str = "logs/errors.jsonl"  # ERROR-only structured log sink
-    ERRORS_JSONL_MAX_LINES: int = 1000            # truncate on startup if file exceeds this
-    LOG_REDACTION_ENABLED: bool = True            # redact secrets from all log sinks
-    FEED_STALE_HALT_SECONDS: int = 180            # sustained stale seconds → kill-switch engage
+    ERRORS_JSONL_MAX_LINES: int = 1000  # truncate on startup if file exceeds this
+    LOG_REDACTION_ENABLED: bool = True  # redact secrets from all log sinks
+    FEED_STALE_HALT_SECONDS: int = 180  # sustained stale seconds → kill-switch engage
 
     # ── Market feed resilience (market-feed-resilience capability) ────────
-    FEED_STALE_SECONDS: int = 60            # seconds without a tick before feed_stale fires
+    FEED_STALE_SECONDS: int = 60  # seconds without a tick before feed_stale fires
     FEED_RECONNECT_BASE_DELAY: float = 1.0  # initial reconnect back-off (seconds)
     FEED_RECONNECT_MAX_DELAY: float = 30.0  # cap for exponential reconnect back-off
-    SCRIP_REFRESH_ENABLED: bool = False     # daily pre-open scrip master refresh
-    SCRIP_REFRESH_TIME: str = "08:45"       # IST HH:MM for the daily refresh
+    SCRIP_REFRESH_ENABLED: bool = False  # daily pre-open scrip master refresh
+    SCRIP_REFRESH_TIME: str = "08:45"  # IST HH:MM for the daily refresh
 
     # ── Order pre-flight safety net (broker-order-safety capability) ───────
     ORDER_PREFLIGHT_ENABLED: bool = True
-    MARGIN_CHECK_ENABLED: bool = False      # live Dhan margin API; off until creds confirmed
-    MARGIN_BUFFER_PCT: float = 5.0          # block if required > available × (1 - buffer/100)
-    MARGIN_FAILOPEN: bool = False           # fail-closed in live by default; True = advisory
+    MARGIN_CHECK_ENABLED: bool = False  # live Dhan margin API; off until creds confirmed
+    MARGIN_BUFFER_PCT: float = 5.0  # block if required > available × (1 - buffer/100)
+    MARGIN_FAILOPEN: bool = False  # fail-closed in live by default; True = advisory
     FREEZE_QTY_BY_UNDERLYING: dict[str, int] = {
         "NIFTY": 1800,
         "BANKNIFTY": 900,

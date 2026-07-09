@@ -1,30 +1,38 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import TYPE_CHECKING
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import and_, desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pdp.backtest.models import BacktestDaily, BacktestRun, BacktestTrade
 from pdp.backtest.options_replay import OptionsReplayEngine
 from pdp.backtest.options_strategy import OptionsStrategyConfig
-
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+from pdp.db.session import get_db
+from pdp.schemas import Page
+from pdp.backtest.schemas import (
+    BacktestRunListOut,
+    BacktestRunDetailOut,
+    BacktestTradeOut,
+    BacktestDailyResponse,
+    BacktestResultOut,
+)
 
 router = APIRouter(prefix="/api/v1/backtests", tags=["backtests"])
 
 
-@router.get("")
+@router.get("", response_model=Page[BacktestRunListOut])
 async def list_backtests(
-    session: AsyncSession,
+    session: Annotated[AsyncSession, Depends(get_db)],
     strategy_id: str | None = Query(None),
     from_date: datetime | None = Query(None),
     to_date: datetime | None = Query(None),
-    limit: int = Query(50, le=100),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-) -> dict:
+) -> Page[BacktestRunListOut]:
     """List backtest runs with optional filtering."""
     stmt = select(BacktestRun).order_by(desc(BacktestRun.created_at))
 
@@ -43,31 +51,27 @@ async def list_backtests(
     result = await session.execute(stmt)
     runs = result.scalars().all()
 
-    return {
-        "total": len(runs),
-        "limit": limit,
-        "offset": offset,
-        "runs": [
-            {
-                "id": run.id,
-                "strategy_id": run.strategy_id,
-                "from_date": run.from_date.isoformat(),
-                "to_date": run.to_date.isoformat(),
-                "start_equity": float(run.start_equity),
-                "end_equity": float(run.end_equity),
-                "total_trades": run.total_trades,
-                "created_at": run.created_at.isoformat(),
-            }
-            for run in runs
-        ],
-    }
+    items = [
+        BacktestRunListOut(
+            id=run.id,
+            strategy_id=run.strategy_id,
+            from_date=run.from_date.isoformat(),
+            to_date=run.to_date.isoformat(),
+            start_equity=float(run.start_equity),
+            end_equity=float(run.end_equity),
+            total_trades=run.total_trades,
+            created_at=run.created_at.isoformat(),
+        )
+        for run in runs
+    ]
+    return Page(items=items, limit=limit, offset=offset)
 
 
-@router.get("/{run_id}")
+@router.get("/{run_id}", response_model=BacktestRunDetailOut)
 async def get_backtest_run(
     run_id: int,
-    session: AsyncSession,
-) -> dict:
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> BacktestRunDetailOut:
     """Get details for a specific backtest run."""
     stmt = select(BacktestRun).where(BacktestRun.id == run_id)
     result = await session.execute(stmt)
@@ -77,32 +81,30 @@ async def get_backtest_run(
         raise HTTPException(status_code=404, detail="Backtest run not found")
 
     total_return = (
-        ((run.end_equity - run.start_equity) / run.start_equity * 100)
-        if run.start_equity > 0
-        else 0
+        ((run.end_equity - run.start_equity) / run.start_equity * 100) if run.start_equity > 0 else 0
     )
 
-    return {
-        "id": run.id,
-        "strategy_id": run.strategy_id,
-        "from_date": run.from_date.isoformat(),
-        "to_date": run.to_date.isoformat(),
-        "start_equity": float(run.start_equity),
-        "end_equity": float(run.end_equity),
-        "total_return_pct": total_return,
-        "total_trades": run.total_trades,
-        "config": run.config_json,
-        "created_at": run.created_at.isoformat(),
-    }
+    return BacktestRunDetailOut(
+        id=run.id,
+        strategy_id=run.strategy_id,
+        from_date=run.from_date.isoformat(),
+        to_date=run.to_date.isoformat(),
+        start_equity=float(run.start_equity),
+        end_equity=float(run.end_equity),
+        total_return_pct=total_return,
+        total_trades=run.total_trades,
+        config=run.config_json,
+        created_at=run.created_at.isoformat(),
+    )
 
 
-@router.get("/{run_id}/trades")
+@router.get("/{run_id}/trades", response_model=Page[BacktestTradeOut])
 async def get_backtest_trades(
     run_id: int,
-    session: AsyncSession,
-    limit: int = Query(100, le=1000),
+    session: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-) -> dict:
+) -> Page[BacktestTradeOut]:
     """Get trades for a specific backtest run."""
     stmt = (
         select(BacktestTrade)
@@ -114,45 +116,36 @@ async def get_backtest_trades(
     result = await session.execute(stmt)
     trades = result.scalars().all()
 
-    return {
-        "run_id": run_id,
-        "limit": limit,
-        "offset": offset,
-        "total": len(trades),
-        "trades": [
-            {
-                "id": trade.id,
-                "symbol": trade.symbol,
-                "quantity": trade.quantity,
-                "entry_price": float(trade.entry_price),
-                "exit_price": float(trade.exit_price),
-                "entry_timestamp": trade.entry_timestamp.isoformat(),
-                "exit_timestamp": trade.exit_timestamp.isoformat(),
-                "realized_pnl": float(trade.realized_pnl),
-            }
-            for trade in trades
-        ],
-    }
+    items = [
+        BacktestTradeOut(
+            id=trade.id,
+            symbol=trade.symbol,
+            quantity=trade.quantity,
+            entry_price=float(trade.entry_price),
+            exit_price=float(trade.exit_price),
+            entry_timestamp=trade.entry_timestamp.isoformat(),
+            exit_timestamp=trade.exit_timestamp.isoformat(),
+            realized_pnl=float(trade.realized_pnl),
+        )
+        for trade in trades
+    ]
+    return Page(items=items, limit=limit, offset=offset)
 
 
-@router.get("/{run_id}/daily")
+@router.get("/{run_id}/daily", response_model=BacktestDailyResponse)
 async def get_backtest_daily(
     run_id: int,
-    session: AsyncSession,
-) -> dict:
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> BacktestDailyResponse:
     """Get daily equity curves for a backtest run."""
-    stmt = (
-        select(BacktestDaily)
-        .where(BacktestDaily.backtest_run_id == run_id)
-        .order_by(BacktestDaily.date)
-    )
+    stmt = select(BacktestDaily).where(BacktestDaily.backtest_run_id == run_id).order_by(BacktestDaily.date)
     result = await session.execute(stmt)
     dailies = result.scalars().all()
 
-    return {
-        "run_id": run_id,
-        "daily_count": len(dailies),
-        "daily": [
+    return BacktestDailyResponse(
+        run_id=run_id,
+        daily_count=len(dailies),
+        daily=[
             {
                 "date": daily.date.date().isoformat(),
                 "starting_equity": float(daily.starting_equity),
@@ -164,15 +157,23 @@ async def get_backtest_daily(
             }
             for daily in dailies
         ],
-    }
+    )
 
 
-@router.post("/run")
-async def run_backtest(request: Request, config: OptionsStrategyConfig) -> dict:
+@router.post(
+    "/run",
+    response_model=BacktestResultOut,
+    status_code=200,
+    summary="Run an options strategy backtest",
+    description="Run an options strategy backtest synchronously and return results.",
+)
+async def run_backtest(request: Request, config: OptionsStrategyConfig) -> BacktestResultOut:
     """Run an options strategy backtest synchronously and return results.
 
     Date ranges exceeding 90 days are rejected; use the async job runner
     for large backtests once it supports this endpoint.
+    The synchronous replay engine runs in a threadpool so the event loop
+    stays responsive.
     """
     from_date: date = config.date_range.from_
     to_date: date = config.date_range.to
@@ -185,15 +186,19 @@ async def run_backtest(request: Request, config: OptionsStrategyConfig) -> dict:
 
     mongo_db = request.app.state.mongo_db
     engine = OptionsReplayEngine(mongo_db)
-    result = engine.run(config)
 
-    return {
-        "config_name": result.config_name,
-        "date_range": {
+    def _run_sync() -> object:
+        return engine.run(config)
+
+    result = await run_in_threadpool(_run_sync)
+
+    return BacktestResultOut(
+        config_name=result.config_name,
+        date_range={
             "from": result.date_range[0].isoformat(),
             "to": result.date_range[1].isoformat(),
         },
-        "summary": {
+        summary={
             "total_pnl": result.total_pnl,
             "total_trades": result.total_trades,
             "win_rate": result.win_rate,
@@ -202,8 +207,8 @@ async def run_backtest(request: Request, config: OptionsStrategyConfig) -> dict:
             "sharpe_ratio": result.sharpe_ratio,
             "commissions_total": result.commissions_total,
         },
-        "equity_curve": result.equity_curve,
-        "daily_pnl": result.daily_pnl,
-        "weekday_stats": result.weekday_stats,
-        "trade_log": result.trade_log,
-    }
+        equity_curve=result.equity_curve,
+        daily_pnl=result.daily_pnl,
+        weekday_stats=result.weekday_stats,
+        trade_log=result.trade_log,
+    )

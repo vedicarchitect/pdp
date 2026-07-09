@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from pdp.indicators.engine import IndicatorEngine
     from pdp.market.bar_writer import BarWriter
     from pdp.market.bars import BarAggregator
-    from pdp.market.ws import WSHub
     from pdp.strategy.host import StrategyHost
 
 log = structlog.get_logger()
@@ -39,7 +38,6 @@ class TickRouter:
         self,
         bar_aggregator: BarAggregator | None = None,
         bar_writer: BarWriter | None = None,
-        ws_hub: WSHub | None = None,
         strategy_host: StrategyHost | None = None,
         alert_evaluator: AlertEvaluator | None = None,
         indicator_engine: IndicatorEngine | None = None,
@@ -48,7 +46,6 @@ class TickRouter:
         self._running = False
         self._bar_aggregator = bar_aggregator
         self._bar_writer = bar_writer
-        self._ws_hub = ws_hub
         self._strategy_host = strategy_host
         self._alert_evaluator = alert_evaluator
         self._indicator_engine = indicator_engine
@@ -106,23 +103,20 @@ class TickRouter:
         # 2.5 — alert evaluator (evaluate price conditions on new tick)
         if self._alert_evaluator is not None:
             from decimal import Decimal
+
             self._alert_evaluator.evaluate_price(sid, Decimal(str(tick.ltp)))
 
         # 2.6 — event publisher LTP cache (O(1); position detectors run on a timer)
         if self.event_service is not None:
             self.event_service.on_tick(sid, float(tick.ltp))
 
-        # 3+4+5+6 — bar aggregation, persistence, WS, and Redis streams
+        # 3+4+6 — bar aggregation, persistence, and Redis streams
         if self._bar_aggregator is not None:
             closed_bars = self._bar_aggregator.push(tick)
             for bar in closed_bars:
                 # 4 — enqueue for MongoDB write
                 if self._bar_writer is not None:
                     self._bar_writer.enqueue(bar)
-
-                # 5 — WS fan-out for bars
-                if self._ws_hub is not None:
-                    self._ws_hub.publish_bar(bar)
 
                 # 6b — universal indicators (computed once, before strategy dispatch)
                 if self._indicator_engine is not None:
@@ -155,6 +149,7 @@ class TickRouter:
                 if self._indicator_engine is not None:
                     try:
                         from pdp.ml.infer import infer_all
+
                         _prev_bar = getattr(self, "_prev_bars", {}).get((bar.security_id, bar.timeframe))
                         ml_results = infer_all(
                             bar.security_id,
@@ -166,15 +161,18 @@ class TickRouter:
                         )
                         if ml_results:
                             import json as _json
+
                             for head, ml_state in ml_results.items():
                                 await redis.set(
                                     f"ml:{bar.security_id}:{bar.timeframe}:{head}",
-                                    _json.dumps({
-                                        "argmax": ml_state.argmax,
-                                        "probs": ml_state.probs,
-                                        "version": ml_state.version,
-                                        "bar_time": bar.bar_time.isoformat(),
-                                    }),
+                                    _json.dumps(
+                                        {
+                                            "argmax": ml_state.argmax,
+                                            "probs": ml_state.probs,
+                                            "version": ml_state.version,
+                                            "bar_time": bar.bar_time.isoformat(),
+                                        }
+                                    ),
                                     ex=900,
                                 )
                             # Store the primary directional signal in the engine for strategy access
@@ -211,10 +209,6 @@ class TickRouter:
                     maxlen=_BAR_STREAM_MAXLEN,
                     approximate=True,
                 )
-
-        # 5 — WS fan-out for raw ticks
-        if self._ws_hub is not None:
-            self._ws_hub.publish_tick(tick)
 
         # 7 — strategy host dispatch (non-blocking; drops on full inbox)
         if self._strategy_host is not None:

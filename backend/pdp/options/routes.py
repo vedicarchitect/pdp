@@ -1,4 +1,5 @@
 """Options analytics REST endpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -6,7 +7,6 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from pdp.options.analytics import (
@@ -18,6 +18,22 @@ from pdp.options.analytics import (
 )
 from pdp.options.fii_dii import StubFIIDIISource
 from pdp.options.payoff import READYMADE_STRATEGIES, PayoffLeg, build_payoff
+from pdp.options.schemas import (
+    ChainOut,
+    MaxPainOut,
+    PcrOut,
+    GexOut,
+    OiHistoryOut,
+    OiBuildupOut,
+    OiSeriesOut,
+    StraddleHistoryOut,
+    IvHistoryOut,
+    FiiDiiOut,
+    FiiDiiHistoryOut,
+    RefreshOut,
+    PayoffOut,
+    ReadymadesOut,
+)
 
 log = structlog.get_logger()
 
@@ -73,25 +89,25 @@ def _ts(doc: dict[str, Any]) -> str | None:
     return v.isoformat() if isinstance(v, datetime) else v  # type: ignore[no-any-return]
 
 
-@router.get("/{underlying}/chain")
-async def get_chain(request: Request, underlying: str, expiry: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/chain", response_model=ChainOut)
+async def get_chain(request: Request, underlying: str, expiry: str | None = None) -> ChainOut:
     if not _poller_active(request):
-        return JSONResponse(_PAPER_CHAIN)
+        return ChainOut(**_PAPER_CHAIN)
     doc = await _latest_snapshot(_collection(request), underlying, expiry)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"No snapshot for {underlying}/{expiry or 'nearest'}")
-    return JSONResponse(_serialise(doc))
+    return ChainOut(**_serialise(doc))
 
 
-@router.get("/{underlying}/max-pain")
-async def get_max_pain(request: Request, underlying: str, expiry: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/max-pain", response_model=MaxPainOut)
+async def get_max_pain(request: Request, underlying: str, expiry: str | None = None) -> MaxPainOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "max_pain": None})
+        return MaxPainOut(**{"mode": "paper", "max_pain": None})
     doc = await _latest_snapshot(_collection(request), underlying, expiry)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"No snapshot for {underlying}/{expiry or 'nearest'}")
-    return JSONResponse(
-        {
+    return MaxPainOut(
+        **{
             "underlying": doc["underlying"],
             "expiry": doc["expiry"],
             "max_pain": doc.get("max_pain"),
@@ -100,15 +116,15 @@ async def get_max_pain(request: Request, underlying: str, expiry: str | None = N
     )
 
 
-@router.get("/{underlying}/pcr")
-async def get_pcr(request: Request, underlying: str, expiry: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/pcr", response_model=PcrOut)
+async def get_pcr(request: Request, underlying: str, expiry: str | None = None) -> PcrOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "pcr": None})
+        return PcrOut(**{"mode": "paper", "pcr": None})
     doc = await _latest_snapshot(_collection(request), underlying, expiry)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"No snapshot for {underlying}/{expiry or 'nearest'}")
-    return JSONResponse(
-        {
+    return PcrOut(
+        **{
             "underlying": doc["underlying"],
             "expiry": doc["expiry"],
             "pcr": doc.get("pcr"),
@@ -117,10 +133,10 @@ async def get_pcr(request: Request, underlying: str, expiry: str | None = None) 
     )
 
 
-@router.get("/{underlying}/gex")
-async def get_gex(request: Request, underlying: str, expiry: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/gex", response_model=GexOut)
+async def get_gex(request: Request, underlying: str, expiry: str | None = None) -> GexOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "per_strike": [], "net_gex": 0, "net_gex_cr": 0.0})
+        return GexOut(**{"mode": "paper", "per_strike": [], "net_gex": 0, "net_gex_cr": 0.0})
     doc = await _latest_snapshot(_collection(request), underlying, expiry)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"No snapshot for {underlying}/{expiry or 'nearest'}")
@@ -128,8 +144,8 @@ async def get_gex(request: Request, underlying: str, expiry: str | None = None) 
     lot_size = _LOT_SIZES.get(underlying.upper(), 75)
     spot = float(doc.get("spot_price") or 0)
     gex = compute_gex(strikes, lot_size, spot)
-    return JSONResponse(
-        {
+    return GexOut(
+        **{
             "underlying": doc["underlying"],
             "expiry": doc.get("expiry"),
             "spot_price": spot,
@@ -142,15 +158,15 @@ async def get_gex(request: Request, underlying: str, expiry: str | None = None) 
     )
 
 
-@router.get("/{underlying}/oi-history")
+@router.get("/{underlying}/oi-history", response_model=OiHistoryOut)
 async def get_oi_history(
     request: Request,
     underlying: str,
     expiry: str | None = None,
     n: int = 40,
-) -> JSONResponse:
+) -> OiHistoryOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "snapshots": []})
+        return OiHistoryOut(**{"mode": "paper", "snapshots": []})
     n = min(n, 200)
     col = _collection(request)
     query: dict[str, Any] = {"underlying": underlying.upper()}
@@ -179,8 +195,8 @@ async def get_oi_history(
                 ],
             }
         )
-    return JSONResponse(
-        {
+    return OiHistoryOut(
+        **{
             "underlying": underlying.upper(),
             "expiry": expiry or (docs[-1].get("expiry") if docs else None),
             "snapshots": snapshots,
@@ -188,10 +204,10 @@ async def get_oi_history(
     )
 
 
-@router.get("/{underlying}/oi-buildup")
-async def get_oi_buildup(request: Request, underlying: str, expiry: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/oi-buildup", response_model=OiBuildupOut)
+async def get_oi_buildup(request: Request, underlying: str, expiry: str | None = None) -> OiBuildupOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "buildup": []})
+        return OiBuildupOut(**{"mode": "paper", "buildup": []})
     col = _collection(request)
     query: dict[str, Any] = {"underlying": underlying.upper()}
     if expiry:
@@ -199,30 +215,32 @@ async def get_oi_buildup(request: Request, underlying: str, expiry: str | None =
     cursor = col.find(query, sort=[("snapshot_ts", -1)]).limit(2)
     docs = await cursor.to_list(length=2)
     if not docs or len(docs) < 2:
-        return JSONResponse({"buildup": []})
-        
+        return OiBuildupOut(**{"buildup": []})
+
     current = docs[0].get("strikes", [])
     previous = docs[1].get("strikes", [])
     buildup = classify_oi_buildup(current, previous)
-    
-    return JSONResponse({
-        "underlying": underlying.upper(),
-        "expiry": docs[0].get("expiry"),
-        "snapshot_ts": _ts(docs[0]),
-        "buildup": buildup
-    })
+
+    return OiBuildupOut(
+        **{
+            "underlying": underlying.upper(),
+            "expiry": docs[0].get("expiry"),
+            "snapshot_ts": _ts(docs[0]),
+            "buildup": buildup,
+        }
+    )
 
 
-@router.get("/{underlying}/oi-series")
+@router.get("/{underlying}/oi-series", response_model=OiSeriesOut)
 async def get_oi_series(
     request: Request,
     underlying: str,
     expiry: str | None = None,
     interval: str = "15m",
     limit: int = 50,
-) -> JSONResponse:
+) -> OiSeriesOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "timestamps": [], "strikes": {}})
+        return OiSeriesOut(**{"mode": "paper", "timestamps": [], "strikes": {}})
     col = _collection(request)
     query: dict[str, Any] = {"underlying": underlying.upper()}
     if expiry:
@@ -230,18 +248,18 @@ async def get_oi_series(
     cursor = col.find(query, sort=[("snapshot_ts", -1)]).limit(limit)
     docs = await cursor.to_list(length=limit)
     if not docs:
-        return JSONResponse({"timestamps": [], "strikes": {}})
+        return OiSeriesOut(**{"timestamps": [], "strikes": {}})
     docs.reverse()
     interval_minutes = _INTERVAL_MINUTES.get(interval, 15)
     docs = _downsample_by_interval(docs, interval_minutes)
     res = multi_strike_oi_series(docs, top_n=10)
-    return JSONResponse(res)
+    return OiSeriesOut(**res)
 
 
-@router.get("/{underlying}/straddle-history")
-async def get_straddle_history(request: Request, underlying: str, date: str | None = None) -> JSONResponse:
+@router.get("/{underlying}/straddle-history", response_model=StraddleHistoryOut)
+async def get_straddle_history(request: Request, underlying: str, date: str | None = None) -> StraddleHistoryOut:
     if not _poller_active(request):
-        return JSONResponse({"mode": "paper", "history": []})
+        return StraddleHistoryOut(**{"mode": "paper", "history": []})
     col = _collection(request)
     query: dict[str, Any] = {"underlying": underlying.upper()}
     if date:
@@ -255,31 +273,34 @@ async def get_straddle_history(request: Request, underlying: str, date: str | No
     cursor = col.find(query, sort=[("snapshot_ts", -1)]).limit(100)
     docs = await cursor.to_list(length=100)
     docs.reverse()
-    
+
     history = compute_straddle_history(docs)
-    return JSONResponse({"history": history})
+    return StraddleHistoryOut(**{"history": history})
 
 
-@router.get("/{underlying}/iv-history")
-async def get_iv_history(request: Request, underlying: str, lookback_days: int = 252) -> JSONResponse:
+@router.get("/{underlying}/iv-history", response_model=IvHistoryOut)
+async def get_iv_history(request: Request, underlying: str, lookback_days: int = 252) -> IvHistoryOut:
     if getattr(request.app.state, "mongo_db", None) is None:
-        return JSONResponse({"mode": "paper"})
-        
+        return IvHistoryOut(**{"mode": "paper"})
+
     db = request.app.state.mongo_db
-    
+
     # Try fetching 1D bars first for historical IV
-    cursor = db["option_bars"].find(
-        {"underlying": underlying.upper(), "timeframe": "1D"}
-    ).sort([("ts", -1)]).limit(lookback_days)
+    cursor = (
+        db["option_bars"]
+        .find({"underlying": underlying.upper(), "timeframe": "1D"})
+        .sort([("ts", -1)])
+        .limit(lookback_days)
+    )
     docs = await cursor.to_list(length=lookback_days)
-    
+
     # If not enough 1D bars, just use whatever is there (fallback)
     if len(docs) < 5:
-        cursor = db["option_bars"].find(
-            {"underlying": underlying.upper()}
-        ).sort([("ts", -1)]).limit(lookback_days)
+        cursor = (
+            db["option_bars"].find({"underlying": underlying.upper()}).sort([("ts", -1)]).limit(lookback_days)
+        )
         docs = await cursor.to_list(length=lookback_days)
-    
+
     # Current IV from latest chain
     current_chain = await _latest_snapshot(_collection(request), underlying, None)
     current_iv = 20.0
@@ -289,58 +310,65 @@ async def get_iv_history(request: Request, underlying: str, lookback_days: int =
         if strikes and spot > 0:
             atm = min(strikes, key=lambda s: abs(s["strike"] - spot))
             current_iv = atm.get("ce", {}).get("iv") or 20.0
-            
+
     ivs = []
     for d in docs:
         if d.get("iv"):
             ivs.append(float(d["iv"]))
-            
-    res = compute_iv_rank_percentile(ivs, current_iv)
-    return JSONResponse(res)
 
-@router.get("/fii-dii")
-async def get_fii_dii(request: Request, date_str: str | None = None) -> JSONResponse:
+    res = compute_iv_rank_percentile(ivs, current_iv)
+    return IvHistoryOut(**res)
+
+
+@router.get("/fii-dii", response_model=FiiDiiOut)
+async def get_fii_dii(request: Request, date_str: str | None = None) -> FiiDiiOut:
     source = getattr(request.app.state, "fii_dii_source", StubFIIDIISource())
-    
+
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else datetime.now().date()
     except ValueError:
         d = datetime.now().date()
-        
+
     data = await source.fetch(d)
     if not data:
-        return JSONResponse({"available": False})
-        
+        return FiiDiiOut(**{"available": False})
+
     from dataclasses import asdict
-    return JSONResponse({
-        "available": True,
-        "data": {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in asdict(data).items()}
-    })
+
+    return FiiDiiOut(
+        **{
+            "available": True,
+            "data": {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(data).items()},
+        }
+    )
 
 
-@router.get("/fii-dii/history")
-async def get_fii_dii_history(request: Request, days: int = 7) -> JSONResponse:
+@router.get("/fii-dii/history", response_model=FiiDiiHistoryOut)
+async def get_fii_dii_history(request: Request, days: int = 7) -> FiiDiiHistoryOut:
     """Yesterday + last `days` trading days of FII/DII net flow, for the dashboard panel."""
     source = getattr(request.app.state, "fii_dii_source", StubFIIDIISource())
     fetch_range = getattr(source, "fetch_range", None)
     if fetch_range is None:
-        return JSONResponse({"available": False, "days": []})
+        return FiiDiiHistoryOut(**{"available": False, "days": []})
 
     from dataclasses import asdict
 
     rows = await fetch_range(days)
     if not rows:
-        return JSONResponse({"available": False, "days": []})
-    return JSONResponse({
-        "available": True,
-        "days": [
-            {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(r).items()}
-            for r in rows
-        ],
-    })
+        return FiiDiiHistoryOut(**{"available": False, "days": []})
+    return FiiDiiHistoryOut(
+        **{
+            "available": True,
+            "days": [
+                {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in asdict(r).items()}
+                for r in rows
+            ],
+        }
+    )
 
-@router.post("/{underlying}/refresh", status_code=202)
-async def refresh(request: Request, underlying: str) -> dict[str, str]:
+
+@router.post("/{underlying}/refresh", status_code=202, response_model=RefreshOut)
+async def refresh(request: Request, underlying: str) -> RefreshOut:
     poller = getattr(request.app.state, "options_poller", None)
     if poller is None:
         raise HTTPException(
@@ -348,7 +376,7 @@ async def refresh(request: Request, underlying: str) -> dict[str, str]:
             detail="Options poller not running (paper mode or missing credentials)",
         )
     poller.request_refresh(underlying)
-    return {"status": "accepted", "underlying": underlying.upper()}
+    return RefreshOut(status="accepted", underlying=underlying.upper())
 
 
 class PayoffRequest(BaseModel):
@@ -366,9 +394,10 @@ class PayoffRequest(BaseModel):
         return v
 
 
-@router.post("/{underlying}/payoff")
-async def calculate_payoff(underlying: str, payload: PayoffRequest) -> JSONResponse:
+@router.post("/{underlying}/payoff", response_model=PayoffOut)
+async def calculate_payoff(underlying: str, payload: PayoffRequest) -> PayoffOut:
     from dataclasses import asdict
+
     result = build_payoff(
         legs=payload.legs,
         spot=payload.spot,
@@ -376,9 +405,9 @@ async def calculate_payoff(underlying: str, payload: PayoffRequest) -> JSONRespo
         risk_free_rate=payload.risk_free_rate,
         days_to_expiry=payload.days_to_expiry,
     )
-    return JSONResponse(asdict(result))
+    return PayoffOut(**asdict(result))
 
 
-@router.get("/{underlying}/readymades")
-async def get_readymades(underlying: str) -> JSONResponse:
-    return JSONResponse({"strategies": READYMADE_STRATEGIES})
+@router.get("/{underlying}/readymades", response_model=ReadymadesOut)
+async def get_readymades(underlying: str) -> ReadymadesOut:
+    return ReadymadesOut(**{"strategies": READYMADE_STRATEGIES})

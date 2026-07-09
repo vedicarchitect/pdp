@@ -47,6 +47,7 @@ class StrategyStatus(StrEnum):
 # Internal event envelope types
 # ---------------------------------------------------------------------------
 
+
 @dataclass(slots=True)
 class _TickEvent:
     tick: Tick
@@ -69,6 +70,7 @@ _Event = _TickEvent | _BarEvent | _FillEvent
 # Per-strategy runtime state
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _StrategyState:
     config: StrategyConfig
@@ -84,6 +86,7 @@ class _StrategyState:
 # ---------------------------------------------------------------------------
 # StrategyHost
 # ---------------------------------------------------------------------------
+
 
 class StrategyHost:
     """Manages strategy lifecycle, event dispatch, and fill routing."""
@@ -207,10 +210,31 @@ class StrategyHost:
             ),
             session_maker=self._session_maker,
             chain_hub=self._options_hub,
+            _event_service=self._event_service,
         )
 
         inbox: asyncio.Queue[_Event] = asyncio.Queue(maxsize=_INBOX_SIZE)
         await instance.on_init(ctx)
+
+        # Check warmup completion and disarm if necessary.
+        if self._indicator_engine:
+            for w in cfg.watchlist:
+                sid = w.security_id
+                for tf in w.timeframes:
+                    if not self._indicator_engine.is_warm(sid, tf, min_bars=200):
+                        from pdp.events.models import EventType
+
+                        if self._event_service:
+                            self._event_service.emit_critical(
+                                EventType.WARMUP_INCOMPLETE,
+                                sid,
+                                "Warmup incomplete",
+                                f"Timeframe {tf} lacks 200 bars for {sid}",
+                                {"strategy_id": strategy_id, "timeframe": tf},
+                            )
+                        instance._disarmed = True
+                        log.warning("strategy_disarmed_warmup", strategy_id=strategy_id, sid=sid, tf=tf)
+                        break
 
         # Emit the run-start config header as the first lines of the day's log.
         _tfs = sorted({tf for w in cfg.watchlist for tf in w.timeframes})
@@ -264,12 +288,16 @@ class StrategyHost:
     def on_tick(self, tick: Tick) -> None:
         sid = tick.security_id
         for state in self._running.values():
+            if state.instance._disarmed:
+                continue
             if not _watches_security(state.config, sid) and sid not in state.dynamic_sids:
                 continue
             self._enqueue(state, _TickEvent(tick))
 
     def on_bar(self, bar: BarClosed) -> None:
         for state in self._running.values():
+            if state.instance._disarmed:
+                continue
             if not _watches_bar(state.config, bar.security_id, bar.timeframe):
                 continue
             self._enqueue(state, _BarEvent(bar))
@@ -345,12 +373,26 @@ class StrategyHost:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                import traceback
+
+                tb = traceback.format_exc()
                 log.error(
                     "strategy_crashed",
                     strategy_id=strategy_id,
                     exc=str(exc),
                     exc_type=type(exc).__name__,
                 )
+                if self._event_service:
+                    from pdp.events.models import EventType
+
+                    self._event_service.emit_critical(
+                        EventType.CRASH,
+                        strategy_id,
+                        "Strategy Crashed",
+                        f"Unhandled exception in strategy {strategy_id}: {exc}",
+                        {"traceback": tb, "strategy_id": strategy_id, "exc_type": type(exc).__name__},
+                    )
+                instance._disarmed = True
                 if strategy_id in self._running:
                     self._running[strategy_id].status = StrategyStatus.CRASHED
                 break
@@ -360,15 +402,13 @@ class StrategyHost:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _watches_security(cfg: StrategyConfig, security_id: str) -> bool:
     return any(w.security_id == security_id for w in cfg.watchlist)
 
 
 def _watches_bar(cfg: StrategyConfig, security_id: str, timeframe: str) -> bool:
-    return any(
-        w.security_id == security_id and timeframe in w.timeframes
-        for w in cfg.watchlist
-    )
+    return any(w.security_id == security_id and timeframe in w.timeframes for w in cfg.watchlist)
 
 
 async def _dispatch(instance: Strategy, event: _Event) -> None:
@@ -382,12 +422,14 @@ async def _dispatch(instance: Strategy, event: _Event) -> None:
 
 def _dec(v: Any):  # type: ignore[return]
     from decimal import Decimal
+
     return Decimal(str(v))
 
 
 # ---------------------------------------------------------------------------
 # Sentinel exceptions
 # ---------------------------------------------------------------------------
+
 
 class AlreadyRunning(Exception):
     def __init__(self, strategy_id: str) -> None:

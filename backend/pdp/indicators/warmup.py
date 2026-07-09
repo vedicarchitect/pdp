@@ -6,6 +6,7 @@ Priority:
      full prior session). Fetched bars are persisted to MongoDB so subsequent
      restarts use path 1.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -49,14 +50,14 @@ _DEFAULT_SESSION_BARS = 75
 # weekends/holidays).
 _TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
     "1m": 2,
-    "5m": 10,    # 75 bars/session x ~7 sessions >> 200
-    "15m": 40,   # 25 bars/session x ~28 sessions >> 200
+    "5m": 10,  # 75 bars/session x ~7 sessions >> 200
+    "15m": 40,  # 25 bars/session x ~28 sessions >> 200
     "25m": 40,
-    "30m": 45,   # 13 bars/session x ~32 sessions >> 200
-    "1H": 90,    # 7 bars/session x ~64 sessions >> 200
+    "30m": 45,  # 13 bars/session x ~32 sessions >> 200
+    "1H": 90,  # 7 bars/session x ~64 sessions >> 200
     "1h": 90,
-    "1D": 400,   # 1 bar/session x ~280 sessions >> 200
-    "1w": 700,   # ~100 weeks; enough for weekly EMA200 + pivot seed
+    "1D": 400,  # 1 bar/session x ~280 sessions >> 200
+    "1w": 700,  # ~100 weeks; enough for weekly EMA200 + pivot seed
 }
 _DEFAULT_WARMUP_CALENDAR_DAYS = 1
 
@@ -110,8 +111,11 @@ async def warm_up_indicator_engine(
             lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(tf, _DEFAULT_WARMUP_CALENDAR_DAYS)
             warmup_from = prior_day - timedelta(days=lookback_days - 1)
             since = datetime(
-                warmup_from.year, warmup_from.month, warmup_from.day,
-                _SESSION_START_UTC_H, _SESSION_START_UTC_M,
+                warmup_from.year,
+                warmup_from.month,
+                warmup_from.day,
+                _SESSION_START_UTC_H,
+                _SESSION_START_UTC_M,
                 tzinfo=UTC,
             )
             try:
@@ -188,8 +192,11 @@ async def _warm_one(
     # entire extended lookback window (which would give a multi-day high/low).
     if bars:
         prior_day_start = datetime(
-            prior_day.year, prior_day.month, prior_day.day,
-            _SESSION_START_UTC_H, _SESSION_START_UTC_M,
+            prior_day.year,
+            prior_day.month,
+            prior_day.day,
+            _SESSION_START_UTC_H,
+            _SESSION_START_UTC_M,
             tzinfo=UTC,
         )
         prior_session_bars = [b for b in bars if b.bar_time >= prior_day_start]
@@ -355,6 +362,7 @@ def _fetch_from_dhan(
     to_date = today_ist.strftime("%Y-%m-%d")
 
     from dhanhq import DhanContext
+
     ctx = DhanContext(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
     client = DhanClient(ctx)
     if is_daily:
@@ -485,9 +493,7 @@ async def configure_matrix_suites(
     for sid in _MATRIX_INDEX_SIDS.values():
         for tf in _MATRIX_TFS:
             engine.configure_suite(sid, tf, _MATRIX_SPOT_INDICATORS)
-        entries.append(
-            {"security_id": sid, "exchange_segment": "IDX_I", "timeframes": list(_MATRIX_TFS)}
-        )
+        entries.append({"security_id": sid, "exchange_segment": "IDX_I", "timeframes": list(_MATRIX_TFS)})
 
     # Futures volume indicators — resolve the front-month FUTIDX per index.
     fut_map: dict[str, str] = {}
@@ -529,6 +535,7 @@ async def _persist_bars(col, bars: list[BarClosed]) -> None:
     ]
     try:
         from pymongo.errors import BulkWriteError
+
         await col.insert_many(docs, ordered=False)
         log.info("indicator_warmup_persisted", count=len(docs))
     except BulkWriteError as exc:

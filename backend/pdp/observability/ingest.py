@@ -4,6 +4,7 @@ The Flutter `LogShipper` batches app logs and POSTs them here, fire-and-forget. 
 enqueued to `pdp-logs-*` through the active indexer. Validation is via Pydantic so a
 malformed batch yields 422 without enqueuing anything.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from pdp.observability.indexer import get_active_indexer
+from pdp.observability.schemas import IngestResponseOut
 
 router = APIRouter(prefix="/api/v1/logs", tags=["observability"])
 
@@ -30,8 +32,8 @@ class UILogBatch(BaseModel):
     records: list[UILogRecord] = Field(..., min_length=1)
 
 
-@router.post("/ingest")
-async def ingest_logs(batch: UILogBatch) -> dict:
+@router.post("/ingest", response_model=IngestResponseOut, status_code=202)
+async def ingest_logs(batch: UILogBatch) -> IngestResponseOut:
     indexer = get_active_indexer()
     accepted = 0
     for rec in batch.records:
@@ -48,4 +50,4 @@ async def ingest_logs(batch: UILogBatch) -> dict:
         if indexer is not None:
             indexer.enqueue("logs", doc)
         accepted += 1
-    return {"accepted": accepted}
+    return IngestResponseOut(accepted=accepted)

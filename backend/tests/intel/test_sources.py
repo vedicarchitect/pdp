@@ -1,4 +1,5 @@
 """Unit tests for dashboard intel sources — each underlying third-party lib is mocked."""
+
 from __future__ import annotations
 
 from datetime import date
@@ -21,6 +22,7 @@ from pdp.intel.sources.sentiment import (
 from pdp.options.fii_dii import NseFIIDIISource, StubFIIDIISource
 
 # ── global_market ────────────────────────────────────────────────────────────
+
 
 def _fake_yf_frame() -> pd.DataFrame:
     tickers = list(TICKERS.keys())
@@ -60,6 +62,7 @@ async def test_stub_global_market_source_returns_empty():
 
 # ── news ──────────────────────────────────────────────────────────────────
 
+
 def _fake_feed(titles: list[str]) -> MagicMock:
     parsed = MagicMock()
     parsed.feed = {"title": "Test Feed"}
@@ -93,6 +96,7 @@ async def test_stub_news_source_returns_empty():
 
 
 # ── sentiment ─────────────────────────────────────────────────────────────
+
 
 def test_internals_score_calm_vix_and_bullish_pcr():
     score = _internals_score(vix=10.0, pcr=0.5)
@@ -133,13 +137,26 @@ async def test_stub_sentiment_source_returns_none():
 
 # ── fii_dii (NseFIIDIISource) ─────────────────────────────────────────────
 
+
 def _fake_fiidii_df() -> pd.DataFrame:
-    return pd.DataFrame([
-        {"buyValue": 18676.35, "category": "DII", "date": "03-Jul-2026",
-         "netValue": -1953.89, "sellValue": 20630.24},
-        {"buyValue": 13337.33, "category": "FII/FPI", "date": "03-Jul-2026",
-         "netValue": 1355.33, "sellValue": 11982.0},
-    ])
+    return pd.DataFrame(
+        [
+            {
+                "buyValue": 18676.35,
+                "category": "DII",
+                "date": "03-Jul-2026",
+                "netValue": -1953.89,
+                "sellValue": 20630.24,
+            },
+            {
+                "buyValue": 13337.33,
+                "category": "FII/FPI",
+                "date": "03-Jul-2026",
+                "netValue": 1355.33,
+                "sellValue": 11982.0,
+            },
+        ]
+    )
 
 
 @pytest.mark.asyncio

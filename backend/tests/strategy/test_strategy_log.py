@@ -7,6 +7,7 @@ Each test maps to a spec scenario:
   5.4 — file path is logs/<id>/<date>; date rollover opens new file; restart appends
   5.5 — a strategy with no overrides still gets header + common heartbeat + decisions
 """
+
 from __future__ import annotations
 
 import json
@@ -20,15 +21,16 @@ import pytest
 import pdp.strategy.log as log_mod
 from pdp.indicators.supertrend import DOWN, UP, SuperTrendState
 from pdp.market.bars import BarClosed
+from pdp.strategies.supertrend_short import SuperTrendShort
 from pdp.strategy.abc import Strategy
 from pdp.strategy.log import StrategyDailyLog
-from pdp.strategies.supertrend_short import SuperTrendShort
 
 _IST = ZoneInfo("Asia/Kolkata")
 
 # ---------------------------------------------------------------------------
 # Shared fakes (reused from test_supertrend_short for consistency)
 # ---------------------------------------------------------------------------
+
 
 class _Orders:
     def __init__(self):
@@ -47,59 +49,95 @@ class _Orders:
         if new_qty == 0:
             p["realized"] += (self.price - p["avg"]) * Decimal(p["net"])
             p["avg"] = Decimal("0")
-        elif (p["net"] <= 0 and signed < 0):
+        elif p["net"] <= 0 and signed < 0:
             total = p["avg"] * Decimal(abs(p["net"])) + self.price * Decimal(qty)
             p["avg"] = total / Decimal(abs(new_qty))
         p["net"] = new_qty
         return SimpleNamespace(id=len(self.calls), status="OPEN")
 
-    async def cancel_open_entry_orders(self, sid): return []
-    async def get_net_qty(self, sid): return self._p(sid)["net"]
-    async def get_position(self, sid): p = self._p(sid); return p["net"], p["avg"]
-    async def get_realized_pnl(self, sid): return self._p(sid)["realized"]
+    async def cancel_open_entry_orders(self, sid):
+        return []
+
+    async def get_net_qty(self, sid):
+        return self._p(sid)["net"]
+
+    async def get_position(self, sid):
+        p = self._p(sid)
+        return p["net"], p["avg"]
+
+    async def get_realized_pnl(self, sid):
+        return self._p(sid)["realized"]
 
 
 class _Indicators:
     def __init__(self, state=None):
         self.state = state or SuperTrendState(direction=UP, value=Decimal("0"), flipped=False)
-    def supertrend(self, sid, tf): return self.state
+
+    def supertrend(self, sid, tf):
+        return self.state
 
 
 class _Market:
-    async def subscribe(self, sid, seg): return True
-    async def unsubscribe(self, sid, seg): pass
-    async def ltp(self, sid): return None
-    async def ltp_with_age(self, sid): return None, None
+    async def subscribe(self, sid, seg):
+        return True
+
+    async def unsubscribe(self, sid, seg):
+        pass
+
+    async def ltp(self, sid):
+        return None
+
+    async def ltp_with_age(self, sid):
+        return None, None
 
 
 class _SessionMaker:
-    def __call__(self): return self
-    async def __aenter__(self): return SimpleNamespace()
-    async def __aexit__(self, *a): return False
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return SimpleNamespace()
+
+    async def __aexit__(self, *a):
+        return False
 
 
 def _ctx(orders, indicators, market):
     import structlog
+
     return SimpleNamespace(
-        orders=orders, indicators=indicators, market=market,
+        orders=orders,
+        indicators=indicators,
+        market=market,
         session_maker=_SessionMaker(),
         log=structlog.get_logger(),
         params={
-            "underlying": "NIFTY", "underlying_security_id": "13", "timeframe": "5m",
-            "lot_size": 65, "start_lots": 2, "add_lots": 1, "max_lots": 5,
-            "start_ist": "09:30", "square_off_ist": "15:10",
-            "leg_stop_per_lot": 1000, "day_stop": 10000,
+            "underlying": "NIFTY",
+            "underlying_security_id": "13",
+            "timeframe": "5m",
+            "lot_size": 65,
+            "start_lots": 2,
+            "add_lots": 1,
+            "max_lots": 5,
+            "start_ist": "09:30",
+            "square_off_ist": "15:10",
+            "leg_stop_per_lot": 1000,
+            "day_stop": 10000,
         },
     )
 
 
 def _bar_ist(hh: int, mm: int, close: float = 22500.0) -> BarClosed:
     return BarClosed(
-        security_id="13", timeframe="5m",
+        security_id="13",
+        timeframe="5m",
         bar_time=datetime(2026, 6, 12, hh, mm, tzinfo=_IST),
-        open=Decimal(str(close)), high=Decimal(str(close + 5)),
-        low=Decimal(str(close - 5)), close=Decimal(str(close)),
-        volume=0, oi=0,
+        open=Decimal(str(close)),
+        high=Decimal(str(close + 5)),
+        low=Decimal(str(close - 5)),
+        close=Decimal(str(close)),
+        volume=0,
+        oi=0,
     )
 
 
@@ -110,9 +148,11 @@ import pdp.strategies.supertrend_short as mod_st
 def patched_resolver(monkeypatch):
     async def fake_resolve(session, *, underlying, spot, option_type, **kw):
         return SimpleNamespace(
-            security_id=f"OPT_{option_type}", exchange_segment="NSE_FNO",
+            security_id=f"OPT_{option_type}",
+            exchange_segment="NSE_FNO",
             strike=Decimal("22450" if option_type == "PE" else "22550"),
         )
+
     monkeypatch.setattr(mod_st, "resolve_otm_option", fake_resolve)
 
 
@@ -128,6 +168,7 @@ def _read_records(log_dir, strategy_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 5.1 — Config header written once at run start
 # ---------------------------------------------------------------------------
+
 
 def test_config_header_written_at_run_start(tmp_path):
     strat = SuperTrendShort()
@@ -156,6 +197,7 @@ def test_config_header_written_at_run_start(tmp_path):
 # 5.2 — Heartbeat only within the trading window
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_heartbeat_only_within_window(tmp_path, patched_resolver):
     orders, ind, market = _Orders(), _Indicators(), _Market()
@@ -177,12 +219,12 @@ async def test_heartbeat_only_within_window(tmp_path, patched_resolver):
 
     # Done-for-day (squareoff closes position and sets done_for_day).
     await strat.on_bar(_bar_ist(15, 12))  # past squareoff
-    n_hb_after_sqoff = sum(1 for r in _read_records(tmp_path, "supertrend_short")
-                           if r["event"] == "heartbeat")
+    n_hb_after_sqoff = sum(
+        1 for r in _read_records(tmp_path, "supertrend_short") if r["event"] == "heartbeat"
+    )
     # A bar after squareoff should add no more heartbeats.
     await strat.on_bar(_bar_ist(15, 20))
-    n_hb_final = sum(1 for r in _read_records(tmp_path, "supertrend_short")
-                     if r["event"] == "heartbeat")
+    n_hb_final = sum(1 for r in _read_records(tmp_path, "supertrend_short") if r["event"] == "heartbeat")
     assert n_hb_final == n_hb_after_sqoff
 
     strat._slog.close()
@@ -191,6 +233,7 @@ async def test_heartbeat_only_within_window(tmp_path, patched_resolver):
 # ---------------------------------------------------------------------------
 # 5.3 — Each action emits a decision line with its reason
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_decisions_on_open_scale_close(tmp_path, patched_resolver):
@@ -213,8 +256,7 @@ async def test_decisions_on_open_scale_close(tmp_path, patched_resolver):
 
     strat._slog.close()
 
-    decisions = [r for r in _read_records(tmp_path, "supertrend_short")
-                 if r["event"] == "decision"]
+    decisions = [r for r in _read_records(tmp_path, "supertrend_short") if r["event"] == "decision"]
     actions = [d["action"] for d in decisions]
 
     assert "open" in actions
@@ -232,10 +274,12 @@ async def test_decisions_on_open_scale_close(tmp_path, patched_resolver):
 # 5.4 — File path, date rollover, restart appends
 # ---------------------------------------------------------------------------
 
+
 def test_file_path_and_date_rollover(tmp_path, monkeypatch):
     # First date
     monkeypatch.setattr(
-        log_mod, "_now_ist",
+        log_mod,
+        "_now_ist",
         lambda: datetime(2026, 6, 12, 10, 0, tzinfo=_IST),
     )
     slog = StrategyDailyLog("supertrend_short", logs_dir=tmp_path)
@@ -244,7 +288,8 @@ def test_file_path_and_date_rollover(tmp_path, monkeypatch):
 
     # Roll to next day
     monkeypatch.setattr(
-        log_mod, "_now_ist",
+        log_mod,
+        "_now_ist",
         lambda: datetime(2026, 6, 13, 10, 0, tzinfo=_IST),
     )
     slog.write({"event": "day2"})
@@ -253,15 +298,15 @@ def test_file_path_and_date_rollover(tmp_path, monkeypatch):
 
     # Day-1 file still has only the day1 record
     day1_records = [
-        json.loads(l)
-        for l in (tmp_path / "supertrend_short" / "2026-06-12.log").read_text().splitlines()
+        json.loads(l) for l in (tmp_path / "supertrend_short" / "2026-06-12.log").read_text().splitlines()
     ]
     assert len(day1_records) == 1 and day1_records[0]["event"] == "day1"
 
 
 def test_restart_appends(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        log_mod, "_now_ist",
+        log_mod,
+        "_now_ist",
         lambda: datetime(2026, 6, 12, 10, 0, tzinfo=_IST),
     )
     # First run
@@ -275,8 +320,7 @@ def test_restart_appends(tmp_path, monkeypatch):
     slog2.close()
 
     records = [
-        json.loads(l)
-        for l in (tmp_path / "supertrend_short" / "2026-06-12.log").read_text().splitlines()
+        json.loads(l) for l in (tmp_path / "supertrend_short" / "2026-06-12.log").read_text().splitlines()
     ]
     assert len(records) == 2
     assert records[0]["event"] == "first_run"
@@ -286,6 +330,7 @@ def test_restart_appends(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # 5.5 — Minimal strategy (no overrides) still gets base logging
 # ---------------------------------------------------------------------------
+
 
 class _MinimalStrategy(Strategy):
     async def on_init(self, ctx) -> None:
@@ -304,10 +349,14 @@ async def test_minimal_strategy_gets_base_logging(tmp_path):
     strat._slog = StrategyDailyLog("minimal", logs_dir=tmp_path)
 
     import structlog
+
     await strat.on_init(SimpleNamespace(log=structlog.get_logger()))
 
     strat.log_config_header(
-        mode="paper", timeframe="5m", params={"p": 1}, watchlist=[],
+        mode="paper",
+        timeframe="5m",
+        params={"p": 1},
+        watchlist=[],
     )
     await strat.on_bar(_bar_ist(10, 0))
     strat._slog.close()

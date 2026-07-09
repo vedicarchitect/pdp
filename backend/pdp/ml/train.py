@@ -15,6 +15,7 @@ Run via:
     task ml:train
     task ml:train -- --security-id 13 --timeframe 15m --days 90
 """
+
 from __future__ import annotations
 
 import json
@@ -294,12 +295,11 @@ def train(
         "version": ver,
         "cv_folds": cv_results,
         "cv_mean_accuracy": (
-            round(sum(f["accuracy"] for f in cv_results) / len(cv_results), 4)
-            if cv_results else None
+            round(sum(f["accuracy"] for f in cv_results) / len(cv_results), 4) if cv_results else None
         ),
-        "feature_importances": {k: round(v, 2) for k, v in sorted(
-            feature_importances.items(), key=lambda x: x[1], reverse=True
-        )},
+        "feature_importances": {
+            k: round(v, 2) for k, v in sorted(feature_importances.items(), key=lambda x: x[1], reverse=True)
+        },
     }
     artifact_report_path(model_dir, ver).write_text(json.dumps(report, indent=2))
 

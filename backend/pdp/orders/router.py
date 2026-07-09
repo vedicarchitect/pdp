@@ -12,11 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pdp.broker_sync.models import BrokerFund
 from pdp.instruments.models import Instrument
 from pdp.orders.models import Order, OrderStatus, PreflightResult, TradeMode
-from pdp.orders.paper import ChargesCalculator, compute_charges
+from pdp.orders.paper import compute_charges
 
 if TYPE_CHECKING:
     from pdp.orders.dhan_broker import DhanBroker
-    from pdp.orders.margin import MarginService, OrderSpec
+    from pdp.orders.margin import MarginService
     from pdp.orders.paper import PaperBroker
     from pdp.risk.feed_halt import FeedStaleHalt
     from pdp.settings import Settings
@@ -38,6 +38,9 @@ def _check_lot_freeze(
     be unit-tested without a DB session.
     """
     violations: list[str] = []
+    if qty <= 0:
+        violations.append(f"qty must be > 0, got {qty}")
+        return violations  # no further checks needed
     if lot_size > 1 and qty % lot_size != 0:
         violations.append(f"qty {qty} not a multiple of lot_size {lot_size}")
     effective_freeze = freeze_qty
@@ -295,28 +298,32 @@ class OrderRouter:
             lot_size, freeze_qty = row
             result.violations.extend(
                 _check_lot_freeze(
-                    qty, lot_size, freeze_qty,
-                    s.FREEZE_QTY_BY_UNDERLYING, security_id, exchange_segment,
+                    qty,
+                    lot_size,
+                    freeze_qty,
+                    s.FREEZE_QTY_BY_UNDERLYING,
+                    security_id,
+                    exchange_segment,
                 )
             )
 
         # 2. Charge estimate (reuses PaperBroker's ChargesCalculator; no new cost model)
         if self._paper._costs:
-            dummy_order = type("_O", (), {
-                "exchange_segment": exchange_segment,
-                "side": side,
-                "qty": qty,
-            })()
+            dummy_order = type(
+                "_O",
+                (),
+                {
+                    "exchange_segment": exchange_segment,
+                    "side": side,
+                    "qty": qty,
+                },
+            )()
             result.charge_estimate = compute_charges(
                 self._paper._costs, dummy_order, price or Decimal("1"), qty=qty
             )
 
         # 3. Margin check — live Dhan API, credential-gated
-        if (
-            s.MARGIN_CHECK_ENABLED
-            and self._margin is not None
-            and mode == TradeMode.LIVE
-        ):
+        if s.MARGIN_CHECK_ENABLED and self._margin is not None and mode == TradeMode.LIVE:
             try:
                 from pdp.orders.margin import OrderSpec
 
@@ -333,9 +340,7 @@ class OrderRouter:
 
                 # Read available balance from PG (last broker_sync run)
                 fund_row = await session.execute(
-                    select(BrokerFund.available_balance).where(
-                        BrokerFund.account_id == s.DHAN_CLIENT_ID
-                    )
+                    select(BrokerFund.available_balance).where(BrokerFund.account_id == s.DHAN_CLIENT_ID)
                 )
                 fund = fund_row.scalar_one_or_none()
                 available = fund or Decimal("0")
@@ -392,7 +397,5 @@ class OrderRouter:
         return None
 
     async def _find_by_client_id(self, session: AsyncSession, client_order_id: str) -> Order | None:
-        result = await session.execute(
-            select(Order).where(Order.client_order_id == client_order_id)
-        )
+        result = await session.execute(select(Order).where(Order.client_order_id == client_order_id))
         return result.scalar_one_or_none()

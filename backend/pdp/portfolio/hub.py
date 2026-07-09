@@ -1,4 +1,5 @@
 """WebSocket hub for portfolio position update broadcasts."""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,8 +35,9 @@ class _PortfolioClient:
 
 
 class PortfolioHub:
-    def __init__(self) -> None:
+    def __init__(self, redis: Any | None = None) -> None:
         self._clients: set[_PortfolioClient] = set()
+        self._redis = redis
 
     def add(self, client: _PortfolioClient) -> None:
         self._clients.add(client)
@@ -46,14 +48,24 @@ class PortfolioHub:
         log.info("ws_portfolio_client_disconnected", addr=client.addr, total=len(self._clients))
 
     def broadcast(self, positions: list[dict], summary: dict[str, Any] | None = None) -> None:
-        if not self._clients:
-            return
         msg: dict[str, Any] = {"type": "portfolio_update", "positions": positions}
         if summary is not None:
             msg["summary"] = summary
         payload = json.dumps(msg)
+        
+        if self._redis is not None:
+            asyncio.create_task(self._redis.publish("portfolio.update", payload))
+
+        if not self._clients:
+            return
         for client in self._clients:
             client.push(payload)
+
+    def publish_raw(self, msg: str) -> None:
+        if not self._clients:
+            return
+        for client in self._clients:
+            client.push(msg)
 
     def make_client(self, ws) -> _PortfolioClient:  # type: ignore[no-untyped-def]
         return _PortfolioClient(ws)

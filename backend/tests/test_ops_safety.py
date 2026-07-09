@@ -6,13 +6,11 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from pdp.logging import sensitive_data_filter, _ErrorsJsonlSink, _REDACT_MARKER
+from pdp.logging import _REDACT_MARKER, _ErrorsJsonlSink, sensitive_data_filter
 from pdp.risk.feed_halt import FeedStaleHalt
 
-
 # ── sensitive_data_filter ─────────────────────────────────────────────────────
+
 
 def _apply(event_dict):
     return sensitive_data_filter(None, "info", event_dict)
@@ -56,6 +54,7 @@ def test_no_redact_non_string_value():
 
 # ── _ErrorsJsonlSink ──────────────────────────────────────────────────────────
 
+
 def test_errors_jsonl_appends_error_level():
     with tempfile.TemporaryDirectory() as tmpdir:
         path = str(Path(tmpdir) / "errors.jsonl")
@@ -90,13 +89,13 @@ def test_errors_jsonl_truncate_on_startup():
 
 # ── FeedStaleHalt ─────────────────────────────────────────────────────────────
 
+
 def test_feed_halt_not_blocked_initially():
     halt = FeedStaleHalt(halt_after_seconds=5)
     assert halt.live_blocked is False
 
 
 def test_feed_halt_engages_after_threshold():
-    import time
 
     halt = FeedStaleHalt(halt_after_seconds=0)
     halt.on_feed_stale()

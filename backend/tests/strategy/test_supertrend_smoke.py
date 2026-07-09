@@ -6,6 +6,7 @@ the paper engine and simulates fills by publishing trade events to a real Orders
 same event the PaperBroker emits after a tick fills). Strike resolution is monkeypatched so
 no DB is needed. This validates: signal -> strategy -> order -> fill -> journal.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -162,7 +163,9 @@ def _bar(i: int, close: float) -> BarClosed:
 @pytest.mark.asyncio
 async def test_pipeline_signal_to_journal(tmp_path, monkeypatch):
     # Strike resolver -> deterministic option per side, no DB.
-    async def fake_resolve(session, *, underlying, spot, option_type, otm_steps=1, strike_step=None, expiry=None):
+    async def fake_resolve(
+        session, *, underlying, spot, option_type, otm_steps=1, strike_step=None, expiry=None
+    ):
         strike = 22450 if option_type == "PE" else 22550
         return SimpleNamespace(
             security_id=f"OPT_{option_type}",
@@ -208,6 +211,12 @@ async def test_pipeline_signal_to_journal(tmp_path, monkeypatch):
     host.set_market_adapter(None)  # no live feed -> ctx.market is a safe no-op
     host.load_registry()
     await host.start("st_smoke")
+
+    # The warmup-disarm guard (strategy-critical-data-alerts) disarms any strategy whose
+    # indicators lack 200 warmup bars at start. This smoke test intentionally drives the
+    # signal→journal pipeline with a short synthetic series (not a full warmup), so
+    # explicitly re-arm before feeding bars — warmup coverage is out of scope here.
+    host._running["st_smoke"].instance._disarmed = False
 
     try:
         # Strong uptrend then a sharp drop to force at least one direction flip.

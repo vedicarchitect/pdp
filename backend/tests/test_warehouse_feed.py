@@ -9,6 +9,7 @@ Proves that:
 5. When two underlyings are configured, ticks for each sid route to the correct writer.
 6. An unsupported underlying name raises ValueError at WarehouseService construction time.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,6 +25,7 @@ from pdp.options.warehouse import KEY_FIELDS
 from pdp.warehouse.writer import ContractMeta, OptionBarWriter
 
 # ── Stub collection ──────────────────────────────────────────────────────────
+
 
 class _StubBulkResult:
     def __init__(self, upserted: int) -> None:
@@ -90,6 +92,7 @@ def _run(coro):
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
 
 def test_option_bar_enqueued_and_flushed_with_correct_fields() -> None:
     """A BarClosed for a known option sid produces a correctly shaped upsert op."""
@@ -250,6 +253,7 @@ def test_nifty_expiry_calendar_resolve_for_band() -> None:
 
 
 # ── Multi-underlying tests (tasks 5.2 and 5.3) ───────────────────────────────
+
 
 def test_banknifty_option_bar_routes_to_banknifty_writer() -> None:
     """When BANKNIFTY writer is configured, option bars are tagged with underlying='BANKNIFTY'."""

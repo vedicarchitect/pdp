@@ -35,6 +35,9 @@ class LegRow {
   final String? entryReason;
   final double? ltp;
   final double? mtm;
+  final double? dayHigh;
+  final double? dayLow;
+  final String origin; // "system" | "manual"
   final bool isHedge;
   final bool isMomentum;
   // Greeks
@@ -56,6 +59,9 @@ class LegRow {
     this.entryReason,
     this.ltp,
     this.mtm,
+    this.dayHigh,
+    this.dayLow,
+    this.origin = 'system',
     required this.isHedge,
     required this.isMomentum,
     this.delta,
@@ -78,6 +84,9 @@ class LegRow {
       entryReason: json['entry_reason'] as String?,
       ltp: (json['ltp'] as num?)?.toDouble(),
       mtm: (json['mtm'] as num?)?.toDouble(),
+      dayHigh: (json['day_high'] as num?)?.toDouble(),
+      dayLow: (json['day_low'] as num?)?.toDouble(),
+      origin: json['origin'] as String? ?? 'system',
       isHedge: json['is_hedge'] as bool? ?? false,
       isMomentum: json['is_momentum'] as bool? ?? false,
       delta: (json['delta'] as num?)?.toDouble(),
@@ -426,6 +435,8 @@ class StrangleTradeRow {
   final double? pnl;
   final bool open;
   final bool isHedge;
+  final String? exitReason;
+  final String? entryReason;
 
   const StrangleTradeRow({
     this.underlying,
@@ -441,6 +452,8 @@ class StrangleTradeRow {
     this.pnl,
     required this.open,
     required this.isHedge,
+    this.exitReason,
+    this.entryReason,
   });
 
   factory StrangleTradeRow.fromJson(Map<String, dynamic> json) {
@@ -458,6 +471,8 @@ class StrangleTradeRow {
       pnl: (json['pnl'] as num?)?.toDouble(),
       open: json['open'] as bool? ?? false,
       isHedge: json['is_hedge'] as bool? ?? false,
+      exitReason: json['reason'] as String?,
+      entryReason: json['entry_reason'] as String?,
     );
   }
 }

@@ -64,9 +64,21 @@ class WSHub:
         self._clients.discard(client)
         log.info("ws_client_disconnected", addr=client.addr, total=len(self._clients))
 
-    def publish_tick(self, tick: Tick) -> None:
+    def publish_tick_raw(self, security_id: str, payload: str) -> None:
         if not self._clients:
             return
+        for client in self._clients:
+            if security_id in client.security_ids:
+                client.push(payload)
+
+    def publish_bar_raw(self, security_id: str, timeframe: str, payload: str) -> None:
+        if not self._clients:
+            return
+        for client in self._clients:
+            if security_id in client.security_ids and timeframe in client.timeframes:
+                client.push(payload)
+
+    def publish_tick(self, tick: Tick) -> None:
         payload = json.dumps(
             {
                 "type": "tick",
@@ -77,13 +89,9 @@ class WSHub:
                 "ts": time.time(),
             }
         )
-        for client in self._clients:
-            if tick.security_id in client.security_ids:
-                client.push(payload)
+        self.publish_tick_raw(tick.security_id, payload)
 
     def publish_bar(self, bar: BarClosed) -> None:
-        if not self._clients:
-            return
         payload = json.dumps(
             {
                 "type": "bar",
@@ -99,9 +107,7 @@ class WSHub:
                 "ts": time.time(),
             }
         )
-        for client in self._clients:
-            if bar.security_id in client.security_ids and bar.timeframe in client.timeframes:
-                client.push(payload)
+        self.publish_bar_raw(bar.security_id, bar.timeframe, payload)
 
     async def _pump(self, client: _Client) -> None:
         """Drain a client's queue to the WebSocket."""

@@ -4,6 +4,7 @@ The engine is a deterministic pure function over plain numbers, so these tests
 need no fixtures: they assert per-signal votes, the score->bucket->ratio
 mapping, the VIX gate, and determinism.
 """
+
 from __future__ import annotations
 
 from pdp.signals.bias import (
@@ -33,10 +34,16 @@ def _all_bull_inputs() -> BiasInputs:
         ema_5m=_bull_ema(),
         cam_daily=CamLevels(r3=99.0, r4=99.5, s3=90.0, s4=89.5),
         cam_weekly=CamLevels(r3=98.0, r4=98.5, s3=88.0, s4=87.5),
-        pdh=95.0, pdl=85.0, pwh=94.0, pwl=84.0,
-        orb_high=97.5, orb_low=93.0,
+        pdh=95.0,
+        pdl=85.0,
+        pwh=94.0,
+        pwl=84.0,
+        orb_high=97.5,
+        orb_low=93.0,
         pcr=1.3,
-        vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0,
+        vix_now=12.0,
+        vix_day_open=12.5,
+        vix_day_high=13.0,
         vix_recent=[13.0, 12.5, 12.0],
     )
 
@@ -99,12 +106,21 @@ def test_all_bull_is_complete_bull_ratio():
 def test_all_bear_is_complete_bear_ratio():
     bear = BiasInputs(
         spot=80.0,
-        ema_1h=_bear_ema(80.0), ema_15m=_bear_ema(80.0), ema_5m=_bear_ema(80.0),
+        ema_1h=_bear_ema(80.0),
+        ema_15m=_bear_ema(80.0),
+        ema_5m=_bear_ema(80.0),
         cam_daily=CamLevels(r3=95, r4=96, s3=85, s4=84),
         cam_weekly=CamLevels(r3=94, r4=95, s3=84, s4=83),
-        pdh=90, pdl=86, pwh=91, pwl=85,
-        orb_high=89, orb_low=86, pcr=0.7,
-        vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0,
+        pdh=90,
+        pdl=86,
+        pwh=91,
+        pwl=85,
+        orb_high=89,
+        orb_low=86,
+        pcr=0.7,
+        vix_now=12.0,
+        vix_day_open=12.5,
+        vix_day_high=13.0,
         vix_recent=[13.0, 12.5, 12.0],
     )
     r = score_bias(bear)
@@ -138,7 +154,8 @@ def test_score_always_in_range_with_partial_data():
 
 def test_vix_spike_gates_entry():
     inp = _all_bull_inputs()
-    inp.vix_now = 14.0
+    inp.vix_now = 12.0
+    inp.vix_day_high = 14.0
     inp.vix_day_open = 12.0  # +16.7% -> spike
     r = score_bias(inp)
     assert r.gated is True

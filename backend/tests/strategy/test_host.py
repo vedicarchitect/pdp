@@ -1,10 +1,12 @@
 """Unit tests for StrategyHost dispatch, isolation, and overflow."""
+
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,12 +14,12 @@ from pdp.market.bars import BarClosed
 from pdp.market.models import Tick
 from pdp.strategy.abc import FillEvent, Strategy
 from pdp.strategy.context import StrategyContext
-from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost, StrategyStatus
-
+from pdp.strategy.host import StrategyHost, StrategyStatus
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
+
 
 def _make_host(strategies_dir: Path | None = None) -> StrategyHost:
     mock_router = MagicMock()
@@ -30,21 +32,23 @@ def _make_host(strategies_dir: Path | None = None) -> StrategyHost:
 
 
 def _tick(security_id: str = "1333") -> Tick:
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     return Tick(
         security_id=security_id,
         exchange_segment="NSE_EQ",
         ltp=Decimal("100.0"),
-        ltt=datetime.now(timezone.utc),
+        ltt=datetime.now(UTC),
     )
 
 
 def _bar(security_id: str = "1333", timeframe: str = "1m") -> BarClosed:
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     return BarClosed(
         security_id=security_id,
         timeframe=timeframe,
-        bar_time=datetime.now(timezone.utc),
+        bar_time=datetime.now(UTC),
         open=Decimal("100"),
         high=Decimal("105"),
         low=Decimal("99"),
@@ -79,6 +83,7 @@ class _StubStrategy(Strategy):
 # ---------------------------------------------------------------------------
 # 8.1 — on_tick routing
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_on_tick_enqueues_for_watched_security(tmp_path):
@@ -139,6 +144,7 @@ async def test_on_tick_ignores_unwatched_security(tmp_path):
 # 8.2 — on_bar routing
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_on_bar_routes_matching_timeframe(tmp_path):
     """Bar for watched (security, timeframe) pair is dispatched."""
@@ -196,6 +202,7 @@ async def test_on_bar_filters_wrong_timeframe(tmp_path):
 # 8.3 — Inbox overflow
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_inbox_overflow_increments_counter_not_raises(tmp_path):
     """Full inbox increments dropped_ticks and does not raise."""
@@ -236,6 +243,7 @@ async def test_inbox_overflow_increments_counter_not_raises(tmp_path):
 # ---------------------------------------------------------------------------
 # 8.4 — Crash containment
 # ---------------------------------------------------------------------------
+
 
 class _CrashingStrategy(Strategy):
     """Strategy that raises on every bar — for crash containment tests."""
@@ -304,6 +312,7 @@ async def test_crash_sets_status_without_affecting_other_strategies(tmp_path):
 # R1 — Dynamic SID routing (strangle-live-paper-hardening)
 # ---------------------------------------------------------------------------
 
+
 class _SubscribingStrategy(Strategy):
     """Strategy that subscribes to an option SID in on_init."""
 
@@ -320,7 +329,7 @@ class _SubscribingStrategy(Strategy):
 
 
 def _make_host_with_mock_adapter(strategies_dir: Path) -> StrategyHost:
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
 
     mock_router = MagicMock()
     mock_session_maker = MagicMock()

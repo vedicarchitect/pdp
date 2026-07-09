@@ -1,4 +1,5 @@
 """Tests for ml.features — leakage safety, label horizon, and train→artifact round-trip."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ def _make_bars(n: int, start: float = 100.0) -> list[BarClosed]:
 
 # ── Feature leakage tests ─────────────────────────────────────────────────────
 
+
 class TestFeatureLeakage:
     def test_row_t_uses_only_data_up_to_t(self):
         """The feature row for bar t must only depend on bars with index ≤ t."""
@@ -72,6 +74,7 @@ class TestFeatureLeakage:
 
 
 # ── Label horizon tests ───────────────────────────────────────────────────────
+
 
 class TestLabelHorizon:
     def test_last_horizon_rows_are_none(self):
@@ -111,6 +114,7 @@ class TestLabelHorizon:
 
 # ── Feature schema tests ──────────────────────────────────────────────────────
 
+
 class TestFeatureSchema:
     def test_build_row_produces_all_schema_columns(self):
         bar = _bar(100.0)
@@ -118,8 +122,16 @@ class TestFeatureSchema:
         schema = FEATURE_SCHEMA
         for col in schema:
             # Options-specific columns may not be in row when no opts supplied; that's OK
-            if col in ("max_pain", "pcr", "gex", "iv_atm", "india_vix",
-                       "oi_wall_above", "oi_wall_below", "max_pain_distance"):
+            if col in (
+                "max_pain",
+                "pcr",
+                "gex",
+                "iv_atm",
+                "india_vix",
+                "oi_wall_above",
+                "oi_wall_below",
+                "max_pain_distance",
+            ):
                 assert col in row or True  # these are added by build_feature_row
             # Otherwise all schema cols must be present
         # Ensure no NaN/None values in the row
@@ -161,16 +173,17 @@ class TestFeatureSchema:
 
 # ── CV embargo test ───────────────────────────────────────────────────────────
 
+
 class TestCVEmbargo:
     def test_train_end_plus_embargo_is_val_start(self):
         """Purged walk-forward: val_start = train_end + embargo."""
         from pdp.ml.train import _purged_walk_forward_cv
+
         # Build a minimal dataset with a known label distribution
         n = 100
         feat_mat = [[float(i)] for i in range(n)]
         y = [i % 3 for i in range(n)]
-        results = _purged_walk_forward_cv(feat_mat, y, ["x"], ["down", "flat", "up"],
-                                          n_splits=3, embargo=5)
+        results = _purged_walk_forward_cv(feat_mat, y, ["x"], ["down", "flat", "up"], n_splits=3, embargo=5)
         # Each fold should have been computed without look-ahead
         assert len(results) > 0
         for fold in results:
@@ -179,6 +192,7 @@ class TestCVEmbargo:
 
 
 # ── Round-trip test ───────────────────────────────────────────────────────────
+
 
 class TestArtifactRoundTrip:
     def test_meta_save_load(self, tmp_path):

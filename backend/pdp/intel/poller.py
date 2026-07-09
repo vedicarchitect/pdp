@@ -6,6 +6,7 @@ source on its own interval, offloading sync calls to a thread pool (the sources 
 internally via `asyncio.to_thread`), and writes `{"data": ..., "as_of": ...}` to Redis. Routes
 read only from this cache — never call a source inline on a request.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -66,12 +67,13 @@ class IntelPoller:
 
     def start(self) -> None:
         self._tasks = [
-            asyncio.create_task(self._loop("global_indices", self._refresh_global_indices,
-                                            self._global_indices_interval)),
-            asyncio.create_task(self._loop("news_and_sentiment", self._refresh_news_and_sentiment,
-                                            self._news_interval)),
-            asyncio.create_task(self._loop("fii_dii", self._refresh_fii_dii,
-                                            self._fii_dii_interval)),
+            asyncio.create_task(
+                self._loop("global_indices", self._refresh_global_indices, self._global_indices_interval)
+            ),
+            asyncio.create_task(
+                self._loop("news_and_sentiment", self._refresh_news_and_sentiment, self._news_interval)
+            ),
+            asyncio.create_task(self._loop("fii_dii", self._refresh_fii_dii, self._fii_dii_interval)),
         ]
         log.info("intel_poller_started")
 

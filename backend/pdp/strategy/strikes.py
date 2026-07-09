@@ -4,6 +4,7 @@ Resolves a tradeable option ``Instrument`` (security_id, segment, lot_size) for 
 underlying, spot, side (CE/PE) and out-of-the-money offset, using the local instruments
 table. The strategy passes the returned ``security_id`` to the order router.
 """
+
 from __future__ import annotations
 
 from datetime import date

@@ -1,4 +1,5 @@
 """Tests for OptionsStrategyConfig parsing and validation."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,10 +7,7 @@ from pathlib import Path
 import pytest
 
 from pdp.backtest.options_strategy import (
-    LegConfig,
     OptionsStrategyConfig,
-    RiskConfig,
-    StrikeSelection,
 )
 
 EXAMPLE_YAML = Path(__file__).parent.parent.parent / "backtest" / "configs" / "options_short_straddle.yaml"
@@ -64,7 +62,12 @@ def test_parse_inline_dict():
         "entry": {
             "time_ist": "09:20",
             "legs": [
-                {"type": "CE", "side": "SELL", "lots": 2, "strike_selection": {"method": "atm_offset", "offset": 1}},
+                {
+                    "type": "CE",
+                    "side": "SELL",
+                    "lots": 2,
+                    "strike_selection": {"method": "atm_offset", "offset": 1},
+                },
             ],
         },
         "exit": {"time_ist": "15:10"},
@@ -103,7 +106,11 @@ def test_by_premium_strike_selection():
         "entry": {
             "time_ist": "09:20",
             "legs": [
-                {"type": "CE", "side": "SELL", "strike_selection": {"method": "by_premium", "target_premium": 80.0}},
+                {
+                    "type": "CE",
+                    "side": "SELL",
+                    "strike_selection": {"method": "by_premium", "target_premium": 80.0},
+                },
             ],
         },
         "exit": {"time_ist": "15:10"},
@@ -117,5 +124,6 @@ def test_by_premium_strike_selection():
 def test_date_range_parsing():
     config = OptionsStrategyConfig.from_yaml(EXAMPLE_YAML)
     from datetime import date
+
     assert config.date_range.from_ == date(2026, 1, 1)
     assert config.date_range.to == date(2026, 6, 1)

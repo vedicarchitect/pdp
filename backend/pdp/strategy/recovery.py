@@ -2,6 +2,7 @@
 
 Queries the ledger on startup to rebuild in-memory state after a process restart.
 """
+
 from __future__ import annotations
 
 from datetime import date

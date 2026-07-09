@@ -3,6 +3,7 @@
 yfinance scrapes Yahoo Finance and is synchronous/slow — callers MUST invoke `fetch()` from a
 thread-pool executor (see `pdp/intel/poller.py`), never inline on a request path.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -54,8 +55,11 @@ class YfinanceGlobalMarketSource:
 
         quotes: list[GlobalIndexQuote] = []
         data = yf.download(
-            list(TICKERS.keys()), period="5d", interval="1d",
-            progress=False, group_by="ticker",
+            list(TICKERS.keys()),
+            period="5d",
+            interval="1d",
+            progress=False,
+            group_by="ticker",
         )
         for ticker, symbol in TICKERS.items():
             try:
@@ -66,10 +70,16 @@ class YfinanceGlobalMarketSource:
                 prev_close = float(closes.iloc[-2])
                 change = close - prev_close
                 change_pct = (change / prev_close * 100) if prev_close else 0.0
-                quotes.append(GlobalIndexQuote(
-                    symbol=symbol, ticker=ticker, close=close, prev_close=prev_close,
-                    change=change, change_pct=change_pct,
-                ))
+                quotes.append(
+                    GlobalIndexQuote(
+                        symbol=symbol,
+                        ticker=ticker,
+                        close=close,
+                        prev_close=prev_close,
+                        change=change,
+                        change_pct=change_pct,
+                    )
+                )
             except Exception as exc:
                 log.warning("global_index_fetch_failed", ticker=ticker, exc=str(exc))
         return quotes

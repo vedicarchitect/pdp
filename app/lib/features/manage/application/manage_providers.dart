@@ -5,6 +5,7 @@ import '../../../core/network/api_client.dart';
 import '../data/execution_source.dart';
 import '../data/live_execution_source.dart';
 import '../data/manage_repository.dart';
+import '../domain/broker_models.dart';
 import '../domain/execution_models.dart';
 import '../domain/models.dart';
 
@@ -68,4 +69,15 @@ final stranglePnlProvider = FutureProvider.autoDispose<StranglePnl>((ref) {
 final strangleTradesProvider = FutureProvider.autoDispose.family<StrangleTrades, String>((ref, date) {
   final repo = ref.watch(manageRepositoryProvider);
   return repo.getStrangleTrades(date);
+});
+
+// ─── Broker (Dhan) account ──────────────────────────────────────────────────────
+
+/// Polls the broker (Dhan) account view every 15 s while the tab is mounted.
+final brokerAccountProvider = StreamProvider.autoDispose<BrokerAccount>((ref) async* {
+  final repo = ref.watch(manageRepositoryProvider);
+  yield await repo.getBrokerAccount();
+  await for (final _ in Stream.periodic(const Duration(seconds: 15))) {
+    yield await repo.getBrokerAccount();
+  }
 });

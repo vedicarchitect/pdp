@@ -7,6 +7,7 @@ entries before the start time; flatten all at the square-off time. Paper-only.
 
 Schedule and sizing live in the YAML ``params`` block — see strategies/supertrend_short.yaml.
 """
+
 from __future__ import annotations
 
 from datetime import date, time
@@ -39,9 +40,7 @@ class SuperTrendShort(Strategy):
         self.timeframe: str = p.get("timeframe", "5m")
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self.otm_steps: int = int(p.get("otm_steps", 1))
-        self.strike_step: int | None = (
-            int(p["strike_step"]) if p.get("strike_step") is not None else None
-        )
+        self.strike_step: int | None = int(p["strike_step"]) if p.get("strike_step") is not None else None
         self.lot_size: int = int(p.get("lot_size", 65))
         self.start_lots: int = int(p.get("start_lots", 2))
         self.add_lots: int = int(p.get("add_lots", 1))
@@ -309,7 +308,8 @@ class SuperTrendShort(Strategy):
             lots=lots,
         )
         self.log_decision(
-            "open", "new_entry",
+            "open",
+            "new_entry",
             option_type=option_type,
             security_id=sid,
             strike=self._current["strike"],
@@ -330,7 +330,8 @@ class SuperTrendShort(Strategy):
         c["lots"] += add_lots
         self.ctx.log.info("leg_scaled", security_id=c["security_id"], lots=c["lots"])
         self.log_decision(
-            "scale", "add_lots",
+            "scale",
+            "add_lots",
             security_id=c["security_id"],
             add_lots=add_lots,
             lots=c["lots"],
@@ -343,9 +344,7 @@ class SuperTrendShort(Strategy):
         await self.ctx.orders.cancel_open_entry_orders(c["security_id"])
         net_qty = await self.ctx.orders.get_net_qty(c["security_id"])
         if net_qty == 0:
-            self.ctx.log.info(
-                "close_skipped_no_position", security_id=c["security_id"], reason=reason
-            )
+            self.ctx.log.info("close_skipped_no_position", security_id=c["security_id"], reason=reason)
             self._current = None
             return
         close_lots = abs(net_qty) // self.lot_size
@@ -368,7 +367,5 @@ class SuperTrendShort(Strategy):
                 product="MIS",
             )
         except Exception as exc:
-            self.ctx.log.warning(
-                "order_rejected", security_id=security_id, side=side, qty=qty, exc=str(exc)
-            )
+            self.ctx.log.warning("order_rejected", security_id=security_id, side=side, qty=qty, exc=str(exc))
             return None

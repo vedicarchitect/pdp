@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import Column, String, Integer, Text, DateTime, text
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, DateTime, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from pdp.db.base import Base
 
@@ -22,7 +21,9 @@ class JobStatus(str, Enum):
 class Job(Base):
     __tablename__ = "jobs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
+    )
     type = Column(String(50), nullable=False)
     status = Column(String(20), nullable=False, default=JobStatus.PENDING.value)
     params = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))

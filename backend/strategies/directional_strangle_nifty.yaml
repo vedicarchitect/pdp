@@ -80,6 +80,9 @@ params:
   entry_after_ist: "10:15"
   squareoff_ist: "15:10"
 
+  # ---- DTE window: open new legs only within N calendar days of expiry ----
+  dte_max: 15
+
   # ---- Day loss cap ----
   day_loss_limit: 50000
   neutral_no_trade: false

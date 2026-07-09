@@ -5,6 +5,7 @@ mirrors the short-side weighted-average / realize-on-reduce math of the real pap
 engine so leg- and day-stop logic can be exercised), a market control exposing LTP,
 a monkeypatched strike resolver, and a controllable IST clock.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -37,9 +38,7 @@ class _Orders:
         self.defer_buy_fill: bool = False
 
     def _p(self, sid: str) -> dict:
-        return self._pos.setdefault(
-            sid, {"net": 0, "avg": Decimal("0"), "realized": Decimal("0")}
-        )
+        return self._pos.setdefault(sid, {"net": 0, "avg": Decimal("0"), "realized": Decimal("0")})
 
     async def place_order(self, *, security_id, side, qty, **kw):
         self.calls.append({"security_id": security_id, "side": side, "qty": qty, **kw})
@@ -166,7 +165,9 @@ def _bar(i: int, close: float = 22500.0, day: int = 8) -> BarClosed:
 
 @pytest.fixture
 def patched_resolver(monkeypatch):
-    async def fake_resolve(session, *, underlying, spot, option_type, otm_steps=1, strike_step=None, expiry=None):
+    async def fake_resolve(
+        session, *, underlying, spot, option_type, otm_steps=1, strike_step=None, expiry=None
+    ):
         strike = 22450 if option_type == "PE" else 22550
         return SimpleNamespace(
             security_id=f"OPT_{option_type}",
@@ -280,6 +281,7 @@ async def test_square_off_flattens_and_stops(patched_resolver, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Risk controls                                                               #
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.asyncio
 async def test_leg_stop_fires_and_no_reentry_same_bar(patched_resolver, monkeypatch):
@@ -396,6 +398,7 @@ async def test_day_accumulator_resets_next_day(patched_resolver, monkeypatch):
 # Live↔backtest parity gaps (offline simulation of the live-only verifies)     #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.asyncio
 async def test_flip_open_deferred_when_cover_unfilled(patched_resolver):
     """GAP 2 (task 2.3): when the flip's cover order has not yet filled, the new leg
@@ -438,8 +441,11 @@ async def test_lots_sync_reads_net_from_positions_table(patched_resolver):
 
     # Simulate restart: recovered leg carries a stale lot count, but the ledger holds 3 lots.
     strat._current = {
-        "security_id": "OPT_PE", "segment": "NSE_FNO",
-        "option_type": "PE", "strike": 22450.0, "lots": 1,
+        "security_id": "OPT_PE",
+        "segment": "NSE_FNO",
+        "option_type": "PE",
+        "strike": 22450.0,
+        "lots": 1,
     }
     orders._pos["OPT_PE"] = {"net": -3 * 65, "avg": Decimal("22500"), "realized": Decimal("0")}
     strat._touched.add("OPT_PE")  # day-realized accounting expects a baseline
@@ -461,8 +467,11 @@ async def test_lots_sync_clears_when_position_flat(patched_resolver):
 
     # Recovered leg claims 5 lots, but the ledger has no position for it.
     strat._current = {
-        "security_id": "OPT_PE", "segment": "NSE_FNO",
-        "option_type": "PE", "strike": 22450.0, "lots": 5,
+        "security_id": "OPT_PE",
+        "segment": "NSE_FNO",
+        "option_type": "PE",
+        "strike": 22450.0,
+        "lots": 5,
     }
     strat._touched.add("OPT_PE")
 

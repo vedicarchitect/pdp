@@ -24,8 +24,12 @@ async def test_upsert_snapshot_stores_doc_with_count() -> None:
     col = FakeCollection()
     rows = [{"securityId": "1"}, {"securityId": "2"}]
     n = await upsert_snapshot(
-        col, account_id="A", snapshot_date="2026-06-27", report_type="holdings",
-        rows=rows, source="dhan.fetch_holdings",
+        col,
+        account_id="A",
+        snapshot_date="2026-06-27",
+        report_type="holdings",
+        rows=rows,
+        source="dhan.fetch_holdings",
     )
     assert n == 2
     doc = col.docs[("A", "2026-06-27", "holdings")]
@@ -38,10 +42,12 @@ async def test_upsert_snapshot_stores_doc_with_count() -> None:
 @pytest.mark.asyncio
 async def test_upsert_snapshot_is_idempotent_by_key() -> None:
     col = FakeCollection()
-    await upsert_snapshot(col, account_id="A", snapshot_date="2026-06-27",
-                          report_type="funds", rows=[{"x": 1}], source="s")
-    await upsert_snapshot(col, account_id="A", snapshot_date="2026-06-27",
-                          report_type="funds", rows=[{"x": 2}], source="s")
+    await upsert_snapshot(
+        col, account_id="A", snapshot_date="2026-06-27", report_type="funds", rows=[{"x": 1}], source="s"
+    )
+    await upsert_snapshot(
+        col, account_id="A", snapshot_date="2026-06-27", report_type="funds", rows=[{"x": 2}], source="s"
+    )
     # Same key → single doc, overwritten with the latest payload.
     assert len(col.docs) == 1
     assert col.docs[("A", "2026-06-27", "funds")]["data"] == [{"x": 2}]
