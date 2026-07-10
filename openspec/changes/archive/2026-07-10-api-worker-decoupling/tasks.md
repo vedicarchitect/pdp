@@ -13,9 +13,14 @@
 > pre-existing (`PositionState` missing `strategy_id` ctor arg, per `backend/CLAUDE.md`'s debt
 > note; Windows `ProactorEventLoop` asyncio teardown races, per `RUNBOOK.md`'s troubleshooting
 > table), none in files touched by this change. `tests/orders/test_command_channel.py` (new,
-> covers 8.1) is 3/3. What remains: `SELECT … FOR UPDATE` on the shared position write (5.3, P2)
-> and a runtime cutover-verification of the Redis→WS bridge (3.2/8.3) — still deferred with
-> `cloud-deploy-aws`.
+> covers 8.1) is 3/3.
+>
+> **Closeout (2026-07-10, same day):** all remaining items closed — 3.2 (dead code + stale docs
+> cleanup + regression test), 5.3 (`.with_for_update()` row lock on the real intra-engine race),
+> and 8.3 (genuine 3-process boot verified without touching the host network — see 8.3 note; also
+> surfaced and fixed a real `/readyz` bug where a stray `.decode()` on an already-decoded Redis
+> string masked "ready" as 503/degraded). Nothing deferred to `cloud-deploy-aws` remains from this
+> change.
 
 ## 1. Composable startup groups
 - [x] 1.1 New `pdp/runtime/groups.py`: role-selected startup groups (`async start()/stop()`),
@@ -30,8 +35,15 @@
 
 ## 3. Redis→WS bridge (API)
 - [x] 3.1 Bridge task in `pdp/runtime/bridge.py` (`SUBSCRIBE tick.*` + `XREAD bars.*` → WSHub)
-- [~] 3.2 Remove in-process `WSHub` calls from `TickRouter` — **verify cutover at runtime**
-      (bridge exists; confirm the engine role no longer double-serves WS)
+- [x] 3.2 Remove in-process `WSHub` calls from `TickRouter`
+      — **FIXED 2026-07-10**: cutover was already done in code (`TickRouter.__init__` never took
+      a `ws_hub` param); `FeedEngineGroup.start()` still fetched a dead, never-used
+      `ws_hub = getattr(app.state, "ws_hub", None)` local — removed. Fixed the stale docstring in
+      `pdp/market/router.py` and the stale hot-path diagram in `pdp/market/CLAUDE.md`, both of
+      which still described `TickRouter` calling `WSHub.broadcast()` directly. Added
+      `tests/market/test_router.py` (2 tests) asserting `TickRouter` has no `ws_hub`
+      param/attribute, locking in the contract that WS fan-out is API-process-only via
+      `MarketBridge`.
 - [x] 3.3 Same bridge pattern for job-progress / alerts / events hubs
 
 ## 4. Order command channel
@@ -54,7 +66,18 @@
       whether an engine is attached; `_get_matrix_futures_sids` mirrors
       `engine.matrix_futures_sids` to Redis (`matrix:futures_sids`, published once at
       startup by `FeedEngineGroup`) for the no-engine case.
-- [ ] 5.3 `SELECT … FOR UPDATE` on the position write if engine + MTM both write it (P2) — **DEFERRED**
+- [x] 5.3 `SELECT … FOR UPDATE` on the position write if engine + MTM both write it (P2)
+      — **FIXED 2026-07-10**: audited every read-modify-write site touching `orders.Position`.
+      Engine (`net_qty`/`avg_price`/`realized_pnl`) and MTM (`portfolio/service.py`'s
+      `_flush_dirty`, `unrealized_pnl`/`updated_at` only) are column-disjoint and already safe —
+      Postgres's own row lock serializes the two `UPDATE`s regardless. The real hazard is
+      **intra-engine**: `DhanBroker._on_alert` spawns an unbounded `asyncio.create_task` per
+      order-update webhook with no per-sid serialization, so two `TRADED` alerts for the same
+      `(strategy_id, security_id, exchange_segment, product)` arriving close together can both
+      `SELECT` the same stale row and the second commit clobbers the first (lost `net_qty`/
+      `avg_price`/`realized_pnl` update). Added `.with_for_update()` to the `select(Position)` in
+      `upsert_position()` (`pdp/orders/paper.py`, shared by `PaperBroker` + `DhanBroker`) to close
+      it. `tests/orders/` (39/39) green after the change.
 
 ## 6. Degradation + pools
 - [x] 6.1 Per-role `/readyz`; engine-down → stale-flagged snapshots + "feed offline" banner
@@ -87,5 +110,21 @@
       stream ID once, so a fast engine's result could land in the gap and be permanently
       missed, misreporting a placed order as `"rejected"`/timeout.
 - [x] 8.2 `task test` green; `flutter analyze && flutter test` green
-- [~] 8.3 Manual 3-process boot — re-run after the 3.2 cutover check
+- [x] 8.3 Manual 3-process boot — re-run after the 3.2 cutover check
+      — **FIXED 2026-07-10**: booted `api`+`engine`+`ops` from `infra/compose/docker-compose.yml`
+      (`--profile app`) with a `!override`-tag compose override stripping `api`'s host port
+      entirely (`ports: !override []`) so the test never touched the host's port 8000 — verified
+      via `docker port` (no mappings) before and after. Checked all three roles' `/readyz` via
+      `docker exec <container> curl localhost:8000/readyz` (in-network, no host exposure):
+      surfaced a real latent bug — `main.py`'s `/readyz` called `val.decode("utf-8")` on the
+      `engine:status` Redis read, but the client is constructed with `decode_responses=True`
+      (already returns `str`), so any time `engine:status` actually had a value the check raised
+      `AttributeError` and reported `redis: "error: AttributeError"`/503, permanently masking a
+      real "ready" state. Fixed by dropping the redundant `.decode()`. Rebuilt the shared image,
+      re-ran: all three roles now `{"status":"ready","db":"ok","redis":"ok","mongo":"ok",
+      "engine":"ready"}` (200), confirming the engine's `engine:status` Redis publish is correctly
+      visible cross-process to api/ops — the core claim of this change. Engine logs confirm
+      `live: false, broker: paper, strategy_registry_loaded count: 0` (no `strategies/` dir in the
+      image → structurally no auto-start, no Dhan connection opened). Containers torn down
+      immediately after; host port 8000 (pre-existing dev process) confirmed untouched throughout.
 - [x] 8.4 `openspec validate --strict api-worker-decoupling` passes

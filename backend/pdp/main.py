@@ -196,7 +196,7 @@ def create_app() -> FastAPI:
         try:
             await app.state.redis.ping()
             val = await app.state.redis.get("engine:status")
-            engine_state = val.decode("utf-8") if val else "down"
+            engine_state = val if val else "down"
         except Exception as exc:
             redis_state = f"error: {exc.__class__.__name__}"
         try:

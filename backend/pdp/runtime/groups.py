@@ -186,9 +186,6 @@ class FeedEngineGroup:
         
         await redis.set("engine:status", b"warming")
         
-        # Hubs are retrieved gracefully if available (in 'all' mode)
-        ws_hub = getattr(app.state, "ws_hub", None)
-        
         from pdp.orders.ws import OrdersHub
         orders_hub = getattr(app.state, "orders_hub", None)
         if not orders_hub:

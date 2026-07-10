@@ -30,8 +30,12 @@ class TickRouter:
       2. Redis pub/sub        (PUBLISH tick.<id>)
       3. BarAggregator        (emits BarClosed events)
       4. BarWriter            (batched MongoDB persistence)
-      5. WSHub                (WebSocket fan-out for ticks and bars)
-      6. Redis streams        (XADD bars.<id>.<tf>)
+      5. Redis streams        (XADD bars.<id>.<tf>)
+
+    Does not call WSHub directly — the API process's MarketBridge
+    (pdp/runtime/bridge.py) subscribes to the Redis pub/sub channel and
+    stream above and fans out to WSHub from there, so the engine role
+    never needs a WSHub instance.
     """
 
     def __init__(

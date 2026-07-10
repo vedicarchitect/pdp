@@ -17,13 +17,15 @@
 
 ```
 DhanTickerAdapter.queue
-  → TickRouter.run()
+  → TickRouter.run()                             # runs in the "engine" role/process
       ├── Redis SET ltp:<security_id> EX5       # LTP cache for PaperBroker
-      ├── Redis PUBLISH tick.<security_id>       # pub/sub
-      ├── WSHub.broadcast(tick)                 # → browser clients
+      ├── Redis PUBLISH tick.<security_id>       # pub/sub — consumed by the API
+      │                                          # process's MarketBridge, which fans
+      │                                          # out to WSHub there (no in-process
+      │                                          # WSHub call from the engine)
       ├── BarAggregator.on_tick(tick)
       │     on bar close:
-      │       ├── Redis XADD bars.<id>.<tf>
+      │       ├── Redis XADD bars.<id>.<tf>       # also consumed by MarketBridge
       │       ├── BarWriter.enqueue(bar)  →  MongoDB market_bars
       │       ├── IndicatorEngine.update(bar)
       │       └── StrategyHost.on_bar(bar)

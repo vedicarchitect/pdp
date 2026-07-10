@@ -413,12 +413,14 @@ async def upsert_position(
     a single source of truth across flat-reopen, same-side add, reduce, and reversal.
     """
     result = await session.execute(
-        select(Position).where(
+        select(Position)
+        .where(
             Position.strategy_id == order.strategy_id,
             Position.security_id == order.security_id,
             Position.exchange_segment == order.exchange_segment,
             Position.product == order.product,
         )
+        .with_for_update()
     )
     pos = result.scalar_one_or_none()
     fill_qty = order.qty if order.side == Side.BUY else -order.qty
