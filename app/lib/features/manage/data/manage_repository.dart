@@ -63,10 +63,19 @@ class ManageRepository {
     return StranglePnl.fromJson(res);
   }
 
-  /// Broker (Dhan) account view — holdings + positions + funds fetched in
-  /// parallel. Endpoints read the PG mirror, so they return empty lists (not
-  /// errors) when broker sync hasn't run / no Dhan credentials are configured.
+  Future<BrokerSyncStatus> getBrokerSyncStatus() async {
+    return BrokerSyncStatus.fromJson(await _api.getJson('/api/v1/broker-sync/status'));
+  }
+
+  /// Broker (Dhan) account view. `/status` is read first: the three report
+  /// endpoints return 503 when sync is disabled, and an empty page is otherwise
+  /// ambiguous between "never synced" and "flat account".
   Future<BrokerAccount> getBrokerAccount() async {
+    final status = await getBrokerSyncStatus();
+    if (status.state != BrokerSyncState.ready) {
+      return BrokerAccount(state: status.state);
+    }
+
     final results = await Future.wait([
       _api.getJson('/api/v1/broker-sync/holdings'),
       _api.getJson('/api/v1/broker-sync/positions'),
@@ -81,6 +90,7 @@ class ManageRepository {
     final positions = items(results[1]).map(BrokerPosition.fromJson).toList();
     final funds = items(results[2]);
     return BrokerAccount(
+      state: BrokerSyncState.ready,
       holdings: holdings,
       positions: positions,
       fund: funds.isNotEmpty ? BrokerFund.fromJson(funds.first) : null,

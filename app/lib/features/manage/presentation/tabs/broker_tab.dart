@@ -44,12 +44,58 @@ class BrokerTab extends ConsumerWidget {
   }
 }
 
+/// Explains why the tab is empty. Without this, a disabled subsystem renders
+/// exactly like a flat account.
+class _NotSyncedNotice extends StatelessWidget {
+  final BrokerSyncState state;
+  const _NotSyncedNotice({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, title, detail) = switch (state) {
+      BrokerSyncState.disabled => (
+          Icons.toggle_off_outlined,
+          'Broker sync is off',
+          'Set BROKER_SYNC_ENABLED=true and restart the backend.',
+        ),
+      BrokerSyncState.noCredentials => (
+          Icons.key_off_outlined,
+          'No Dhan credentials',
+          'Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in backend/.env.',
+        ),
+      BrokerSyncState.neverSynced => (
+          Icons.hourglass_empty,
+          'Waiting for first sync',
+          'The account refreshes every few minutes during market hours (09:15–15:30 IST).',
+        ),
+      BrokerSyncState.ready => (Icons.check, '', ''),
+    };
+
+    return ListView(
+      children: [
+        const SizedBox(height: 80),
+        Icon(icon, size: 48, color: Colors.orange),
+        const SizedBox(height: 12),
+        Center(child: Text(title, style: Theme.of(context).textTheme.titleMedium)),
+        const SizedBox(height: 4),
+        Center(
+          child: Text(detail,
+              textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall),
+        ),
+      ],
+    );
+  }
+}
+
 class _BrokerBody extends StatelessWidget {
   final BrokerAccount acct;
   const _BrokerBody({required this.acct});
 
   @override
   Widget build(BuildContext context) {
+    if (acct.state != BrokerSyncState.ready) {
+      return _NotSyncedNotice(state: acct.state);
+    }
     final openPositions = acct.positions.where((p) => p.isOpen).toList();
     final closedPositions = acct.positions.where((p) => !p.isOpen).toList();
 

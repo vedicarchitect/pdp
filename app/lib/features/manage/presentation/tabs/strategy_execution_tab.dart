@@ -86,7 +86,6 @@ class _PositionsBody extends ConsumerWidget {
     final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
     final trades = tradesAsync.asData?.value;
 
-    final positions = _PositionsColumn(snap: snap, trades: trades);
     final indicators = IndicatorPanel(indicators: snap.indicators);
 
     return LayoutBuilder(
@@ -101,7 +100,10 @@ class _PositionsBody extends ConsumerWidget {
                   ? Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(flex: 3, child: positions),
+                        Expanded(
+                          flex: 3,
+                          child: _PositionsColumn(snap: snap, trades: trades),
+                        ),
                         const VerticalDivider(width: 1),
                         SizedBox(width: 440, child: indicators),
                       ],
@@ -109,7 +111,7 @@ class _PositionsBody extends ConsumerWidget {
                   : ListView(
                       padding: EdgeInsets.zero,
                       children: [
-                        positions,
+                        _PositionsColumn(snap: snap, trades: trades, nested: true),
                         const Divider(),
                         SizedBox(height: 360, child: indicators),
                       ],
@@ -127,7 +129,17 @@ class _PositionsBody extends ConsumerWidget {
 class _PositionsColumn extends StatelessWidget {
   final MonitorSnapshot snap;
   final StrangleTrades? trades;
-  const _PositionsColumn({required this.snap, required this.trades});
+
+  /// Set when this sits inside the narrow layout's outer `ListView`, which
+  /// supplies no height bound. Shrink-wrapping keeps the outer list the only
+  /// scrollable; the section count is small so the cost is negligible.
+  final bool nested;
+
+  const _PositionsColumn({
+    required this.snap,
+    required this.trades,
+    this.nested = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -142,6 +154,8 @@ class _PositionsColumn extends StatelessWidget {
       });
 
     return ListView(
+      shrinkWrap: nested,
+      physics: nested ? const NeverScrollableScrollPhysics() : null,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
         _OverallStatusBar(snap: snap),
@@ -367,19 +381,25 @@ class _IndexPriceRow extends StatelessWidget {
           return Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text('$name  ',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: cs.primary)),
-                  Text(
-                    price != null ? price.spot.toStringAsFixed(2) : '--',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
+              // Three fixed-share cells: on a phone "BANKNIFTY 52100.00" is
+              // wider than its third of the strip. Scale rather than ellipsize
+              // so the index name stays readable.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('$name  ',
+                        style: Theme.of(context)
+                            .textTheme
+                            .labelMedium
+                            ?.copyWith(color: cs.primary)),
+                    Text(
+                      price != null ? price.spot.toStringAsFixed(2) : '--',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
               ),
             ),
           );
