@@ -27,6 +27,13 @@ tests/
 - `session` — async PG session (uses test DB)
 - `mock_broker` — PaperBroker with controllable fills
 - `mongo_db` — MongoDB test database
+- `mock_mongo_lifespan` (autouse) — patches `pdp.main.mongo_connect`/`init_collections`/
+  `mongo_disconnect` for lifespan tests. **Known gap**: `pdp/runtime/groups.py` imports its own
+  `mongo_connect` reference and doesn't go through `pdp.main`, so this patch does not actually
+  intercept full-lifespan tests (`TestClient(app)` as a context manager) — `app.state.mongo_db` is
+  a real Motor database in those tests. Tracked for `test-suite-baseline-green`.
+- `DHAN_CLIENT_ID`/`DHAN_ACCESS_TOKEN` are force-cleared at import time regardless of `.env` —
+  without this, any full-lifespan test opens a real Dhan WebSocket feed and hangs indefinitely.
 
 ## Running subsets
 

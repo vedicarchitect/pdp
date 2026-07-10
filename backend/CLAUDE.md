@@ -76,7 +76,14 @@ For implementation specs, start at:
 - **Market feed** → `openspec/specs/market-feed/spec.md`
 
 ## Notes
-- `task lint`/`task test` carry **pre-existing** debt (267 ruff items, 27 test failures e.g.
-  `PositionState` needing `strategy_id`) unrelated to layout — clean up in a dedicated change.
+- `task lint`/`task test` carry **pre-existing** debt — as of 2026-07-10, 44 failures in the full
+  suite (`PositionState` needing `strategy_id` in `tests/risk/test_loss_cap.py`, plus most of
+  `tests/portfolio/`, `tests/options/test_routes.py`, `tests/jobs/test_runner.py`; a further
+  `tests/test_app_start_log.py` failure is order-dependent — fails in the full suite, passes
+  standalone). Root cause for a chunk of these confirmed: `tests/conftest.py`'s `mock_mongo_lifespan`
+  patches `pdp.main.mongo_connect`, but `pdp/runtime/groups.py` imports its own `mongo_connect`
+  reference — the mock never intercepts full-lifespan tests, so `app.state.mongo_db` is a real
+  Motor database in those tests. Tracked for `test-suite-baseline-green` (see
+  `openspec/changes/EXECUTION-ORDER.md`) — don't clean up piecemeal in unrelated changes.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
   `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old inactive configs moved to `strategies/inactive/`.
