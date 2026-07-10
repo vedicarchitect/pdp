@@ -82,7 +82,7 @@ tasks:
   app:test:
     desc: Run Flutter app analyze + widget tests (requires Flutter SDK)
     cmds:
-      - cd app && flutter analyze && flutter test
+      - cd app && flutter analyze --fatal-infos && flutter test
 
   app:run:
     desc: Run the Flutter app (Windows desktop, offline mock — no backend needed)

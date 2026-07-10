@@ -4,3 +4,12 @@ include: package:flutter_lints/flutter.yaml
 # linter:
 #   rules:
 #     prefer_final_locals: true
+
+analyzer:
+  errors:
+    # flutter_lints ships these as `info` by default, which `flutter analyze` does not
+    # fail on. Elevate them to `error` so a regression breaks the build rather than
+    # silently accumulating — see test-suite-baseline-green (`task app:test` also passes
+    # `--fatal-infos` as a second layer, covering rules not listed here).
+    prefer_const_constructors: error
+    deprecated_member_use: error

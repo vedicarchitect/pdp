@@ -48,7 +48,7 @@ class _AlertBanner extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.red.shade900.withOpacity(0.2),
+        color: Colors.red.shade900.withValues(alpha: 0.2),
         border: Border.all(color: Colors.red.shade600, width: 2),
         borderRadius: BorderRadius.circular(8),
       ),

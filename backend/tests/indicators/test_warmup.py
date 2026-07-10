@@ -343,7 +343,7 @@ def test_engine_is_warm_tracks_bar_counts():
             volume=0,
             oi=0,
         )
-        engine.seed_from_bars(sid, tf, [bar])
+        engine.seed_from_bars([bar])
 
     # still cold (199 bars)
     assert not engine.is_warm(sid, tf, min_bars=200)
@@ -360,7 +360,7 @@ def test_engine_is_warm_tracks_bar_counts():
         volume=0,
         oi=0,
     )
-    engine.seed_from_bars(sid, tf, [bar])
+    engine.seed_from_bars([bar])
 
     # now warm
     assert engine.is_warm(sid, tf, min_bars=200)

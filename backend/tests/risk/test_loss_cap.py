@@ -41,8 +41,10 @@ def _pos(
     avg_price: str = "0",
     realized_pnl: str = "0",
     unrealized_pnl: str = "0",
+    strategy_id: str = "test-strategy",
 ) -> PositionState:
     return PositionState(
+        strategy_id=strategy_id,
         security_id=security_id,
         exchange_segment="NSE_FNO",
         product="MIS",

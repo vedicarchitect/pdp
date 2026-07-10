@@ -25,6 +25,13 @@ os.environ["DHAN_ACCESS_TOKEN"] = ""
 def mock_mongo_lifespan():
     """Patch Mongo connect/init/disconnect for all tests that exercise the app lifespan.
 
+    The actual lifespan startup lives in ``pdp.runtime.groups.InfraGroup`` (``pdp.main.lifespan``
+    just delegates to ``GROUPS_BY_ROLE``), and that module holds its own
+    ``mongo_connect``/``init_collections``/``mongo_disconnect`` name bindings — patching
+    ``pdp.main``'s copies does not intercept them. Patch both modules so mocking works whether a
+    test drives the app through the full group-based lifespan or (in principle) through
+    ``pdp.main`` directly.
+
     Tests that need fine-grained control (test_mongo.py) apply their own patches
     inside the test body which take precedence over this outer autouse patch.
     """
@@ -39,5 +46,8 @@ def mock_mongo_lifespan():
         patch("pdp.main.mongo_connect", return_value=(MagicMock(), mock_db)),
         patch("pdp.main.init_collections", new=AsyncMock()),
         patch("pdp.main.mongo_disconnect"),
+        patch("pdp.runtime.groups.mongo_connect", return_value=(MagicMock(), mock_db)),
+        patch("pdp.runtime.groups.init_collections", new=AsyncMock()),
+        patch("pdp.runtime.groups.mongo_disconnect"),
     ):
         yield mock_db

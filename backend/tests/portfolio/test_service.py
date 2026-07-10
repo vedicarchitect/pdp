@@ -35,6 +35,7 @@ def _make_service(hub=None):
 
 def _make_pos(net_qty=1, avg_price="22000.0000") -> PositionState:
     return PositionState(
+        strategy_id="test-strategy",
         security_id="13",
         exchange_segment="NSE_FNO",
         product="NRML",

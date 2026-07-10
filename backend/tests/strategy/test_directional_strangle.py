@@ -950,7 +950,15 @@ async def test_open_short_refuses_when_already_at_cap():
     assert s.ctx.orders.calls == []  # no SELL placed — refused outright
     assert s._short_legs == []
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    # Assert the condition, not just the label: the cap-refusal payload names the
+    # existing/requested/cap lots — a close-path direction-mismatch alarm (the other
+    # condition this event name currently covers) would not carry these fields.
+    payload = call_args[4]
+    assert payload["existing_lots"] == 10
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -976,7 +984,12 @@ async def test_open_short_clips_lots_to_stay_within_cap():
     assert len(s._short_legs) == 1
     assert s._short_legs[0].lots == 2
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 8
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -1000,7 +1013,12 @@ async def test_open_hedge_refuses_when_already_at_cap():
     assert s.ctx.orders.calls == []  # no BUY placed — refused outright
     assert s._hedge_legs == []
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 10
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -1022,4 +1040,9 @@ async def test_open_hedge_clips_lots_to_stay_within_cap():
     assert len(s._hedge_legs) == 1
     assert s._hedge_legs[0].lots == 2
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 8
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10

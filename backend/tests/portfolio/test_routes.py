@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from pdp.deps import PaginationParams
 from pdp.portfolio.routes import get_positions, get_summary
 
 
@@ -34,25 +35,20 @@ def _mock_db(rows):
 @pytest.mark.asyncio
 async def test_positions_empty_returns_200():
     db = _mock_db([])
-    resp = await get_positions(db=db)
-    body = resp.body  # JSONResponse
-    import json
-    data = json.loads(body)
-    assert data["positions"] == []
-    assert data["count"] == 0
+    page = await get_positions(db=db, pagination=PaginationParams(limit=50, offset=0))
+    assert page.items == []
+    assert page.total is None
 
 
 @pytest.mark.asyncio
 async def test_positions_returns_rows():
     pos = _make_pos(net_qty=2, unrealized="1000")
     db = _mock_db([pos])
-    resp = await get_positions(db=db)
-    import json
-    data = json.loads(resp.body)
-    assert data["count"] == 1
-    assert data["positions"][0]["security_id"] == "13"
-    assert data["positions"][0]["net_qty"] == 2
-    assert data["positions"][0]["unrealized_pnl"] == "1000"
+    page = await get_positions(db=db, pagination=PaginationParams(limit=50, offset=0))
+    assert len(page.items) == 1
+    assert page.items[0].security_id == "13"
+    assert page.items[0].net_qty == 2
+    assert page.items[0].unrealized_pnl == "1000"
 
 
 @pytest.mark.asyncio
@@ -60,21 +56,17 @@ async def test_summary_aggregates_pnl():
     pos1 = _make_pos(security_id="13", net_qty=1, unrealized="500", realized="200")
     pos2 = _make_pos(security_id="25", net_qty=2, unrealized="700", realized="300")
     db = _mock_db([pos1, pos2])
-    resp = await get_summary(db=db)
-    import json
-    data = json.loads(resp.body)
-    assert data["total_unrealized_pnl"] == pytest.approx(1200.0)
-    assert data["total_realized_pnl"] == pytest.approx(500.0)
-    assert data["day_pnl"] == pytest.approx(1700.0)
-    assert data["open_positions"] == 2
-    assert data["mode"] in ("paper", "live")
+    summary = await get_summary(db=db)
+    assert summary.total_unrealized_pnl == pytest.approx(1200.0)
+    assert summary.total_realized_pnl == pytest.approx(500.0)
+    assert summary.day_pnl == pytest.approx(1700.0)
+    assert summary.open_positions == 2
+    assert summary.mode in ("paper", "live")
 
 
 @pytest.mark.asyncio
 async def test_positions_no_mode_filter():
     """Mode filter was removed — positions table has no mode column."""
     db = _mock_db([])
-    resp = await get_positions(db=db)
-    import json
-    data = json.loads(resp.body)
-    assert data["count"] == 0
+    page = await get_positions(db=db, pagination=PaginationParams(limit=50, offset=0))
+    assert page.items == []

@@ -131,7 +131,7 @@ class BacktestMockSource implements BacktestSource {
   Future<Map<String, LeaderboardEntry>> getLeaderboard() async {
     await Future<void>.delayed(const Duration(milliseconds: 200));
     return {
-      'NIFTY': LeaderboardEntry(
+      'NIFTY': const LeaderboardEntry(
         id: 'mock_run_1',
         source: 'run',
         kind: 'single',

@@ -185,9 +185,9 @@ async def test_readyz_includes_mongo_ok() -> None:
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             async with app.router.lifespan_context(app):
-                # `get` must yield bytes: readyz calls `.decode()` on the result, and a bare
-                # AsyncMock would hand back a coroutine that JSONResponse cannot serialize.
-                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value=b"ready"))
+                # Production's redis client is constructed with decode_responses=True
+                # (pdp/runtime/groups.py), so `get` always yields str, never bytes.
+                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value="ready"))
                 with patch.object(app.state, "redis", redis_mock):
                     resp = await client.get("/readyz")
 
@@ -221,9 +221,9 @@ async def test_readyz_returns_503_when_mongo_down() -> None:
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             async with app.router.lifespan_context(app):
-                # `get` must yield bytes: readyz calls `.decode()` on the result, and a bare
-                # AsyncMock would hand back a coroutine that JSONResponse cannot serialize.
-                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value=b"ready"))
+                # Production's redis client is constructed with decode_responses=True
+                # (pdp/runtime/groups.py), so `get` always yields str, never bytes.
+                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value="ready"))
                 with patch.object(app.state, "redis", redis_mock):
                     resp = await client.get("/readyz")
 
