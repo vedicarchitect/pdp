@@ -35,12 +35,24 @@
       `--reload-dir pdp` resolves to `backend/pdp`
 
 ## 5. Startup attribution
-- [ ] 5.1 `pdp/main.py` lifespan: log `app_start` with `started_at` (IST) and `reload` derived from
+- [x] 5.1 `pdp/main.py` lifespan: log `app_start` with `started_at` (IST) and `reload` derived from
       `sys.argv`
-- [ ] 5.2 Unit: the event is emitted once per process start with both fields
+- [x] 5.2 Unit: the event is emitted once per process start with both fields — confirmed passing
+      (`tests/test_app_start_log.py`, 22s) once `tests/conftest.py` was fixed to force
+      `DHAN_CLIENT_ID`/`DHAN_ACCESS_TOKEN` off; without that, any full-lifespan test dialed a real
+      Dhan WebSocket feed and hung indefinitely — a pre-existing test-isolation gap, not caused by
+      this change, that also silently affected `test_healthz.py`
 
 ## 6. Docs + validation
-- [ ] 6.1 `docs/RUNBOOK.md`: "never run `task dev` during a paper session" + the override env var
-- [ ] 6.2 Manual: start `dev:trade`, then run `task dev` in a second terminal → the trading server survives
-- [ ] 6.3 Manual: edit a file under `openspec/` while `task dev` runs → no restart
-- [ ] 6.4 `openspec validate --strict dev-reload-scoping` passes
+- [x] 6.1 `docs/RUNBOOK.md`: "never run `task dev` during a paper session" + the override env var
+- [x] 6.2 Manual: start `dev:trade`, then run `task dev` in a second terminal → the trading server survives —
+      confirmed: `task dev` refused outright (no prompt), named PID 13608 + full command line +
+      `task dev:trade` remedy; dev:trade stayed up and port 8000 stayed bound to it afterward
+- [x] 6.3 Manual: edit a file under `openspec/` while `task dev` runs → no restart — confirmed: `task dev`
+      was live (a real WebSocket client was connected to it at the time, visible in its log as
+      `ws_portfolio_client_connected`); its log file was 133 lines / 1 `app_start` event immediately
+      before this file's 6.2/6.3 edit, and 137 lines / still 1 `app_start` event 5s after — the 4 new
+      lines were the WS client and a scheduled poller tick, not a restart; no uvicorn "Reloading..."
+      line appeared, since `--reload-dir pdp` doesn't cover `openspec/`
+- [x] 6.4 `openspec validate --strict dev-reload-scoping` passes — confirmed: "Change
+      'dev-reload-scoping' is valid"

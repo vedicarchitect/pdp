@@ -13,6 +13,13 @@ os.environ.setdefault(
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
+# Full-lifespan tests (test_healthz.py, test_app_start_log.py) run the real
+# FeedEngineGroup.start(), which opens a live Dhan WebSocket feed connection
+# whenever both creds are present — force them off so tests never dial out,
+# regardless of what's configured in backend/.env for local paper trading.
+os.environ["DHAN_CLIENT_ID"] = ""
+os.environ["DHAN_ACCESS_TOKEN"] = ""
+
 
 @pytest.fixture(autouse=True)
 def mock_mongo_lifespan():
