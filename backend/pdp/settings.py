@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     DHAN_ACCESS_TOKEN: str = ""
 
     # Broker account sync (chunk 2: broker-account-sync)
-    BROKER_SYNC_ENABLED: bool = False
+    BROKER_SYNC_ENABLED: bool = True  # credential-gated: no creds ⇒ run recorded `skipped`
     BROKER_SYNC_EOD_TIME: str = "15:45"  # IST HH:MM — daily archival fires after close
     BROKER_INTRADAY_POLL_SECONDS: int = 300  # 5 minutes
     BROKER_ACCOUNT_LABEL: str = "primary"

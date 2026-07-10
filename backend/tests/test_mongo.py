@@ -166,10 +166,12 @@ async def test_readyz_includes_mongo_ok() -> None:
     app = create_app()
     transport = ASGITransport(app=app)
 
+    # Mongo is connected by the InfraGroup, not by main — patch it where it is used.
+    # `get_engine` stays patched in `pdp.main` because /readyz calls main's own reference.
     with (
-        patch("pdp.main.mongo_connect") as mock_connect,
-        patch("pdp.main.init_collections", new=AsyncMock()),
-        patch("pdp.main.mongo_disconnect"),
+        patch("pdp.runtime.groups.mongo_connect") as mock_connect,
+        patch("pdp.runtime.groups.init_collections", new=AsyncMock()),
+        patch("pdp.runtime.groups.mongo_disconnect"),
         patch("pdp.main.get_engine") as mock_engine,
         patch("pdp.portfolio.service.PortfolioService", return_value=_mock_portfolio_service()),
     ):
@@ -183,7 +185,10 @@ async def test_readyz_includes_mongo_ok() -> None:
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             async with app.router.lifespan_context(app):
-                with patch.object(app.state, "redis", AsyncMock(ping=AsyncMock())):
+                # `get` must yield bytes: readyz calls `.decode()` on the result, and a bare
+                # AsyncMock would hand back a coroutine that JSONResponse cannot serialize.
+                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value=b"ready"))
+                with patch.object(app.state, "redis", redis_mock):
                     resp = await client.get("/readyz")
 
     assert resp.status_code == 200
@@ -197,10 +202,12 @@ async def test_readyz_returns_503_when_mongo_down() -> None:
     app = create_app()
     transport = ASGITransport(app=app)
 
+    # Mongo is connected by the InfraGroup, not by main — patch it where it is used.
+    # `get_engine` stays patched in `pdp.main` because /readyz calls main's own reference.
     with (
-        patch("pdp.main.mongo_connect") as mock_connect,
-        patch("pdp.main.init_collections", new=AsyncMock()),
-        patch("pdp.main.mongo_disconnect"),
+        patch("pdp.runtime.groups.mongo_connect") as mock_connect,
+        patch("pdp.runtime.groups.init_collections", new=AsyncMock()),
+        patch("pdp.runtime.groups.mongo_disconnect"),
         patch("pdp.main.get_engine") as mock_engine,
         patch("pdp.portfolio.service.PortfolioService", return_value=_mock_portfolio_service()),
     ):
@@ -214,7 +221,10 @@ async def test_readyz_returns_503_when_mongo_down() -> None:
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             async with app.router.lifespan_context(app):
-                with patch.object(app.state, "redis", AsyncMock(ping=AsyncMock())):
+                # `get` must yield bytes: readyz calls `.decode()` on the result, and a bare
+                # AsyncMock would hand back a coroutine that JSONResponse cannot serialize.
+                redis_mock = AsyncMock(ping=AsyncMock(), get=AsyncMock(return_value=b"ready"))
+                with patch.object(app.state, "redis", redis_mock):
                     resp = await client.get("/readyz")
 
     assert resp.status_code == 503

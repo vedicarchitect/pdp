@@ -1,6 +1,25 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
 from datetime import datetime
+from decimal import Decimal
+
+from pdp.orders.models import OrderType, Product, Side
+
+
+class OrderRequest(BaseModel):
+    """Inbound order payload. Shared by the REST router and the Redis command channel."""
+
+    client_order_id: str | None = None
+    security_id: str
+    exchange_segment: str
+    side: Side
+    qty: int = Field(gt=0)
+    order_type: OrderType
+    price: Decimal | None = Field(default=None, gt=0)
+    trigger_price: Decimal | None = None
+    product: Product
+    strategy_id: str | None = None
+
 
 class OrderOut(BaseModel):
     id: int

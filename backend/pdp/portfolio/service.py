@@ -255,6 +255,7 @@ class PortfolioService:
             async with AsyncSession(self._engine) as session:
                 await self._load_positions(session)
             await self._check_ltp_stale()
+            await self._publish_position_snapshots()
             await self._check_hard_cap()
             if self._margin_warning_cb is not None:
                 try:
@@ -301,6 +302,28 @@ class PortfolioService:
                 continue
             if val is None:
                 ps.ltp_stale = True
+
+    async def _publish_position_snapshots(self) -> None:
+        """Publish per-position MTM to Redis so ``pdp-api`` can serve live-MTM reads without
+        holding ``PortfolioService`` in-process: ``position:<strategy>:<sid>`` hash, EX 30.
+        """
+        for ps in self._cache.values():
+            if ps.net_qty == 0:
+                continue
+            key = f"position:{ps.strategy_id or '_'}:{ps.security_id}"
+            try:
+                await self._redis.hset(
+                    key,
+                    mapping={
+                        "net_qty": ps.net_qty,
+                        "avg_price": str(ps.avg_price),
+                        "unrealized_pnl": str(ps.unrealized_pnl),
+                        "ltp_stale": "1" if ps.ltp_stale else "0",
+                    },
+                )
+                await self._redis.expire(key, 30)
+            except Exception as exc:
+                log.warning("portfolio_snapshot_publish_error", sid=ps.security_id, exc=str(exc))
 
     # ------------------------------------------------------------------ #
     # EOD snapshot                                                         #
