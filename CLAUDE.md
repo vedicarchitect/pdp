@@ -28,7 +28,7 @@ ledger), never in the repo.
 7. **Settings via `get_settings()`** — never `os.environ` directly. `.env` lives in `backend/`.
 8. **DB split** — PostgreSQL = orders/trades/positions (ACID). MongoDB = bars/chains (time-series). Redis = hot cache/pub-sub.
 9. **Speed, quality, clean UI are core — no compromise.** Fast data paths (no N+1, no hot-path blocking); production-grade 60fps UI on live data.
-10. **UI is Flutter.** The app lives in `app/`. After UI changes run `cd app && flutter analyze && flutter test`. The old React `frontend/` is removed — do not reference it.
+10. **UI is Flutter.** The app lives in `app/`. After UI changes run `cd app && flutter analyze --fatal-infos && flutter test` (or `task app:test`). The old React `frontend/` is removed — do not reference it.
 11. **Cloud-ready** — keep the API stateless + env-configured, the strategy worker separately launchable, infra-as-code under `infra/`, secrets in env (→ AWS SSM). See `repo-architecture` spec.
 
 ## Token-efficient development — pick your context
@@ -89,6 +89,9 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-10: `test-suite-baseline-green` archived — backend suite genuinely green (1010 passed,
+  2 intentional `xfail(strict=True)`), Flutter `flutter analyze --fatal-infos` zero issues, CI added
+  (`.github/workflows/ci.yml`); unblocks `bar-session-anchoring` next
 - 2026-07-10: `dev-reload-scoping` archived — `task dev` scoped to `backend/pdp`, refuses to kill a
   live `dev:trade`, refuses during market hours; unblocks the incident-remediation program below
 - 2026-07-09: Live-trading incident (dev-tooling-triggered leg-growth bug) → 10 remediation
@@ -97,9 +100,9 @@ Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-
 - 2026-07-04: Flutter backtest console (chunk 8) archived
 - 2026-07-05: Flutter dashboard (chunk 6) archived
 - 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived
-- **In-flight:** incident-remediation program — next up `test-suite-baseline-green`, then
-  `bar-session-anchoring` → `indicator-history-depth` → `bias-input-completeness` →
-  `strangle-close-path-atomicity` → `strangle-leg-state-durability` → `strangle-observability-gaps`
+- **In-flight:** incident-remediation program — next up `bar-session-anchoring` →
+  `indicator-history-depth` → `bias-input-completeness` → `strangle-close-path-atomicity` →
+  `strangle-leg-state-durability` → `strangle-observability-gaps`
 
 ## Troubleshooting
 

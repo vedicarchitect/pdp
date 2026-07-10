@@ -19,8 +19,9 @@ Ten changes, written 2026-07-10 from the findings of the 2026-07-09 inflated-P&L
    set there; `BROKER_SYNC_ENABLED` is not. Check before assuming a code edit takes effect.
 6. **Verify, don't assume.** Line numbers in these documents are from commit `f6030a6`. Re-grep
    before editing. If a cited line says something different, the proposal is stale — say so.
-7. After backend changes: `task test`. After app changes: `cd app`, then `flutter analyze`, then
-   `flutter test` (separate commands — do not chain with `&&`).
+7. After backend changes: `task test`. After app changes: `cd app`, then `flutter analyze --fatal-infos`,
+   then `flutter test` (separate commands — do not chain with `&&`). `--fatal-infos` is required:
+   `analysis_options.yaml` alone does not fail the build on a new `info`-level finding.
 
 ## Order and rationale
 
@@ -28,7 +29,7 @@ Ten changes, written 2026-07-10 from the findings of the 2026-07-09 inflated-P&L
 |---|--------|----------|--------|
 | 0 | `broker-sync-visibility` | **Already implemented, uncommitted.** Tasks 1–8 done; group 9 is deploy-day verification needing market hours. Commit it. | — |
 | 1 | `dev-reload-scoping` | Until this lands, editing strategy code restarts the trading backend and re-triggers the very bug you are debugging. | everything |
-| 2 | `test-suite-baseline-green` | A red baseline (45 failures) cannot detect a regression. The 11 failing loss-cap tests guard the day-loss cap that misfired on phantom P&L. | 3–8 |
+| 2 | `test-suite-baseline-green` | ✅ **Archived 2026-07-10.** Was a red baseline (43 failures, not 45) cannot detect a regression; the 11 failing loss-cap tests guarded the day-loss cap that misfired on phantom P&L. Now: 1010 passed, 2 intentional `xfail(strict=True)` naming changes 7/8 as owners. | 3–8 |
 | 3 | `bar-session-anchoring` | 30m and 1H bars are anchored to the Unix epoch, not the 09:15 IST open. Every indicator built on them is computed over the wrong candles. **Rebuilds `market_bars`.** | 4, 5 |
 | 4 | `indicator-history-depth` | EMA(200) is not configured anywhere; warmup windows are hand-tuned constants. Pointless before bars are anchored correctly. | 5 |
 | 5 | `bias-input-completeness` | Three of the strategy's eight bias inputs are silently dead. Wiring them to mis-anchored or under-seeded bars trades one silent error for another. | 8 |
@@ -59,8 +60,9 @@ regression.
   `entry_price=0`, the `avg_price` re-base, the DB-first ledger and the intraday broker poll. Archive
   it; do not redo that work. Change 7 fixes the leg-*type* durability its `rehydrate_legs()` task
   left resting on a nonexistent Mongo write.
-- **267 ruff items.** Recorded in `test-suite-baseline-green` task 1.6; fixed in a separate pass.
-  Mixing a lint sweep into a test rescue makes the diff unreviewable.
+- **Ruff items.** The 267 figure in `backend/CLAUDE.md` was stale — `test-suite-baseline-green`
+  task 1.6 measured **646** actual `ruff check .` errors (290 auto-fixable). Recorded, not fixed;
+  fix in a separate pass. Mixing a lint sweep into a test rescue makes the diff unreviewable.
 - **`stop_half` / `stop_all` missing exit fields** — already fixed in `f045282`. Verified, not re-fixed.
 
 ## Unresolved contradictions to settle while working

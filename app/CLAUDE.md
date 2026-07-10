@@ -20,7 +20,9 @@ google_fonts (Inter).
    provider and never branches on data origin.
 4. **Backend config via dart-define.** Never hardcode hosts. `AppConfig` reads
    `API_BASE` / `WS_BASE` / `USE_MOCK`. REST under `/api/v1`, WS under `/ws`.
-5. **Verify after UI changes:** `flutter analyze && flutter test`.
+5. **Verify after UI changes:** `flutter analyze --fatal-infos && flutter test` (or `task app:test`
+   from repo root) — `analysis_options.yaml` alone does not fail the build on a new `info`-level
+   finding; `--fatal-infos` is the actual gate.
 
 ## Backend contract (this slice)
 

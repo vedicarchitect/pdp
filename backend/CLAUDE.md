@@ -76,14 +76,11 @@ For implementation specs, start at:
 - **Market feed** → `openspec/specs/market-feed/spec.md`
 
 ## Notes
-- `task lint`/`task test` carry **pre-existing** debt — as of 2026-07-10, 44 failures in the full
-  suite (`PositionState` needing `strategy_id` in `tests/risk/test_loss_cap.py`, plus most of
-  `tests/portfolio/`, `tests/options/test_routes.py`, `tests/jobs/test_runner.py`; a further
-  `tests/test_app_start_log.py` failure is order-dependent — fails in the full suite, passes
-  standalone). Root cause for a chunk of these confirmed: `tests/conftest.py`'s `mock_mongo_lifespan`
-  patches `pdp.main.mongo_connect`, but `pdp/runtime/groups.py` imports its own `mongo_connect`
-  reference — the mock never intercepts full-lifespan tests, so `app.state.mongo_db` is a real
-  Motor database in those tests. Tracked for `test-suite-baseline-green` (see
-  `openspec/changes/EXECUTION-ORDER.md`) — don't clean up piecemeal in unrelated changes.
+- `task test` is green: `1010 passed, 2 xfailed` (2026-07-10, see `test-suite-baseline-green`).
+  The two `xfail(strict=True, ...)` markers (`tests/strategies/test_leg_rehydration.py`,
+  `tests/strategies/test_event_taxonomy.py`) are intentional — they name a real, in-flight
+  OpenSpec change as owner and must start failing the suite the moment they start passing
+  unexpectedly. `task test` exits non-zero on any real failure; there is no standing debt to route
+  around.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
   `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old inactive configs moved to `strategies/inactive/`.

@@ -283,8 +283,9 @@ flutter build apk            # → build/app/outputs/flutter-apk/app-release.apk
 
 ```powershell
 cd app
-flutter analyze              # static analysis — must be clean
-flutter test                 # widget/unit tests
+flutter analyze --fatal-infos  # static analysis — must be clean; --fatal-infos is the real gate,
+                                # analysis_options.yaml alone does not fail on a new info-level finding
+flutter test                   # widget/unit tests
 ```
 
 ### Backend connection (`--dart-define`)
@@ -770,6 +771,14 @@ task fmt        # auto-fix formatting
 task typecheck  # pyright strict
 task test       # pytest
 ```
+
+**Green is the definition of done.** `task test` must exit 0 before a change lands — CI runs it on
+every push and PR (`.github/workflows/ci.yml`). A red suite is not "pre-existing debt" to route
+around; if a test is wrong, fix it in the same PR that touches the code it covers. The only
+sanctioned exception is `@pytest.mark.xfail(strict=True, reason="<change-id>")`, naming a real,
+in-flight OpenSpec change that owns the fix — `strict=True` means the marker itself fails the suite
+the moment the test starts passing unexpectedly, so it can never quietly become permanent debt. See
+`openspec/changes/test-suite-baseline-green/README.md` for the baseline this gate was built from.
 
 ### Check OpenSpec status
 
