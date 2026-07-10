@@ -10,11 +10,12 @@ tasks:
       - task --list-all
 
   dev:
-    desc: Run the API with reload (development only — not for trading hours)
+    desc: "Run the API with reload (development only — not for trading hours). Do NOT run alongside `task docker:up` (both bind :8000)"
     dir: backend
     cmds:
+      - uv run python scripts/guard_market_hours.py
       - uv run python scripts/ensure_port_free.py --port 8000
-      - uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
+      - uv run uvicorn pdp.main:app --reload --reload-dir pdp --host 0.0.0.0 --port 8000
 
   dev:trade:
     desc: Run the API for trading — stable, no file-watch restarts
@@ -143,6 +144,36 @@ tasks:
     dir: infra/compose
     cmds:
       - docker compose --profile tools up -d pgadmin
+
+  # ── Containerized app (api-worker-decoupling): api/engine/ops ───────────────
+  # One image (backend/Dockerfile), three roles. Behind the "app" compose profile so
+  # these never start with plain `task db:up`. `api` binds :8000 — do NOT run alongside
+  # `task dev` (host uvicorn also binds :8000); stick to one or the other at a time.
+
+  docker:build:
+    desc: Build the pdp app image (api/engine/ops share one image)
+    dir: infra/compose
+    cmds:
+      - docker compose --profile app build
+
+  docker:up:
+    desc: "Start containerized api+engine+ops. Do NOT run alongside `task dev` (both bind :8000)"
+    dir: infra/compose
+    cmds:
+      - docker compose --profile app up -d --build
+
+  docker:down:
+    desc: Stop + remove the containerized api/engine/ops (infra containers keep running)
+    dir: infra/compose
+    cmds:
+      - docker compose --profile app stop api engine ops
+      - docker compose --profile app rm -f api engine ops
+
+  docker:logs:
+    desc: "Tail logs for containerized api/engine/ops. Args: -- [api|engine|ops] (default: all three)"
+    dir: infra/compose
+    cmds:
+      - docker compose --profile app logs -f {{.CLI_ARGS | default "api engine ops"}}
 
   # ── Observability: unified OpenSearch log pipeline ───────────────────────────
   search:up:

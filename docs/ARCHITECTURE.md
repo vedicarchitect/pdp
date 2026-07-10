@@ -527,6 +527,13 @@ graph TB
 
 ## Deployment Architecture (Future)
 
+`backend/Dockerfile` (multi-stage `uv` build) plus the `api`/`engine`/`ops` services in
+`infra/compose/docker-compose.yml` (behind the `app` profile — `task docker:up`, see
+`docs/RUNBOOK.md` §3) are the local single-host precursor to this: one image, three roles
+selected by `PDP_ROLE`, already split apart per `openspec/specs/api-worker-decoupling/`.
+The diagram below is the AWS-hosted, horizontally-scaled version of the same split
+(load-balanced API pods + worker pods against managed RDS/DocumentDB/ElastiCache).
+
 ```mermaid
 graph TB
     subgraph Cloud["Cloud (e.g., AWS)"]

@@ -39,6 +39,7 @@ Operational reference for starting, running, and maintaining the PDP trading pla
 - [Data Backfill](#9-data-backfill) (fetch historical bars)
 - [Database Admin](#13-database-admin) (inspect, restore)
 - [Unified Log Pipeline (OpenSearch)](#18-unified-log-pipeline-opensearch) (search logs, dashboards)
+- [Containerized (Docker) — api/engine/ops](#3-starting-the-stack) (optional `task docker:up` alternative to `task dev`)
 
 ---
 
@@ -116,6 +117,13 @@ task db:migrate   # apply any pending alembic migrations (safe to re-run)
 task dev          # starts API on http://localhost:8000
 ```
 
+⚠️ **Never run `task dev` during a live paper session.** Use `task dev:trade` instead — it
+starts the same API without the file-watch restart. `task dev` refuses to start between
+09:15–15:30 IST on a trading day (override with `PDP_ALLOW_RELOAD_IN_MARKET=1` if you really
+need to debug mid-session), and `ensure_port_free.py` now refuses to kill a `dev:trade`
+process it finds already holding port 8000 — but the safest thing is to just not run `task
+dev` in a second terminal while a paper session is up.
+
 ### With live market feed (Dhan creds required in .env)
 
 ```powershell
@@ -136,6 +144,34 @@ cd app
 flutter run -d windows --dart-define=API_BASE=http://localhost:8000 --dart-define=WS_BASE=ws://localhost:8000
 ```
 
+### Containerized (Docker) — api/engine/ops (optional)
+
+`task dev` runs a single monolithic `PDP_ROLE=all` process on the host. As an alternative,
+`backend/Dockerfile` builds one image that can run as any of three roles
+(`pdp-api` / `pdp-engine` / `pdp-ops`, see `pdp/runtime/entrypoints.py`), and
+`infra/compose/docker-compose.yml` wires all three up behind the `app` compose profile
+(`api`/`engine`/`ops` — kept separate from plain `task db:up` so they don't start by
+accident). Each container's `DATABASE_URL`/`REDIS_URL`/`MONGO_URI`/`OPENSEARCH_URL` is
+overridden to the compose network hostnames (`postgres`/`redis`/`mongo`/`opensearch`) —
+`backend/.env`'s `localhost`-based values only resolve on the host, not inside the
+compose network. Secrets (`DHAN_CLIENT_ID`, etc.) still flow through from `backend/.env`
+via `env_file:`.
+
+```powershell
+task db:up          # postgres/redis/mongo (engine/ops need these healthy first)
+task docker:build    # build the pdp:latest image from backend/Dockerfile
+task docker:up       # start api (:8000) + engine + ops
+task docker:logs      # tail all three — or `task docker:logs -- engine` for one
+task docker:down      # stop + remove api/engine/ops (infra containers stay up)
+```
+
+⚠️ **Don't run `task dev` and `task docker:up` at the same time** — `api`'s container
+publishes `8000:8000`, the same port `task dev`'s host uvicorn binds. Running both against
+the same Postgres/Redis state also means two engines could place duplicate orders; pick one
+mode per session. `api`'s `/readyz` legitimately reports `503`/`"degraded"` until a
+companion `engine` role is also up and reports `engine:status = ready|warming` in Redis —
+that's the API↔engine coupling working as designed, not a bug.
+
 ---
 
 ## 4. Backend (API Server)
@@ -144,7 +180,7 @@ flutter run -d windows --dart-define=API_BASE=http://localhost:8000 --dart-defin
 
 ```powershell
 task dev
-# Equivalent: uv run uvicorn pdp.main:app --reload --host 0.0.0.0 --port 8000
+# Equivalent: uv run uvicorn pdp.main:app --reload --reload-dir pdp --host 0.0.0.0 --port 8000
 ```
 
 ### What starts automatically on API startup
@@ -2002,7 +2038,8 @@ Violations are also logged as `order_preflight_failed` at INFO level with the fu
 
 ### Enabling the Dhan margin check
 
-1. Ensure `BROKER_SYNC_ENABLED=true` and a sync has run (populates `broker_funds.available_balance`).
+1. Ensure a sync has run (populates `broker_funds.available_balance`) — `BROKER_SYNC_ENABLED`
+   defaults to `true`; confirm with `GET /api/v1/broker-sync/status` (see § 22).
 2. Set `MARGIN_CHECK_ENABLED=true` in `.env`.
 3. Restart the API.
 4. The next paper run will log `margin_required` on every `order_preflight_ok` event.
@@ -2115,5 +2152,44 @@ To enable real VWAP for NIFTY:
 3. Repeat monthly when the front-month rolls (last Thursday of the expiry month).
 
 Until configured, VWAP remains `None` and the vote is skipped (safe; no fabricated signal).
+
+---
+
+## 22. Broker Account Sync — verifying after deploy (change `broker-sync-visibility`)
+
+`BROKER_SYNC_ENABLED` now defaults to `true`. It is credential-gated: with no Dhan credentials the
+run is recorded `skipped` and startup still succeeds. Broker sync places **no orders** — it only
+reads account reports.
+
+### Verify
+
+```bash
+curl -s localhost:8000/api/v1/broker-sync/status | jq
+```
+
+| Response | Meaning | Action |
+|----------|---------|--------|
+| `enabled: false` | A `.env` on this target overrides the default | Remove `BROKER_SYNC_ENABLED=false` from `backend/.env` |
+| `has_credentials: false` | No Dhan credentials | Set `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` |
+| `last_state_refresh_at: null` | Never synced | Wait one `BROKER_INTRADAY_POLL_SECONDS` during 09:15–15:30 IST |
+| `last_state_refresh_at` set | Healthy | `/holdings` and `/positions` now reflect the real account |
+
+`/holdings`, `/positions` and `/funds` return **503** when the subsystem is off — an empty `200`
+page now means the account really is flat. `last_run` stays `null` until the 15:45 IST archival;
+the intraday refresh deliberately writes no run row, so use `last_state_refresh_at` for freshness.
+
+### Expected over one session
+
+- Exactly **one** `broker_sync_run` row (the 15:45 `auto` archival).
+- One `broker_snapshots` document per report type, holding the EOD state.
+- **Zero** `POSITION_RECONCILE_MISMATCH` events while `LIVE=false` — reconcile is live-mode only,
+  because paper `Position` rows have no broker counterpart and would all mismatch.
+
+### Startup now fails loudly
+
+Runtime groups that carry live-trading responsibility (`infra`, `web`, `feed_engine`, `ops`) abort
+startup if they cannot start, instead of logging `group_start_failed` and serving a healthy-looking
+API with a dead subsystem. Check the log for `group_start_failed` with `required=true`. The
+dashboard intel poller stays fault-isolated and cannot block startup.
 
 Kill API: `Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process -Force`
