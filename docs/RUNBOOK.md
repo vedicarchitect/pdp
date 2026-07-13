@@ -371,6 +371,16 @@ carries `id` (canonical id), `kind` (`strangle`/`supertrend`), `underlying`, `so
 a `POST /runs` body). Backed by `pdp.strategy.unified_registry`; see
 `openspec/specs/strategy-registry/spec.md`.
 
+### Pre-open readiness check
+
+Before the session opens, check `GET /api/v1/strangle/readiness?strategy_id=<id>` for each running
+strangle strategy rather than waiting for the first blocked entry to surface it. It composes five
+components (Reconciliation, Broker Sync, Indicators, Chain, Bias) into one `ok`/`degraded`/`blocked`
+state with a reason per component — see `pdp/events/CLAUDE.md` for the taxonomy and
+`pdp/strategy/readiness.py` for the model. `blocked` refuses new entries (existing legs still manage
+stops/rolls/square-off); resolve the named component before the session opens rather than
+discovering it mid-session on a missed entry.
+
 ### Strategy YAML params reference
 
 | Param | Type | Default | Description |
@@ -554,6 +564,88 @@ uv run python scripts/audit_options_coverage.py
 uv run python scripts/validate_options_warehouse.py
 
 ```
+
+### Step 4 — Rebuild session-anchored `15m`/`30m`/`1H` bars (`bar-session-anchoring`)
+
+`market_bars` buckets for `15m`/`30m`/`1H` are derived from the dense `1m` source, anchored to the
+09:15 IST session open (see `backend/pdp/market/CLAUDE.md`). If the anchoring logic ever changes
+again, or you suspect the stored `15m`/`30m`/`1H` docs drifted from what `1m` implies, re-derive them
+with `backend/scripts/oneoff/rebuild_market_bars.py`. `1m` itself is never touched — it's the source
+of truth and is session-aligned by construction.
+
+**Before running for real, back up.** `mongodump` is not guaranteed to be installed; if it isn't,
+export the collection at the application level instead:
+
+```powershell
+# Check for mongodump first
+mongodump --version
+
+# If missing, application-level JSONL export (adjust the date range to what you're about to touch)
+uv run python -c "
+import asyncio, json
+from pdp.mongo.client import connect, disconnect
+from pdp.settings import get_settings
+
+async def main():
+    client, db = connect(get_settings())
+    col = db['market_bars']
+    cursor = col.find({'metadata.timeframe': {'\$in': ['15m', '30m', '1H']}})
+    with open('data/backups/market_bars_backup.jsonl', 'w') as f:
+        async for doc in cursor:
+            doc.pop('_id', None)
+            doc['ts'] = doc['ts'].isoformat()
+            f.write(json.dumps(doc) + '\n')
+    disconnect(client)
+
+asyncio.run(main())
+"
+```
+
+**Dry-run first** — reports `existing_count`/`new_count`/`first_ts`/`last_ts` per `(security_id,
+timeframe)` pair and makes no writes:
+
+```powershell
+uv run python scripts/oneoff/rebuild_market_bars.py --dry-run --from 2026-04-08 --to 2026-07-11
+```
+
+**Run for real** once the dry-run output looks right (delete-then-insert per `(sid, tf)` — there is
+no in-place update on a timeseries collection):
+
+```powershell
+uv run python scripts/oneoff/rebuild_market_bars.py --from 2026-04-08 --to 2026-07-11
+```
+
+**Restore from the JSONL backup** if a rebuild needs to be rolled back:
+
+```powershell
+uv run python -c "
+import asyncio, json
+from datetime import datetime, timezone
+from pdp.mongo.client import connect, disconnect
+from pdp.settings import get_settings
+
+async def main():
+    client, db = connect(get_settings())
+    col = db['market_bars']
+    docs = []
+    with open('data/backups/market_bars_backup.jsonl') as f:
+        for line in f:
+            doc = json.loads(line)
+            doc['ts'] = datetime.fromisoformat(doc['ts'])
+            docs.append(doc)
+    tfs = {d['metadata']['timeframe'] for d in docs}
+    await col.delete_many({'metadata.timeframe': {'\$in': list(tfs)}})
+    if docs:
+        await col.insert_many(docs)
+    disconnect(client)
+
+asyncio.run(main())
+"
+```
+
+`existing_count` after a rebuild can differ from the backup's count even with no data loss — live
+trading keeps writing new bars during the gap between backup and rebuild. Cross-check the aggregate
+totals, not just individual pairs, before concluding anything was lost.
 
 ---
 
@@ -926,9 +1018,9 @@ Use case: "Alert on unusually high volume that signals a trend change or confirm
 docker exec -it pdp-redis redis-cli GET "suite:13:15m"
 # Contains vwma_20 field
 
-# Or query market_bars for volume
+# Or query market_bars for volume (timeseries collection — fields are nested under metadata)
 docker exec -it pdp-mongo mongosh pdp --eval \
-  "db.market_bars.find({security_id:'13',timeframe:'15m'}).sort({ts:-1}).limit(5)"
+  "db.market_bars.find({'metadata.security_id':'13','metadata.timeframe':'15m'}).sort({ts:-1}).limit(5)"
 ```
 
 **What's needed (🔧):** New `VOLUME_SPIKE` condition type — fires when current bar
@@ -1101,9 +1193,9 @@ Use case: "Alert when futures volume or OI makes an unusual spike (≥ 2× rolli
 **What works today (manual query):**
 
 ```powershell
-# Last 10 bars with volume for NIFTY futures
+# Last 10 bars with volume for NIFTY futures (timeseries collection — fields nested under metadata)
 docker exec -it pdp-mongo mongosh pdp --eval \
-  "db.market_bars.find({security_id:'13',timeframe:'5m'},{ts:1,volume:1,_id:0}).sort({ts:-1}).limit(10)"
+  "db.market_bars.find({'metadata.security_id':'13','metadata.timeframe':'5m'},{ts:1,volume:1,_id:0}).sort({ts:-1}).limit(10)"
 
 # OI snapshot from latest chain
 curl "http://localhost:8000/api/v1/options/NIFTY/analytics"
@@ -1122,10 +1214,10 @@ Use case: "Alert when NIFTY breaks prior day high/low, prior week high/low, or p
 **Prior Day High/Low — works today via price alert:**
 
 ```powershell
-# Step 1: Get yesterday's high/low from market_bars
+# Step 1: Get yesterday's high/low from market_bars (timeseries — match on nested metadata fields)
 docker exec -it pdp-mongo mongosh pdp --eval "
   db.market_bars.aggregate([
-    {\$match: {security_id:'13', timeframe:'1D'}},
+    {\$match: {'metadata.security_id':'13', 'metadata.timeframe':'1D'}},
     {\$sort: {ts:-1}},
     {\$limit: 2},
     {\$group: {_id:null, pdh:{\$max:'\$high'}, pdl:{\$min:'\$low'}}}
@@ -1148,7 +1240,7 @@ curl -X POST http://localhost:8000/api/v1/alerts \
 # Prior week high (last 5 trading days)
 docker exec -it pdp-mongo mongosh pdp --eval "
   db.market_bars.aggregate([
-    {\$match: {security_id:'13', timeframe:'1D'}},
+    {\$match: {'metadata.security_id':'13', 'metadata.timeframe':'1D'}},
     {\$sort: {ts:-1}},
     {\$limit: 6},
     {\$skip: 1},
@@ -1171,7 +1263,7 @@ Use case: "Alert on gap-up or gap-down at market open and assess impact on activ
 ```powershell
 # First bar of today vs yesterday's close
 docker exec -it pdp-mongo mongosh pdp --eval "
-  var bars = db.market_bars.find({security_id:'13',timeframe:'1D'}).sort({ts:-1}).limit(2).toArray();
+  var bars = db.market_bars.find({'metadata.security_id':'13','metadata.timeframe':'1D'}).sort({ts:-1}).limit(2).toArray();
   var gap_pct = ((bars[0].open - bars[1].close) / bars[1].close * 100).toFixed(2);
   print('Gap: ' + gap_pct + '%');"
 ```
@@ -1850,12 +1942,41 @@ OPENSEARCH_LOG_LEVEL=INFO                 # min level shipped to pdp-logs-*
 ### 18.2 Start + bootstrap
 
 ```bash
-# Start OpenSearch (and optionally Dashboards at :5601)
+# Start OpenSearch only (:9200) — the log pipeline works fully without Dashboards
 task search:up
 
-# Apply index templates + import 8 dashboards (idempotent, safe to re-run)
+# Only start this when you actually want to browse/query logs in the UI (:5601) —
+# it's a separate Node process + JVM, so skip it if you're just trading/developing
+task search:dashboards:up
+
+# Apply index templates + import 9 dashboards (idempotent, safe to re-run)
 task search:init
 ```
+
+`task trade:up` only brings up `search:up` (OpenSearch, no Dashboards) to keep the trading-day
+footprint minimal.
+
+### 18.2.1 Dev resource use + retention (CPU/disk)
+
+OpenSearch's docker image runs a Performance Analyzer agent alongside the main process by
+default — a real, continuous idle-CPU cost with no dev value here. It's disabled via
+`DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI=true` in `infra/compose/docker-compose.yml`. JVM heap is
+capped at `-Xms512m -Xmx512m`; don't raise it for local dev.
+
+Indices have no built-in expiry — every family accumulates forever. Since only fills/executions
+(`pdp-trades-*`, the "tradelogs") need to survive as a durable reference locally, run:
+
+```bash
+task search:cleanup                      # deletes/trims everything except pdp-trades-*, 7-day window
+task search:cleanup -- --dry-run         # preview only
+task search:cleanup -- --days 14         # wider window
+task search:cleanup -- --keep-prefix trades,journal   # keep more families
+```
+
+Indices are monthly-suffixed, so a whole past month is dropped outright once it's fully outside
+the window; the current month's index is trimmed in place with `delete_by_query` on
+`@timestamp`. This isn't scheduled automatically — re-run weekly (e.g. a Windows Task Scheduler
+weekly job calling `task search:cleanup`, or by hand).
 
 ### 18.3 Indices
 
@@ -1876,7 +1997,7 @@ All indices are monthly date-suffixed (`pdp-logs-2026.06`) and use `dynamic: fal
 
 ### 18.4 Dashboards
 
-Open `http://localhost:5601` after `task search:up && task search:init`. Nine dashboards
+Open `http://localhost:5601` after `task search:dashboards:up && task search:init`. Nine dashboards
 are pre-imported:
 
 | # | Dashboard | Key question |
@@ -2106,10 +2227,17 @@ events for the rest of that calendar day.
 
 ### 19.4 Bias signal set (R3)
 
-**PCR** — now read from `OptionsHub.get_pcr(underlying)` at each bias evaluation. PCR is
-computed from chain OI during each option-chain poll (only available when
-`OptionsChainPoller` is running, i.e., `LIVE=1`). In paper mode, PCR stays `None` and the
-vote is correctly skipped by the bias engine.
+**PCR** — read from `ctx.chain_hub.get_pcr(underlying)` at each bias evaluation. Requires a
+chain poller running for that underlying, which requires `OptionsChainPoller` to be enabled
+(`OPTIONS_POLLER_ENABLED=true`, Dhan creds present) — the `LIVE` flag is **not** required,
+paper sessions get a real chain poll too. **Which underlyings get a poller is derived from
+loaded strategy YAMLs** (`pdp.strategy.registry.strategy_underlyings` — the union of every
+`params.underlying` across `strategies/*.yaml`), not a settings/`.env` list — there is no
+`OPTIONS_UNDERLYINGS` to also edit. Adding a strategy YAML with `params.underlying: SENSEX`
+is the only step needed. If Dhan creds are absent or `OPTIONS_POLLER_ENABLED=false`, PCR
+stays `None` and the vote is correctly skipped by the bias engine (`check_bias_satisfiability`
+only verifies the underlying is in the *derived* set, not that the poller actually started —
+see `bias-input-completeness`).
 
 **VWAP from futures** — the NIFTY/BANKNIFTY/SENSEX index has no traded volume; `vwap` from
 the spot SID is always `None`. Set `futures_security_id` in the strategy YAML params to the
@@ -2122,9 +2250,14 @@ engine.
 calendar days for 1H (covering ~8 sessions × 7 bars = 56 bars → EMA(50) seeded). Confirmed
 by `indicator_warmup_done` log at startup — check the `bars_fed` field.
 
-**cam_weekly** — weekly Camarilla requires `1w` bar support in the bar aggregator (not yet
-added). The `cam_weekly_missing` debug log fires once per strategy session; this is expected
-until the bar aggregator adds `1w` support.
+**cam_daily / cam_weekly** (fixed in `bias-input-completeness`, 2026-07-12) — `cam_daily`
+reads `ind.pivots(sid, "1D")` (previously misread `5m`, describing the prior 5-minute bar, not
+the prior trading day). `cam_weekly` reads `ind.pivots(sid, "1w")`, seeded from a **second**
+watchlist entry declaring `timeframes: [1w]` + `indicators: [{family: pivots}]` for the same
+`security_id` (the main entry's indicator suite can't selectively skip `1w` — see
+`pdp/signals/CLAUDE.md`). Both inputs, and `w_pcr`, are now covered by the startup
+satisfiability check: a strategy that weights one of these `>0` without the matching watchlist
+entry (or underlying) fails to start, naming the offending weight.
 
 ### 19.5 Bucket-change hysteresis (R4)
 

@@ -12,7 +12,11 @@ import 'package:pdp_app/features/manage/presentation/tabs/strategy_execution_tab
 /// otherwise the viewport is handed an unbounded height and the subtree fails
 /// to lay out.
 void main() {
-  MonitorSnapshot snapshot({bool withLegs = true}) => MonitorSnapshot(
+  MonitorSnapshot snapshot({
+    bool withLegs = true,
+    MonitorReadiness readiness = MonitorReadiness.ok,
+  }) =>
+      MonitorSnapshot(
         indices: const [
           IndexPrice(name: 'NIFTY', spot: 24150.5, future: 24160.0),
           IndexPrice(name: 'BANKNIFTY', spot: 52100.0),
@@ -60,6 +64,7 @@ void main() {
         nOpenMomentum: 0,
         recentEvents: const [],
         indicators: const {},
+        readiness: readiness,
       );
 
   const trades = StrangleTrades(date: '2026-07-10', byIndex: {});
@@ -108,5 +113,43 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('NIFTY'), findsWidgets);
+  });
+
+  const blockedReadiness = MonitorReadiness(
+    state: 'blocked',
+    byUnderlying: {
+      'NIFTY': StrategyReadinessRow(
+        state: 'blocked',
+        components: [
+          ReadinessComponentRow(
+            name: 'Reconciliation',
+            state: 'blocked',
+            reason: '1 leg(s) diverged',
+          ),
+        ],
+      ),
+    },
+  );
+
+  testWidgets('blocked readiness renders a chip at narrow width', (tester) async {
+    await pumpAt(tester, const Size(500, 900), snap: snapshot(readiness: blockedReadiness));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('BLOCKED'), findsOneWidget);
+  });
+
+  testWidgets('blocked readiness renders a chip at wide width', (tester) async {
+    await pumpAt(tester, const Size(1400, 900), snap: snapshot(readiness: blockedReadiness));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('BLOCKED'), findsOneWidget);
+  });
+
+  testWidgets('ok readiness renders no chip', (tester) async {
+    await pumpAt(tester, const Size(1400, 900), snap: snapshot());
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('BLOCKED'), findsNothing);
+    expect(find.text('DEGRADED'), findsNothing);
   });
 }

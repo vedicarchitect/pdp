@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 
 import structlog
 
 from pdp.logging import configure_logging
 from pdp.settings import get_settings
+from pdp.strategy.registry import strategy_underlyings
 from pdp.warehouse.service import WarehouseService
 
 log = structlog.get_logger()
@@ -43,10 +45,14 @@ async def _main() -> None:
 
     session_maker = get_session_maker()
 
+    underlyings = sorted(strategy_underlyings(Path("strategies")))
+    log.info("warehouse_underlyings_derived", underlyings=underlyings)
+
     service = WarehouseService(
         settings=settings,
         mongo_db=mongo_db,
         session_maker=session_maker,
+        underlyings=underlyings,
     )
 
     # Graceful shutdown on SIGINT / SIGTERM

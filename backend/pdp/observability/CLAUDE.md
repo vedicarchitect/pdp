@@ -18,6 +18,7 @@ OpenSearch is the derived, queryable, realtime layer. Disabled unless `OPENSEARC
 | `query.py` | `search_logs`, `fetch_session_events`, `build_session` (bar-anchored narrative) |
 | `routes.py` | `GET /api/v1/observability/logs` + `GET /api/v1/analysis/session` |
 | `init.py` | `python -m pdp.observability.init` — templates + dashboards import (`task search:init`) |
+| `../../scripts/opensearch_cleanup.py` | Retention prune — deletes/trims every family except `pdp-trades-*` past a rolling window (default 7d); `task search:cleanup` |
 
 ## Indices (monthly date-suffixed, `dynamic:false`)
 

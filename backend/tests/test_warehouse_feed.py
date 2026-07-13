@@ -303,7 +303,6 @@ def _make_service(tmp_path, underlyings: list[str], *, existing_paths: set[str])
         "SENSEX": "SENSEX_EXPIRY_CACHE_PATH",
     }
     fake_settings = MagicMock()
-    fake_settings.WAREHOUSE_UNDERLYINGS = underlyings
     fake_settings.DHAN_CLIENT_ID = "x"
     fake_settings.DHAN_ACCESS_TOKEN = "x"
     fake_settings.WAREHOUSE_GAP_LOOKBACK_DAYS = 30
@@ -320,7 +319,8 @@ def _make_service(tmp_path, underlyings: list[str], *, existing_paths: set[str])
     fake_session_maker = MagicMock()
 
     return service_mod.WarehouseService(
-        settings=fake_settings, mongo_db=fake_mongo_db, session_maker=fake_session_maker
+        settings=fake_settings, mongo_db=fake_mongo_db, session_maker=fake_session_maker,
+        underlyings=underlyings,
     )
 
 
@@ -350,7 +350,6 @@ def test_unsupported_underlying_raises_value_error_at_startup() -> None:
     from pdp.warehouse.service import WarehouseService
 
     fake_settings = MagicMock()
-    fake_settings.WAREHOUSE_UNDERLYINGS = ["NIFTY", "MIDCAP"]
     fake_settings.DHAN_CLIENT_ID = "x"
     fake_settings.DHAN_ACCESS_TOKEN = "x"
 
@@ -364,4 +363,5 @@ def test_unsupported_underlying_raises_value_error_at_startup() -> None:
             settings=fake_settings,
             mongo_db=fake_mongo_db,
             session_maker=fake_session_maker,
+            underlyings=["NIFTY", "MIDCAP"],
         )

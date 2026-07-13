@@ -177,10 +177,15 @@ tasks:
 
   # ── Observability: unified OpenSearch log pipeline ───────────────────────────
   search:up:
-    desc: Start OpenSearch (:9200) + Dashboards (:5601) for the log pipeline
+    desc: "Start OpenSearch (:9200) only — the log pipeline works without Dashboards. Use search:dashboards:up to also browse :5601"
     dir: infra/compose
     cmds:
       - docker compose up -d opensearch
+
+  search:dashboards:up:
+    desc: Start OpenSearch Dashboards (:5601) — only needed when you actually want to browse/query logs in the UI
+    dir: infra/compose
+    cmds:
       - docker compose --profile tools up -d opensearch-dashboards
 
   search:init:
@@ -188,6 +193,12 @@ tasks:
     dir: backend
     cmds:
       - uv run python -m pdp.observability.init
+
+  search:cleanup:
+    desc: "Prune OpenSearch dev indices older than 7 days, keeping pdp-trades-* (tradelogs) forever. Args: -- --days 7 --dry-run"
+    dir: backend
+    cmds:
+      - uv run python scripts/opensearch_cleanup.py {{.CLI_ARGS}}
 
   # ── Data backfill ────────────────────────────────────────────────────────────
   # Pass args after -- e.g:

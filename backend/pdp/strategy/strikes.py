@@ -78,6 +78,32 @@ async def nearest_expiry(
 nearest_weekly_expiry = nearest_expiry
 
 
+async def lot_size_for_underlying(session: AsyncSession, underlying: str) -> int | None:
+    """The exchange lot size for ``underlying``'s option contracts, from the instruments
+    table (Dhan scrip master) — never a hardcoded/YAML constant, which goes stale on a
+    lot-size revision (e.g. NIFTY 50->65->75 over the years) without anyone noticing.
+
+    Lot size is uniform across strikes/expiries for a given underlying on a given day, so
+    any resolvable row works; nearest *unexpired* expiry first gives a deterministic answer.
+    The instruments table is upsert-only (never pruned of expired rows), so the expiry
+    filter is required — without it this would return whichever expiry sorts earliest
+    across the table's entire history, not the current one. Returns ``None`` when the
+    table has no matching rows — callers must degrade honestly rather than fall back to a
+    guess.
+    """
+    result = await session.execute(
+        select(Instrument.lot_size)
+        .where(
+            Instrument.underlying == underlying,
+            Instrument.option_type.in_(["CE", "PE"]),
+            Instrument.expiry >= _ist_today(),
+        )
+        .order_by(Instrument.expiry.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def resolve_otm_option(
     session: AsyncSession,
     *,

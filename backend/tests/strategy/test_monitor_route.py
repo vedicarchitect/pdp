@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from pdp.strategy.readiness import ReadinessComponent, StrategyReadiness
 from pdp.strategy.routes import strangle_router
+
+
+def _ok_readiness() -> StrategyReadiness:
+    return StrategyReadiness.evaluate([ReadinessComponent("Indicators", "ok", "seeded")])
 
 
 def _make_app(host_mock: MagicMock, redis_mock: MagicMock | None = None) -> FastAPI:
@@ -46,6 +51,7 @@ def _host_with_strangle() -> MagicMock:
         "n_open_hedges": 0,
         "n_open_momentum": 0,
     })
+    strategy.check_readiness = AsyncMock(return_value=_ok_readiness())
 
     state_obj = MagicMock()
     state_obj.instance = strategy
@@ -110,6 +116,11 @@ def test_monitor_payload_shape_with_running_strategy() -> None:
         assert sid in data["indicators"]
         assert "tf" in data["indicators"][sid]
 
+    # Readiness: composite state + per-underlying breakdown, nested under status
+    readiness = status["readiness"]
+    assert readiness["state"] == "ok"
+    assert readiness["by_underlying"]["NIFTY"]["state"] == "ok"
+
 
 def test_monitor_groups_empty_when_no_legs() -> None:
     host = _host_with_strangle()
@@ -137,6 +148,7 @@ def test_monitor_status_sums_across_strategies() -> None:
             "bucket": None, "score": 0.0, "done_for_day": done,
             "started_at": None, "n_open_shorts": 0, "n_open_hedges": 0, "n_open_momentum": 0,
         })
+        s.check_readiness = AsyncMock(return_value=_ok_readiness())
         return s
 
     host = MagicMock()
@@ -151,3 +163,41 @@ def test_monitor_status_sums_across_strategies() -> None:
         data = client.get("/api/v1/strangle/monitor").json()
 
     assert data["status"]["done_for_day"] is False
+
+
+def test_monitor_readiness_is_worst_case_across_strategies() -> None:
+    """Overall readiness.state is the worst of any running strategy's own state —
+    one blocked underlying must not be hidden by another that's fine."""
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+    from pdp.strategy.readiness import ReadinessComponent, StrategyReadiness
+
+    def _make_strategy(underlying: str, readiness: StrategyReadiness) -> MagicMock:
+        s = MagicMock(spec=DirectionalStrangle)
+        s.underlying = underlying
+        s._activity = []
+        s.state = AsyncMock(return_value={
+            "legs": [], "day_realized": 0.0, "day_unrealized": 0.0, "day_pnl": 0.0,
+            "bucket": None, "score": 0.0, "done_for_day": False,
+            "started_at": None, "n_open_shorts": 0, "n_open_hedges": 0, "n_open_momentum": 0,
+        })
+        s.check_readiness = AsyncMock(return_value=readiness)
+        return s
+
+    blocked = StrategyReadiness.evaluate(
+        [ReadinessComponent("Reconciliation", "blocked", "1 leg(s) diverged")]
+    )
+    host = MagicMock()
+    host._running = {
+        "nifty": MagicMock(instance=_make_strategy("NIFTY", _ok_readiness())),
+        "banknifty": MagicMock(instance=_make_strategy("BANKNIFTY", blocked)),
+    }
+
+    app = _make_app(host, _redis_no_ltp())
+
+    with TestClient(app) as client:
+        data = client.get("/api/v1/strangle/monitor").json()
+
+    readiness = data["status"]["readiness"]
+    assert readiness["state"] == "blocked"
+    assert readiness["by_underlying"]["NIFTY"]["state"] == "ok"
+    assert readiness["by_underlying"]["BANKNIFTY"]["state"] == "blocked"

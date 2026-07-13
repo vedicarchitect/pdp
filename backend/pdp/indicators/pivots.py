@@ -91,10 +91,17 @@ class PivotTracker:
         self._current_date: date | None = None
         self._state: PivotState | None = None
 
-    def seed_prior_hlc(self, h: float, l: float, c: float, prior_date: date | None = None) -> None:
-        """Seed prior-session HLC directly (called by warmup before first live bar)."""
+    def seed_prior_hlc(self, h: float, l: float, c: float, prior_date: date | None = None) -> PivotState:
+        """Seed prior-session HLC directly (called by warmup before first live bar).
+
+        Returns the new state so callers (``IndicatorEngine.seed_prior_session_pivots``)
+        can refresh a cached ``Snapshot`` -- this seed happens *after* ``seed_from_bars``
+        has already cached one, so without the return value the correction is invisible
+        to ``get_pivots``/``get_snapshot`` until the next live bar arrives.
+        """
         session_date = prior_date or date.today()
         self._state = _compute_pivots(h, l, c, session_date)
+        return self._state
 
     def update(
         self,

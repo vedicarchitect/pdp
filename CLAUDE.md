@@ -89,26 +89,37 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-13: Incident-remediation program **complete** — all 10 `EXECUTION-ORDER.md` changes plus
+  `flutter-execution-tab-layout` and `lot-size-live-reconciliation` archived (`bar-session-anchoring`,
+  `indicator-history-depth`, `bias-input-completeness`, `strangle-close-path-atomicity`,
+  `strangle-leg-state-durability`, `strangle-observability-gaps`, `dhan-same-day-data`,
+  `market-bars-duplicate-write-fix`). Combined re-baseline verdict: **supersede** the archived NIFTY
+  backtest — new baselines are NIFTY +Rs 42.71L, BANKNIFTY +Rs 46.82L, SENSEX +Rs 20.87L (full trace
+  in each change's archived README). A genuine `option_bars` expiry-cadence data gap was found and
+  disentangled from the fixes' own effect; filed separately as `option-bars-expiry-gap-backfill`
+  (in-flight, blocked on live Dhan creds). `task test`: 1131 passed, 0 failed.
 - 2026-07-10: `test-suite-baseline-green` archived — backend suite genuinely green (1010 passed,
   2 intentional `xfail(strict=True)`), Flutter `flutter analyze --fatal-infos` zero issues, CI added
-  (`.github/workflows/ci.yml`); unblocks `bar-session-anchoring` next
+  (`.github/workflows/ci.yml`); unblocked `bar-session-anchoring`
 - 2026-07-10: `dev-reload-scoping` archived — `task dev` scoped to `backend/pdp`, refuses to kill a
-  live `dev:trade`, refuses during market hours; unblocks the incident-remediation program below
+  live `dev:trade`, refuses during market hours; unblocked the incident-remediation program
 - 2026-07-09: Live-trading incident (dev-tooling-triggered leg-growth bug) → 10 remediation
   OpenSpec changes authored, execution order in `openspec/changes/EXECUTION-ORDER.md`
 - 2026-07-08: Backtest console readability + nav (UX improvements) archived
 - 2026-07-04: Flutter backtest console (chunk 8) archived
 - 2026-07-05: Flutter dashboard (chunk 6) archived
-- 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived
-- **In-flight:** incident-remediation program — next up `bar-session-anchoring` →
-  `indicator-history-depth` → `bias-input-completeness` → `strangle-close-path-atomicity` →
-  `strangle-leg-state-durability` → `strangle-observability-gaps`
+- 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived — **superseded 2026-07-13**,
+  see above
+- **In-flight:** `option-bars-expiry-gap-backfill` (data-completeness follow-up, blocked on live Dhan
+  creds). Two live-paper-session deploy-day checks remain open (recorded in the archived
+  `strangle-close-path-atomicity`/`strangle-leg-state-durability` tasks) — need a `dev:trade` session
+  during market hours, not code.
 
 ## Troubleshooting
 
 | Issue | Diagnosis | Fix |
 |-------|-----------|-----|
-| **EMA200 = `--` on app** | Warmup insufficient | See `execution-console-accuracy` memory; increase `_TF_WARMUP_CALENDAR_DAYS` to 180+ days |
+| **A period (e.g. EMA200) = `--` on app** | Genuinely unconverged — see `indicator-history-depth` | Check the `indicator_seeding_summary` startup log line for that strategy; if the period isn't listed as configured, add it to the watchlist's `indicators:`; if configured but unseeded, `market_bars` doesn't yet hold `required_bars()` bars for that `(sid, tf)` — run `scripts/backfill_market_bars.py` |
 | **Backtest faster than paper** | Backtest ignores slippage, rejections, margin | See `live-backtest-parity` memory; add broker friction to paper |
 | **RSI/PSAR don't match Kite** | Indicator computation diverges | Verify RSI uses Wilder's EMA; run bar-by-bar comparison for 5 days |
 | **Tests fail on Windows** | asyncio teardown race (pre-existing) | Use WSL2 or `pytest -k "not integration"` |

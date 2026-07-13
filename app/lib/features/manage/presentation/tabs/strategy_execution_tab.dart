@@ -191,11 +191,24 @@ class _OverallStatusBar extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
-            _BucketChip(bucket: bkt),
-            const SizedBox(width: 8),
-            if (snap.score != null)
-              Text('Score: ${snap.score!.toStringAsFixed(2)}',
-                  style: Theme.of(context).textTheme.bodySmall),
+            // Scrolls horizontally rather than overflowing on a narrow phone —
+            // this cluster grows with score/readiness and Day P&L must stay visible.
+            Flexible(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _BucketChip(bucket: bkt),
+                    const SizedBox(width: 8),
+                    if (snap.score != null)
+                      Text('Score: ${snap.score!.toStringAsFixed(2)}',
+                          style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(width: 8),
+                    _ReadinessChip(readiness: snap.readiness),
+                  ],
+                ),
+              ),
+            ),
             const Spacer(),
             Text('Day P&L  ', style: Theme.of(context).textTheme.bodySmall),
             PnlText(snap.dayPnl,
@@ -425,6 +438,57 @@ class _BucketChip extends StatelessWidget {
       ),
       child: Text(bucket,
           style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+/// Strategy readiness gate (`ok`/`degraded`/`blocked`, composed from
+/// Reconciliation/Broker Sync/Indicators/Chain/Bias components — see
+/// `GET /api/v1/strangle/readiness` and `pdp/events/CLAUDE.md`).
+///
+/// `ok` renders nothing (unobtrusive); `degraded`/`blocked` render a chip whose
+/// tooltip lists every non-ok component + reason, per-underlying.
+class _ReadinessChip extends StatelessWidget {
+  final MonitorReadiness readiness;
+  const _ReadinessChip({required this.readiness});
+
+  @override
+  Widget build(BuildContext context) {
+    if (readiness.state == 'ok') return const SizedBox.shrink();
+
+    final blocked = readiness.state == 'blocked';
+    final color = blocked ? AppColors.loss : Colors.amber;
+    final label = blocked ? 'BLOCKED' : 'DEGRADED';
+
+    final reasons = <String>[];
+    for (final entry in readiness.byUnderlying.entries) {
+      for (final c in entry.value.components) {
+        if (c.state != 'ok') {
+          reasons.add('${entry.key} · ${c.name}: ${c.reason ?? c.state}');
+        }
+      }
+    }
+    final tooltipMsg = reasons.isEmpty ? 'Readiness $label' : reasons.join('\n');
+
+    return Tooltip(
+      message: tooltipMsg,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: blocked ? 0.18 : 0.12),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: color.withValues(alpha: 0.6)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(blocked ? Icons.block : Icons.warning_amber_rounded, size: 12, color: color),
+            const SizedBox(width: 3),
+            Text(label,
+                style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w700)),
+          ],
+        ),
+      ),
     );
   }
 }

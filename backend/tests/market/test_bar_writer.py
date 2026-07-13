@@ -34,6 +34,7 @@ def _bar(
 def mock_collection():
     col = MagicMock()
     col.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=[]))
+    col.delete_many = AsyncMock(return_value=MagicMock(deleted_count=0))
     return col
 
 
@@ -102,3 +103,69 @@ async def test_generic_error_requeues_batch(mock_collection):
     await writer._flush()
     # Batch is put back at the front of the buffer for retry
     assert len(writer._buffer) == 1
+
+
+# ---------------------------------------------------------------------------
+# market-bars-duplicate-write-fix: idempotent flush (delete-then-insert per
+# exact (security_id, timeframe, ts) bucket)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flush_deletes_before_inserting_each_bucket(mock_collection):
+    """Every flush deletes any pre-existing document for the buckets it's about to
+    write, so a bucket enqueued twice across two separate flushes (e.g. a late tick
+    reopening a builder BarSessionScheduler.flush_session() already force-closed)
+    never leaves two documents in Mongo."""
+    writer = BarWriter(mock_collection)
+    bar = _bar()
+
+    writer.enqueue(bar)
+    await writer._flush()
+
+    writer.enqueue(bar)  # same (sid, tf, bar_time) bucket, re-enqueued
+    await writer._flush()
+
+    assert mock_collection.delete_many.call_count == 2
+    delete_query = mock_collection.delete_many.call_args[0][0]
+    assert delete_query == {
+        "$or": [
+            {
+                "ts": bar.bar_time,
+                "metadata.security_id": "13",
+                "metadata.timeframe": "5m",
+            }
+        ]
+    }
+    assert mock_collection.insert_many.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_bucket_within_same_batch_is_deduped_before_insert(mock_collection):
+    """Two enqueue() calls for the identical bucket landing in the same flush batch
+    (e.g. an in-process retry) must not both survive into insert_many — last write
+    wins, and only one document per bucket is ever sent to Mongo."""
+    writer = BarWriter(mock_collection)
+    bar = _bar()
+
+    writer.enqueue(bar)
+    writer.enqueue(bar)  # duplicate, same batch
+    await writer._flush()
+
+    docs = mock_collection.insert_many.call_args[0][0]
+    assert len(docs) == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_buckets_in_one_batch_all_survive(mock_collection):
+    """Dedup is scoped to the exact (sid, tf, ts) key — distinct buckets in the same
+    batch are unaffected."""
+    writer = BarWriter(mock_collection)
+    writer.enqueue(_bar(sid="13"))
+    writer.enqueue(_bar(sid="25"))
+    writer.enqueue(_bar(bar_time="2026-01-02T03:50:00"))
+
+    await writer._flush()
+
+    docs = mock_collection.insert_many.call_args[0][0]
+    assert len(docs) == 3

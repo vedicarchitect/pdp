@@ -18,6 +18,8 @@ from pdp.events.detectors.range_volume import RangeVolumeDetectors
 from pdp.events.detectors.trend import TrendDetectors
 from pdp.events.models import Event, EventType, Severity
 from pdp.events.positions import PositionSync
+from pdp.events.writer import EventWriter
+from pdp.mongo.collections import get_events_collection
 from pdp.options.dhan_client import UNDERLYING_MAP
 
 if TYPE_CHECKING:
@@ -80,6 +82,10 @@ class EventService:
         # Warehouse Camarilla/period levels per spot SID, refreshed off the hot path.
         self._wh_levels: dict[str, list[tuple[str, float]]] = {}
         self._mongo_db = mongo_db
+        self.writer: EventWriter | None = None
+        if self._mongo_db is not None:
+            self.writer = EventWriter(get_events_collection(self._mongo_db))
+
         self._store_q: asyncio.Queue[Event] = asyncio.Queue(maxsize=2000)
         self._push_q: asyncio.Queue[Event] = asyncio.Queue(maxsize=1000)
         self._tasks: list[asyncio.Task[None]] = []
@@ -98,12 +104,16 @@ class EventService:
             asyncio.create_task(self._run_stats(), name="events-stats"),
             asyncio.create_task(self._run_levels_refresh(), name="events-levels-refresh"),
         ]
+        if self.writer is not None:
+            await self.writer.start()
         await self._sync.start()
         log.info("event_service_started", timeframes=self.cfg.timeframes)
 
     async def stop(self) -> None:
         self._stop.set()
         await self._sync.stop()
+        if self.writer is not None:
+            await self.writer.stop()
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)

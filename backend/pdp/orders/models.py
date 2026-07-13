@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Date, ForeignKey, Integer, Numeric, String, UniqueConstraint, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -135,3 +135,28 @@ class BrokerCost(Base):
     gst_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, default=Decimal("18"))
     sebi_charges_bps: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, default=Decimal("0"))
     stamp_duty_bps: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False, default=Decimal("0"))
+
+
+class StrategyLeg(Base):
+    __tablename__ = "strategy_legs"
+    __table_args__ = (
+        Index(
+            "uq_strategy_leg_strategy_sid",
+            "strategy_id",
+            "security_id",
+            unique=True,
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    strategy_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    security_id: Mapped[str] = mapped_column(String, nullable=False)
+    leg_kind: Mapped[str] = mapped_column(String, nullable=False)
+    opt_type: Mapped[str] = mapped_column(String, nullable=False)
+    strike: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

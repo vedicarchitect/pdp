@@ -6,7 +6,7 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 
 | File | Purpose |
 |------|---------|
-| `client.py` | `get_mongo_client()` — singleton `MongoClient` via settings |
+| `client.py` | `connect(settings) -> (client, db)` / `disconnect(client)` — Motor client with bounded pool + timeouts |
 | `collections.py` | `ensure_indexes()` — creates all time-series collections + indexes on startup |
 
 ## Collections
@@ -29,12 +29,13 @@ Shared MongoDB client singleton and collection/index bootstrapping.
 ## Usage
 
 ```python
-from pdp.mongo.client import get_mongo_client
+from pdp.mongo.client import connect, disconnect
 from pdp.settings import get_settings
 
-client = get_mongo_client()
-db = client[get_settings().MONGO_DB_NAME]
+client, db = connect(get_settings())
 col = db["market_bars"]
+# ... use col ...
+disconnect(client)
 ```
 
 ## Note

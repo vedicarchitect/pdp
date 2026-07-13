@@ -26,6 +26,7 @@ from pdp.strategy.schemas import (
     StranglePnlOut,
     StrangleTradesOut,
     StrangleMonitorOut,
+    StrangleReadinessOut,
     LevelsResponseOut,
 )
 
@@ -185,6 +186,24 @@ async def strangle_status(
     return StrangleStatusOut(**data)
 
 
+@strangle_router.get("/readiness", response_model=StrangleReadinessOut)
+async def strangle_readiness(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+) -> StrangleReadinessOut:
+    """Live readiness gate — surfaces the same checks that block new entries in
+    `state()` (reconciliation, broker sync, indicators, chain, bias inputs), so a
+    dashboard can show *why* a strategy isn't trading, not just that it isn't."""
+    strategy = _get_strangle(request, strategy_id)
+    readiness = await strategy.check_readiness()
+    return StrangleReadinessOut(
+        state=readiness.state,
+        components=[
+            {"name": c.name, "state": c.state, "reason": c.reason} for c in readiness.components
+        ],
+    )
+
+
 @strangle_router.get("/legs", response_model=StrangleLegsOut)
 async def strangle_legs(
     request: Request,
@@ -314,7 +333,6 @@ async def strangle_trades(
     from datetime import date as date_type
 
     from pdp.instruments.symbols import symbol_for
-    from pdp.mongo.collections import get_events_collection
     from pdp.strategies.directional_strangle import DirectionalStrangle
     from pdp.strategy.trade_ledger import (
         compute_totals,
@@ -325,15 +343,6 @@ async def strangle_trades(
 
     query_date = parse_ist_date(date)
 
-    # Resolve Mongo collection from app state (graceful None if not available)
-    mongo_col = None
-    try:
-        mongo_db = getattr(request.app.state, "mongo_db", None)
-        if mongo_db is not None:
-            mongo_col = get_events_collection(mongo_db)
-    except Exception:
-        pass
-
     host: StrategyHost = request.app.state.strategy_host
     strategies = [
         (sid, state.instance)
@@ -341,9 +350,10 @@ async def strangle_trades(
         if isinstance(state.instance, DirectionalStrangle) and (strategy_id is None or sid == strategy_id)
     ]
 
+    mongo_db = getattr(request.app.state, "mongo_db", None)
     all_rows: list[dict[str, Any]] = []
     for sid, strategy in strategies:
-        events = await read_durable_day_events(sid, query_date, mongo_collection=mongo_col)
+        events = await read_durable_day_events(sid, query_date, mongo_db=mongo_db)
         rows = pair_trades(events)
         # Lazy symbol resolution for rows with symbol=null
         for row in rows:
@@ -679,6 +689,7 @@ async def strangle_monitor(
     )
 
     states = [await s.state() for s in strategies]
+    readinesses = [await s.check_readiness() for s in strategies]
 
     # ── Indices spot + future LTPs ──────────────────────────────────────────
     # Futures SID comes from the matrix's startup-resolved map (configure_matrix_suites),
@@ -751,6 +762,21 @@ async def strangle_monitor(
         for und, legs in legs_by_underlying.items()
     ]
 
+    # ── Readiness — per-underlying + worst-case overall ─────────────────────
+    _state_rank = {"ok": 0, "degraded": 1, "blocked": 2}
+    readiness_by_underlying = {
+        strategies[i].underlying: {
+            "state": r.state,
+            "components": [
+                {"name": c.name, "state": c.state, "reason": c.reason} for c in r.components
+            ],
+        }
+        for i, r in enumerate(readinesses)
+    }
+    overall_readiness_state = max(
+        (r.state for r in readinesses), key=lambda s: _state_rank[s], default="ok"
+    )
+
     # ── Overall totals ──────────────────────────────────────────────────────
     totals = {
         "day_realized": sum(s.get("day_realized", 0.0) for s in states),
@@ -766,6 +792,7 @@ async def strangle_monitor(
         "n_open_hedges": sum(s.get("n_open_hedges", 0) for s in states),
         "n_open_momentum": sum(s.get("n_open_momentum", 0) for s in states),
         "by_underlying": underlying_status,
+        "readiness": {"state": overall_readiness_state, "by_underlying": readiness_by_underlying},
     }
 
     # ── Recent events (newest-first, closed legs + exit reasons) ───────────

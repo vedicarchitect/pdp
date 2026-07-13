@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 # --------------------------------------------------------------------------- #
 # Inputs
@@ -34,6 +35,22 @@ class TimeframeEMA:
     ema9: float
     ema20: float
     ema50: float
+
+
+def tf_ema_from_values(values: dict[int, float] | None, price: float) -> TimeframeEMA | None:
+    """Build a ``TimeframeEMA`` from an ``EMATracker.values`` dict.
+
+    The single conversion point for both the live strategy (fed from
+    ``IndicatorEngine.get_ema(sid, tf).values``) and the backtest loader (fed
+    from its own warmed ``EMATracker`` replay), so the 9/20/50 alignment vote
+    sees identically-assembled inputs regardless of which engine ran the EMA
+    math. Returns ``None`` until all three periods have converged.
+    """
+    if values is None:
+        return None
+    if 9 not in values or 20 not in values or 50 not in values:
+        return None
+    return TimeframeEMA(price=price, ema9=values[9], ema20=values[20], ema50=values[50])
 
 
 @dataclass(slots=True)
@@ -111,6 +128,101 @@ class BiasWeights:
     pcr_bear: float = 0.9
 
 
+class BiasInputUnsatisfiable(Exception):  # noqa: N818
+    """Raised when a strategy weights a bias input its own configuration cannot supply.
+
+    ``score_bias`` treats a missing value as a silent abstention -- a weight of
+    1.0 on a permanently-absent input is indistinguishable, from the logs, from
+    a genuinely neutral market. This check closes that gap at strategy load.
+    """
+
+
+# Weight name -> (timeframe, indicator family) required in the watchlist for that
+# weight to have real data. w_swing (any timeframe with period_levels), w_orb (no
+# family -- derived from the raw 15m bar, not a suite indicator) and w_pcr (a
+# chain-poller-underlyings membership check, not a watchlist requirement) don't
+# fit this shape and are handled directly in check_bias_satisfiability.
+_TF_FAMILY_REQUIREMENTS: dict[str, tuple[str, str]] = {
+    "w_cam_daily": ("1D", "pivots"),
+    "w_cam_weekly": ("1w", "pivots"),
+    "w_ema_1h": ("1H", "ema"),
+    "w_ema_15m": ("15m", "ema"),
+    "w_ema_5m": ("5m", "ema"),
+}
+
+
+def check_bias_satisfiability(
+    weights: BiasWeights,
+    watchlist: list[dict[str, Any]],
+    *,
+    underlying: str,
+    options_underlyings: set[str],
+) -> list[str]:
+    """Verify every non-zero bias weight has a data source in the strategy's config.
+
+    ``watchlist`` is ``[w.model_dump() for w in cfg.watchlist]`` -- each entry a
+    dict with ``timeframes: list[str]`` and ``indicators: list[dict]``.
+    ``options_underlyings`` is the set of underlyings a chain poller actually runs
+    for (``pdp.strategy.registry.strategy_underlyings`` -- derived from loaded
+    strategy YAMLs, not a hand-maintained settings list). Raises
+    ``BiasInputUnsatisfiable`` naming the first unmet ``(weight, requirement)``
+    pair; a weight of zero imposes no requirement. Returns the names of every
+    satisfied (non-zero-weight) input on success, for the caller to log.
+    """
+
+    def _has_family(tf: str, family: str) -> bool:
+        return any(
+            tf in entry.get("timeframes", [])
+            and any(isinstance(i, dict) and i.get("family") == family for i in entry.get("indicators", []))
+            for entry in watchlist
+        )
+
+    satisfied: list[str] = []
+    for w_name, (tf, family) in _TF_FAMILY_REQUIREMENTS.items():
+        weight = getattr(weights, w_name)
+        if weight <= 0:
+            continue
+        if not _has_family(tf, family):
+            raise BiasInputUnsatisfiable(
+                f"{w_name}={weight} requires timeframe {tf!r} with family {family!r} in the watchlist"
+            )
+        satisfied.append(w_name)
+
+    if weights.w_swing > 0:
+        has_period_levels = any(
+            any(
+                isinstance(i, dict) and i.get("family") == "period_levels"
+                for i in entry.get("indicators", [])
+            )
+            for entry in watchlist
+        )
+        if not has_period_levels:
+            raise BiasInputUnsatisfiable(
+                f"w_swing={weights.w_swing} requires the 'period_levels' family on at least "
+                f"one watchlist timeframe"
+            )
+        satisfied.append("w_swing")
+
+    if weights.w_orb > 0:
+        has_15m = any("15m" in entry.get("timeframes", []) for entry in watchlist)
+        if not has_15m:
+            raise BiasInputUnsatisfiable(
+                f"w_orb={weights.w_orb} requires the '15m' timeframe in the watchlist "
+                f"(the opening range is derived from the first 15m bar, not a suite indicator)"
+            )
+        satisfied.append("w_orb")
+
+    if weights.w_pcr > 0:
+        if underlying not in options_underlyings:
+            raise BiasInputUnsatisfiable(
+                f"w_pcr={weights.w_pcr} requires {underlying!r} to have a running options "
+                f"chain poller (add params.underlying: {underlying!r} to a strategy YAML)"
+            )
+        satisfied.append("w_pcr")
+
+    return satisfied
+
+
 class BiasBucket(StrEnum):
     COMPLETE_BULL = "complete_bull"
     MOST_BULL = "most_bull"
@@ -145,6 +257,15 @@ DEFAULT_RATIO_TABLE: dict[BiasBucket, tuple[int, int]] = {
 
 
 @dataclass(slots=True)
+class VoteBreakdown:
+    """One input's contribution to a bias evaluation, present or abstaining."""
+
+    vote: int | None  # None when the input had no data (abstained)
+    weight: float
+    abstained: bool
+
+
+@dataclass(slots=True)
 class BiasResult:
     score: float  # normalised, [-1, +1]
     bucket: BiasBucket
@@ -153,6 +274,10 @@ class BiasResult:
     gated: bool  # True -> VIX gate blocks new entries
     reason: str
     votes: dict[str, int] = field(default_factory=dict)  # per-signal votes (debug)
+    # Every input, present or abstaining -- so an abstaining input (e.g. a bias
+    # weight the strategy's own config can't supply) is visible in the log
+    # rather than inferred from a suspicious bucket distribution.
+    breakdown: dict[str, VoteBreakdown] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -302,10 +427,13 @@ def score_bias(
     ]
 
     votes: dict[str, int] = {}
+    breakdown: dict[str, VoteBreakdown] = {}
     weighted_sum = 0.0
     weight_total = 0.0
     for vote, weight, name in candidates:
-        if vote is None:
+        abstained = vote is None
+        breakdown[name] = VoteBreakdown(vote=vote, weight=weight, abstained=abstained)
+        if abstained:
             continue
         votes[name] = vote
         weighted_sum += weight * vote
@@ -326,4 +454,5 @@ def score_bias(
         gated=gated,
         reason=reason,
         votes=votes,
+        breakdown=breakdown,
     )

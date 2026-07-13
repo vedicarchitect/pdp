@@ -186,10 +186,24 @@ class IndicatorEngine:
         prior_close: float,
         prior_day: date | None = None,
     ) -> None:
-        """Seed the PivotTracker with the prior session's HLC at warmup time."""
-        bundle = self._suite_trackers.get((security_id, timeframe))
+        """Seed the PivotTracker with the prior session's HLC at warmup time.
+
+        Also refreshes the cached ``Snapshot`` for this ``(sid, tf)`` -- this runs
+        *after* ``seed_from_bars`` already cached a snapshot from the historical
+        bars, so without this, ``get_pivots``/``get_snapshot`` would keep serving
+        that stale pre-correction state until the next live bar closes.
+        """
+        key = (security_id, timeframe)
+        bundle = self._suite_trackers.get(key)
         if bundle and "pivots" in bundle:
-            bundle["pivots"].seed_prior_hlc(prior_high, prior_low, prior_close, prior_day)
+            new_state = bundle["pivots"].seed_prior_hlc(prior_high, prior_low, prior_close, prior_day)
+            existing = self._snapshots.get(key)
+            if existing is not None:
+                from dataclasses import replace
+
+                self._snapshots[key] = replace(existing, pivots=new_state)
+            else:
+                self._snapshots[key] = Snapshot(pivots=new_state)
 
     def seed_period_levels_history(
         self,
@@ -283,3 +297,28 @@ class IndicatorEngine:
     def set_ml_signal(self, security_id: str, timeframe: str, signal: Any) -> None:
         """Cache an MLSignalState produced by the ML inference layer."""
         self._ml_signals[(security_id, timeframe)] = signal
+
+    # ── Startup depth summary (indicator-history-depth) ─────────────────────────
+
+    def seeding_summary(self, security_id: str, timeframe: str) -> dict[tuple[str, int | None], bool]:
+        """Which ``(family, period)`` combinations are fully seeded for ``(sid, tf)``.
+
+        ``ema`` reports one entry per configured period (the concrete "EMA(200)
+        unseeded on 1H" case a startup summary needs to name); every other suite
+        family reports a single ``(family, None)`` entry, seeded once its tracker
+        has produced any state.
+        """
+        key = (security_id, timeframe)
+        bundle = self._suite_trackers.get(key, {})
+        snap = self._snapshots.get(key)
+        result: dict[tuple[str, int | None], bool] = {}
+        for family, tracker in bundle.items():
+            if family == "ema":
+                periods = getattr(tracker, "periods", [])
+                seeded_values = snap.ema.values if snap and snap.ema is not None else {}
+                for p in periods:
+                    result[(family, p)] = p in seeded_values
+            else:
+                state = getattr(snap, family, None) if snap is not None else None
+                result[(family, None)] = state is not None
+        return result

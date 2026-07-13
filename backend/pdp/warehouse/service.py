@@ -97,9 +97,10 @@ class WarehouseService:
         settings: Any,
         mongo_db: AsyncIOMotorDatabase,  # type: ignore[type-arg]
         session_maker: async_sessionmaker[AsyncSession],
+        underlyings: list[str],
     ) -> None:
         # Validate configured underlyings against the registry before any I/O.
-        invalid = [u for u in settings.WAREHOUSE_UNDERLYINGS if u not in UNDERLYING_REGISTRY]
+        invalid = [u for u in underlyings if u not in UNDERLYING_REGISTRY]
         if invalid:
             raise ValueError(
                 f"Unsupported warehouse underlyings: {invalid!r}. "
@@ -117,7 +118,7 @@ class WarehouseService:
 
         # Build per-underlying state keyed by underlying index SID.
         self._states: dict[str, _UnderlyingState] = {}
-        for underlying_name in settings.WAREHOUSE_UNDERLYINGS:
+        for underlying_name in underlyings:
             reg = UNDERLYING_REGISTRY[underlying_name]
             sid = reg["sid"]
             expiry_path = Path(getattr(settings, reg["expiry_path_setting"]))

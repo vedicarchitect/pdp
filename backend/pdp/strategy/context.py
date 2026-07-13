@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from pdp.events.service import EventService
     from pdp.indicators.engine import IndicatorEngine
     from pdp.indicators.supertrend import SuperTrendState
     from pdp.market.dhan_ws import DhanTickerAdapter
@@ -116,6 +117,11 @@ class IndicatorReader:
         if self._engine is None:
             return None
         return self._engine.get_elder_impulse(security_id, timeframe)
+
+    def seeding_summary(self, security_id: str, timeframe: str) -> dict[tuple[str, int | None], bool]:
+        if self._engine is None:
+            return {}
+        return self._engine.seeding_summary(security_id, timeframe)
 
     def ml_signal(self, security_id: str, timeframe: str) -> Any:
         """Read-only ML directional signal. Returns None when no model is loaded."""
@@ -236,7 +242,7 @@ class StrategyContext:
     market: MarketControl | None = None
     session_maker: async_sessionmaker[AsyncSession] | None = None
     chain_hub: Any | None = None
-    _event_service: Any | None = None
+    _event_service: EventService | None = None
 
     def emit_critical(
         self,

@@ -22,7 +22,7 @@ from pdp.backtest.resample import resample_ohlcv
 from pdp.backtest.strangle_config import StrangleConfig
 from pdp.backtest.strangle_sim import DecisionBar, StrangleDayData
 from pdp.indicators.ema import EMATracker
-from pdp.signals.bias import BiasInputs, CamLevels, TimeframeEMA
+from pdp.signals.bias import BiasInputs, CamLevels, TimeframeEMA, tf_ema_from_values
 
 _IST = timedelta(hours=5, minutes=30)
 _EMA_PERIODS = [9, 20, 50]
@@ -58,10 +58,7 @@ def _tf_ema_at(times: list[datetime], vals: list[dict[int, float]], t: datetime,
     i = _asof(times, t)
     if i is None:
         return None
-    v = vals[i]
-    if not all(p in v for p in _EMA_PERIODS):
-        return None
-    return TimeframeEMA(price=price, ema9=v[9], ema20=v[20], ema50=v[50])
+    return tf_ema_from_values(vals[i], price)
 
 
 def _hlc(bars: list[dict]) -> tuple[float, float, float] | None:

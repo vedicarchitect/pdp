@@ -7,7 +7,7 @@
 | `paper.py` | 15.5 KB | `PaperBroker` — always running; simulates fills from Redis LTP; slippage via `PAPER_SLIPPAGE_BPS` |
 | `dhan_broker.py` | 16.6 KB | `DhanBroker` — live-gated (`LIVE=1` + creds); sends real orders to Dhan API |
 | `router.py` | 6.9 KB | `OrderRouter` — routes to paper or live based on settings; single entry point for all order placement |
-| `models.py` | 5.4 KB | SQLAlchemy models: `Order`, `Trade`, `Position` (PostgreSQL) |
+| `models.py` | 5.4 KB | SQLAlchemy models: `Order`, `Trade`, `Position`, `StrategyLeg` (PostgreSQL) |
 | `routes.py` | 6.6 KB | REST endpoints: place, cancel, list orders; query positions/trades |
 | `ws.py` | 3.4 KB | `OrdersHub` + WS router — broadcasts fill events to connected clients |
 
@@ -46,6 +46,16 @@ OrderRouter.place_order(req)
 - `PortfolioService` cache key is now `(strategy_id, security_id, exchange_segment, product)`.
 - Migration `0012` adds the column and rekeyed unique constraint.
 - Run `task db:migrate` after pulling to apply the migration.
+
+## `Position` vs `StrategyLeg`
+
+`Position` is a **broker-ledger mirror**: `broker_sync` reconciles it against the broker's actual
+holdings, so it only ever carries fields the broker itself reports (`net_qty`, `avg_price`, etc.).
+Strategy-private classification — which `leg_kind` (`short`/`hedge`/`momentum`) a position represents
+— does **not** belong on `Position`. It lives in `StrategyLeg` (`strategy_legs` table), written by
+`directional_strangle.py`'s `_persist_leg_open`/`_persist_leg_close` and read back by
+`_rehydrate_legs` on restart, so leg type survives a process restart without being re-inferred from
+the broker's `net_qty` sign (which cannot distinguish a long hedge from a long momentum leg).
 
 ## Active Specs
 

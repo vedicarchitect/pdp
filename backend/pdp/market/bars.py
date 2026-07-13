@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -29,8 +29,43 @@ _TIMEFRAMES: dict[str, int] = {
 # IST = UTC+5:30
 _IST_OFFSET_MINUTES = 5 * 60 + 30
 
+# Trading session window, IST minutes-since-midnight: [09:15, 15:30)
+_SESSION_OPEN_MIN_OF_DAY = 9 * 60 + 15
+_SESSION_CLOSE_MIN_OF_DAY = 15 * 60 + 30
+
 # Maximum seconds ltt can lead ts_recv before we fall back to ts_recv
 _MAX_LTT_LEAD_S = 2.0
+
+# Bar period per timeframe label, for completeness checks on broker-fetched bars
+# (dhan-same-day-data). 1D/1w are deliberately the full calendar day/week rather
+# than the session close (15:30 IST) — Dhan's daily-candle semantics for an
+# in-progress trading day are unverified, so this errs toward discarding a
+# same-day daily/weekly bar rather than risking a partial one in market_bars.
+_BAR_PERIOD: dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "25m": timedelta(minutes=25),
+    "30m": timedelta(minutes=30),
+    "1H": timedelta(hours=1),
+    "1h": timedelta(hours=1),
+    "1D": timedelta(days=1),
+    "1w": timedelta(weeks=1),
+}
+
+
+def bar_is_complete(bar_time: datetime, timeframe: str, now: datetime) -> bool:
+    """True iff a bar opened at `bar_time` has fully elapsed as of `now`.
+
+    A bar is stamped at its *open* time, so it is complete only once
+    `bar_time + period <= now`. An unrecognized timeframe is treated as
+    complete (defensive default — callers only pass timeframes they already
+    validated against a known interval map).
+    """
+    period = _BAR_PERIOD.get(timeframe)
+    if period is None:
+        return True
+    return bar_time + period <= now
 
 
 @dataclass(slots=True)
@@ -46,13 +81,60 @@ class BarClosed:
     oi: int
 
 
-def _bar_boundary(dt: datetime, tf_minutes: int) -> datetime:
-    """Truncate dt to the nearest tf_minutes boundary (UTC)."""
+def _session_open_utc(dt: datetime) -> datetime:
+    """Return 09:15 IST (expressed in UTC) on dt's IST trading day.
+
+    225 minutes (03:45 UTC) past the UTC calendar-day start that contains dt's IST
+    session. During session hours (03:45-10:00 UTC) the IST trading day and the UTC
+    calendar day coincide, so truncating dt to its UTC day start and adding 225 minutes
+    lands on the correct session open.
+    """
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    delta = dt - epoch
-    total_minutes = int(delta.total_seconds() // 60)
-    truncated_minutes = (total_minutes // tf_minutes) * tf_minutes
-    return epoch + timedelta(minutes=truncated_minutes)
+    total_minutes = int(dt.timestamp() // 60)
+    utc_day_start_min = (total_minutes // (24 * 60)) * (24 * 60)
+    return epoch + timedelta(minutes=utc_day_start_min + _SESSION_OPEN_MIN_OF_DAY - _IST_OFFSET_MINUTES)
+
+
+def _bar_boundary(dt: datetime, tf_minutes: int) -> datetime:
+    """Truncate dt to the nearest tf_minutes boundary, anchored to the session open.
+
+    Anchoring to 09:15 IST (not the Unix epoch) means the bucket containing the first
+    tick of a session always starts exactly at the session open, for every timeframe.
+    5m/15m already coincided with the epoch grid (225 min divides evenly by both) so
+    this is a no-op for them; 25m/30m/1H move onto the session grid.
+    """
+    session_open = _session_open_utc(dt)
+    delta_minutes = int((dt - session_open).total_seconds() // 60)
+    truncated_minutes = (delta_minutes // tf_minutes) * tf_minutes
+    return session_open + timedelta(minutes=truncated_minutes)
+
+
+def _in_session_window(dt: datetime, holiday_set: frozenset[date] = frozenset()) -> bool:
+    """True iff dt falls in [09:15:00, 15:30:00) IST *and* its IST date is a trading day.
+
+    The clock-time check is integer arithmetic only. The trading-day check (weekday + not
+    in holiday_set) only runs once the cheap clock check has already passed, so the hot
+    path cost for the overwhelming majority of in-window ticks (real trading days) is
+    unchanged; the extra work only happens for the rare tick that also needs the calendar
+    check. Without this, a stale/heartbeat print delivered during nominal session hours on
+    a weekend or holiday (weekday-holiday awareness lives in `pdp.options.gap_backfill`,
+    same as `BarSessionScheduler`'s flush gate) would otherwise be aggregated and persisted
+    as if it were real trading data.
+    """
+    total_minutes_ist = int(dt.timestamp() // 60) + _IST_OFFSET_MINUTES
+    minute_of_day = total_minutes_ist % (24 * 60)
+    if not (_SESSION_OPEN_MIN_OF_DAY <= minute_of_day < _SESSION_CLOSE_MIN_OF_DAY):
+        return False
+    ist_date = _ist_date(dt)
+    return ist_date.weekday() < 5 and ist_date not in holiday_set
+
+
+def _ist_date(dt: datetime) -> date:
+    """Return dt's IST calendar date."""
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    total_minutes_ist = int(dt.timestamp() // 60) + _IST_OFFSET_MINUTES
+    ist_day_start_min = (total_minutes_ist // (24 * 60)) * (24 * 60)
+    return (epoch + timedelta(minutes=ist_day_start_min)).date()
 
 
 def _bar_boundary_1d(dt: datetime) -> datetime:
@@ -167,6 +249,18 @@ class BarBuilder:
 
         return closed_bar
 
+    def flush(self) -> BarClosed | None:
+        """Force-close the current bar without waiting for a boundary-crossing tick.
+
+        Called at session end (15:30 IST) so the final bucket of the day is emitted even
+        when no further tick ever arrives to trigger the usual boundary-crossing close.
+        """
+        if self._bar_time is None:
+            return None
+        closed = self._snapshot()
+        self._bar_time = None
+        return closed
+
     def _reset(self, bar_time: datetime, tick: Tick) -> None:
         self._bar_time = bar_time
         self._open = self._high = self._low = self._close = tick.ltp
@@ -194,12 +288,26 @@ class BarAggregator:
     Builders are created lazily on first tick.
     """
 
-    def __init__(self, timeframes: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        timeframes: list[str] | None = None,
+        holiday_set: frozenset[date] | None = None,
+    ) -> None:
         self._timeframes = timeframes or list(_TIMEFRAMES.keys())
         self._builders: dict[tuple[str, str], BarBuilder] = {}
+        self._holiday_set = holiday_set or frozenset()
 
     def push(self, tick: Tick) -> list[BarClosed]:
-        """Push a tick to all active timeframe builders; return any closed bars."""
+        """Push a tick to all active timeframe builders; return any closed bars.
+
+        Ticks outside the trading session window ([09:15:00, 15:30:00) IST) are dropped, as
+        are ticks whose IST date is a weekend or an `NSE_HOLIDAYS_JSON` holiday — no pre-open,
+        post-close, or non-trading-day print contributes to any bar, on any timeframe.
+        """
+        ltt = tick.ltt if tick.ltt.tzinfo else tick.ltt.replace(tzinfo=UTC)
+        if not _in_session_window(ltt, self._holiday_set):
+            return []
+
         closed: list[BarClosed] = []
         for tf in self._timeframes:
             key = (tick.security_id, tf)
@@ -210,4 +318,31 @@ class BarAggregator:
             result = builder.push(tick)
             if result is not None:
                 closed.append(result)
+        return closed
+
+    def flush_session(self) -> list[BarClosed]:
+        """Force-close every intraday/daily builder's open bar at session end (15:30 IST).
+
+        Call once per trading day from the session-end scheduler so the final bucket of
+        the day exists even when the next tick is a day (or a weekend/holiday) away.
+
+        Excludes ``1w`` builders: a weekly bucket spans multiple trading days, so
+        force-closing it every day (not just on the week's last trading day) would
+        flush+reset the in-progress week's accumulated OHLCV after a single day, and
+        the next day's first tick would then start a fresh bar for the *same* bucket
+        timestamp (`_bar_boundary_1w` is Monday-anchored regardless of which weekday
+        it's called from) — each day's flush overwriting the last via
+        `BarWriter._flush`'s delete-then-insert, so only the final trading day's OHLCV
+        would ever survive as that week's persisted bar. The weekly builder's own
+        natural boundary-crossing check in `push()` already closes and emits a
+        complete week's bar the moment a genuine new week's first tick arrives —
+        no forced flush is needed or correct for it.
+        """
+        closed: list[BarClosed] = []
+        for (_, tf), builder in self._builders.items():
+            if tf == "1w":
+                continue
+            bar = builder.flush()
+            if bar is not None:
+                closed.append(bar)
         return closed

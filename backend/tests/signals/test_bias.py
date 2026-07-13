@@ -213,3 +213,38 @@ def test_weights_are_tunable():
     # crank pcr weight so the bearish pcr dominates
     w = BiasWeights(w_pcr=10.0)
     assert score_bias(inp, weights=w).score < 0
+
+
+# --------------------------------------------------------------------------- #
+# Vote breakdown (bias-input-completeness task 6.1/1.9)
+# --------------------------------------------------------------------------- #
+
+
+def test_breakdown_records_abstention_for_null_input():
+    """An input with no data (e.g. cam_weekly=None) is recorded as abstaining in
+    the breakdown, with its configured weight, rather than simply omitted."""
+    inp = BiasInputs(spot=100.0, ema_1h=_bull_ema())  # cam_weekly, pcr, etc. all None
+    r = score_bias(inp)
+
+    assert "cam_weekly" in r.breakdown
+    assert r.breakdown["cam_weekly"].abstained is True
+    assert r.breakdown["cam_weekly"].vote is None
+    assert r.breakdown["cam_weekly"].weight == BiasWeights().w_cam_weekly
+
+
+def test_breakdown_records_vote_for_present_input():
+    inp = BiasInputs(spot=100.0, ema_1h=_bull_ema())
+    r = score_bias(inp)
+
+    assert r.breakdown["ema_1h"].abstained is False
+    assert r.breakdown["ema_1h"].vote == 1
+    assert r.breakdown["ema_1h"].weight == BiasWeights().w_ema_1h
+
+
+def test_breakdown_covers_every_input_every_evaluation():
+    """Every evaluation's breakdown names all eight inputs, regardless of which abstain."""
+    r = score_bias(BiasInputs(spot=100.0))
+    assert set(r.breakdown) == {
+        "ema_1h", "ema_15m", "ema_5m", "cam_daily", "cam_weekly", "swing", "orb", "pcr",
+    }
+    assert all(v.abstained for v in r.breakdown.values())

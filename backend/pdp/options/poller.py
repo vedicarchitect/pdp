@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
@@ -167,11 +166,12 @@ class OptionsChainPoller:
         collection: AsyncIOMotorCollection,  # type: ignore[type-arg]
         hub: OptionsHub,
         settings: Settings,
+        underlyings: list[str],
     ) -> None:
         self._col = collection
         self._hub = hub
         self._settings = settings
-        self._underlyings: list[str] = json.loads(settings.OPTIONS_UNDERLYINGS)
+        self._underlyings: list[str] = underlyings
         self._poll_interval = settings.OPTIONS_POLL_INTERVAL_SECONDS
         self._risk_free = settings.OPTIONS_RISK_FREE_RATE
         self._refresh_queue: asyncio.Queue[str] = asyncio.Queue()

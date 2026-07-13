@@ -43,6 +43,7 @@ Ten changes, written 2026-07-10 from the findings of the 2026-07-09 inflated-P&L
 |--------|------|
 | `flutter-execution-tab-layout` | **Code already written and verified.** Only tasks 5.x remain (docs, Android check, audit). Commit separately from `broker-sync-visibility`. |
 | `dhan-same-day-data` | Task 1 is an **investigation** that blocks the rest; its scope is unknown until answered. Do not estimate it first. |
+| `market-bars-duplicate-write-fix` | Discovered 2026-07-11 during change 3's rebuild: `market_bars` had duplicate documents for the same `(ts, metadata)` bucket (time-series collections can't carry a unique index, unlike `option_bars`). Change 3's rebuild already fixed the duplicates it touched (2026-04-08 to 2026-07-11); this change fixes the write-path root cause and dedupes anything outside that range. |
 
 ## Expect the backtest baselines to move
 
@@ -51,6 +52,13 @@ Changes 3, 4 and 5 all alter the inputs the strategy sees. The archived NIFTY ba
 three dead inputs. Re-run the three strangle configs after change 5 and **decide explicitly** whether
 the new numbers supersede the archived ones. A different result is expected and is not, by itself, a
 regression.
+
+**Done 2026-07-13.** Verdict: supersede. NIFTY +Rs 42.71L (current `dte_max:15` config) / +Rs 56.70L
+(this arc's fixes in isolation, DTE filter disabled) vs. archived +Rs 85.6L; BANKNIFTY +Rs 46.82L and
+SENSEX +Rs 20.87L are first-ever baselines. Full trace (including a genuine `option_bars` expiry
+data gap found and disentangled from the fixes' own effect) in each of changes 3/4/5's README under
+"Combined re-baseline results". The data gap itself is out of scope here — filed as
+`option-bars-expiry-gap-backfill`.
 
 ## Findings deliberately not given their own change
 

@@ -21,11 +21,6 @@ import pytest
 
 from pdp.strategies.directional_strangle import DirectionalStrangle, OpenLeg
 
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="strangle-observability-gaps",
-)
-
 
 class _FakeOrders:
     def __init__(self, net_qty: int) -> None:
@@ -97,7 +92,7 @@ async def test_cap_refusal_and_close_direction_mismatch_emit_different_event_typ
         lots=1,
         entry_price=Decimal("100"),
     )
-    s_close._ltp_cache["1002"] = Decimal("50")
+    s_close._ltp_cache["1002"] = 50.0  # _ltp_cache holds floats (tick LTPs)
     await s_close._close_short_leg(leg, "manual_close")
     assert s_close.ctx.emit_critical.call_count == 1
     contradiction_event_type = s_close.ctx.emit_critical.call_args[0][0]

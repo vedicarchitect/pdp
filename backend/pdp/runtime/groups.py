@@ -249,7 +249,12 @@ class FeedEngineGroup:
         from pdp.strategy.registry import load_all
         _all_configs = load_all(Path("strategies"))
         _watchlist_dicts = [
-            {"security_id": w.security_id, "exchange_segment": w.exchange_segment, "timeframes": w.timeframes}
+            {
+                "security_id": w.security_id,
+                "exchange_segment": w.exchange_segment,
+                "timeframes": w.timeframes,
+                "indicators": w.indicators,
+            }
             for cfg in _all_configs
             for w in cfg.watchlist
         ]
@@ -278,6 +283,29 @@ class FeedEngineGroup:
                 await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
             except Exception as exc:
                 log.warning("indicator_warmup_failed", exc=str(exc))
+
+        # One summary line per strategy naming any (sid, tf, family, period) still
+        # unseeded after warmup, so a session starting with e.g. EMA(200) unseeded
+        # on 1H is visible in the first hundred lines of the log, not just a `--`
+        # discovered later in the console.
+        for _cfg in _all_configs:
+            _unseeded: list[dict[str, Any]] = []
+            for _w in _cfg.watchlist:
+                for _tf in _w.timeframes:
+                    for (_family, _period), _seeded in indicator_engine.seeding_summary(
+                        _w.security_id, _tf
+                    ).items():
+                        if not _seeded:
+                            _unseeded.append(
+                                {"security_id": _w.security_id, "timeframe": _tf,
+                                 "family": _family, "period": _period}
+                            )
+            log.info(
+                "indicator_seeding_summary",
+                strategy_id=_cfg.id,
+                unseeded_count=len(_unseeded),
+                unseeded=_unseeded,
+            )
 
         try:
             from pdp.indicators.levels_store import compute_session_levels
@@ -321,10 +349,18 @@ class FeedEngineGroup:
             alert_evaluator.register_notification_callback(on_alert_notification)
             await alert_evaluator.load_alerts()
 
-            bar_aggregator = BarAggregator()
+            from pdp.market.session_scheduler import BarSessionScheduler
+            from pdp.options.gap_backfill import holidays as _load_holidays
+
+            _holiday_set = _load_holidays(settings.NSE_HOLIDAYS_JSON)
+            bar_aggregator = BarAggregator(holiday_set=frozenset(_holiday_set))
             bar_writer = BarWriter(mongo_db["market_bars"])
             await bar_writer.start()
             app.state.bar_writer = bar_writer
+
+            bar_session_scheduler = BarSessionScheduler(bar_aggregator, _holiday_set)
+            await bar_session_scheduler.start()
+            app.state.bar_session_scheduler = bar_session_scheduler
 
             adapter = DhanTickerAdapter(
                 settings.DHAN_CLIENT_ID,
@@ -495,7 +531,9 @@ class FeedEngineGroup:
                 await tick_router_task
             except asyncio.CancelledError:
                 pass
-                
+
+        if getattr(app.state, "bar_session_scheduler", None):
+            await app.state.bar_session_scheduler.stop()
         if getattr(app.state, "bar_writer", None):
             await app.state.bar_writer.stop()
         if getattr(app.state, "dhan_broker", None):
@@ -528,11 +566,14 @@ class OpsGroup:
         options_poller = None
         if settings.OPTIONS_POLLER_ENABLED and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
             from pdp.options.poller import OptionsChainPoller
+            from pdp.strategy.registry import strategy_underlyings
             options_hub = getattr(app.state, "options_hub", None)
+            underlyings = sorted(strategy_underlyings(Path("strategies")))
             options_poller = OptionsChainPoller(
                 collection=app.state.mongo_db["option_chains"],
                 hub=options_hub,
                 settings=settings,
+                underlyings=underlyings,
             )
             app.state.options_poller = options_poller
             await options_poller.start()

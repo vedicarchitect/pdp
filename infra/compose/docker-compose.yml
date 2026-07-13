@@ -58,6 +58,9 @@ services:
       DISABLE_INSTALL_DEMO_CONFIG: "true"
       bootstrap.memory_lock: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # PA agent is a separate always-on process the docker image starts by default —
+      # continuous idle CPU cost with zero dev value here.
+      DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI: "true"
     ulimits:
       memlock:
         soft: -1

@@ -76,11 +76,9 @@ For implementation specs, start at:
 - **Market feed** → `openspec/specs/market-feed/spec.md`
 
 ## Notes
-- `task test` is green: `1010 passed, 2 xfailed` (2026-07-10, see `test-suite-baseline-green`).
-  The two `xfail(strict=True, ...)` markers (`tests/strategies/test_leg_rehydration.py`,
-  `tests/strategies/test_event_taxonomy.py`) are intentional — they name a real, in-flight
-  OpenSpec change as owner and must start failing the suite the moment they start passing
-  unexpectedly. `task test` exits non-zero on any real failure; there is no standing debt to route
-  around.
+- `task test` is green: `1131 passed, 0 failed` (2026-07-13, see the incident-remediation program in
+  root `CLAUDE.md`). The two `xfail(strict=True, ...)` markers that previously guarded
+  `test_leg_rehydration.py`/`test_event_taxonomy.py` were dropped once `strangle-leg-state-durability`
+  and `strangle-observability-gaps` landed for real — there is no standing xfail debt.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
   `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old inactive configs moved to `strategies/inactive/`.

@@ -40,8 +40,13 @@ Gap-heal loop (periodic, per-underlying):
 | BANKNIFTY  | 25        | 100         |
 | SENSEX     | 51        | 100         |
 
-Add an underlying by setting `WAREHOUSE_UNDERLYINGS='["NIFTY","BANKNIFTY"]'` — no code changes.
-Unsupported entries raise `ValueError` at startup before any Dhan connection is opened.
+Which underlyings get warehoused is **not a setting** (since `bias-input-completeness`,
+2026-07-12) — `WarehouseService(underlyings=...)` takes an explicit list, computed by
+`pdp.strategy.registry.strategy_underlyings(strategies_dir)` (the union of every loaded
+strategy YAML's `params.underlying`) in both `pdp/warehouse/__main__.py` and
+`scripts/backfill_market_bars.py`. Add an underlying by adding/editing a strategy YAML
+with `params.underlying: BANKNIFTY` — no `.env` edit, no code change. Unsupported entries
+still raise `ValueError` at startup before any Dhan connection is opened.
 
 ## MongoDB `option_bars` Schema
 
@@ -63,7 +68,6 @@ Unsupported entries raise `ValueError` at startup before any Dhan connection is 
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `WAREHOUSE_UNDERLYINGS` | `["NIFTY"]` | Underlyings to warehouse; any subset of registry |
 | `EXPIRY_CACHE_PATH` | `data/expiry/nifty_expiries.json` | NIFTY expiry calendar |
 | `BANKNIFTY_EXPIRY_CACHE_PATH` | `data/expiry/banknifty_expiries.json` | BANKNIFTY expiry calendar |
 | `SENSEX_EXPIRY_CACHE_PATH` | `data/expiry/sensex_expiries.json` | SENSEX expiry calendar |
