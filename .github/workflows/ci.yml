@@ -43,7 +43,9 @@ jobs:
       - name: Run migrations
         working-directory: backend
         env:
+          DATABASE_URL: postgresql+asyncpg://pdp:pdp@localhost:5432/pdp
           DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@localhost:5432/pdp
+          REDIS_URL: redis://localhost:6379/0
         run: uv run alembic upgrade head
 
       - name: Run tests
