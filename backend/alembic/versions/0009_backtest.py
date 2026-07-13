@@ -34,7 +34,6 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
     )
-    op.create_index("ix_backtest_runs_strategy_id", "backtest_runs", ["strategy_id"])
 
     op.create_table(
         "backtest_trades",
@@ -49,7 +48,6 @@ def upgrade() -> None:
         sa.Column("realized_pnl", sa.Numeric(14, 4), nullable=False),
         sa.Column("strategy_metadata", sa.JSON(), nullable=True),
     )
-    op.create_index("ix_backtest_trades_run_id", "backtest_trades", ["backtest_run_id"])
 
     op.create_table(
         "backtest_daily",
@@ -63,7 +61,6 @@ def upgrade() -> None:
         sa.Column("max_drawdown", sa.Numeric(14, 4), nullable=False),
         sa.Column("current_drawdown_pct", sa.Numeric(14, 4), nullable=False),
     )
-    op.create_index("ix_backtest_daily_run_id", "backtest_daily", ["backtest_run_id"])
 
 
 def downgrade() -> None:
