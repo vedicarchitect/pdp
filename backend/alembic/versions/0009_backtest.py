@@ -38,7 +38,7 @@ def upgrade() -> None:
     op.create_table(
         "backtest_trades",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("backtest_run_id", sa.Integer(), nullable=False, index=True),
+        sa.Column("backtest_run_id", sa.Integer(), nullable=False),
         sa.Column("symbol", sa.String(), nullable=False),
         sa.Column("quantity", sa.Integer(), nullable=False),
         sa.Column("entry_price", sa.Numeric(14, 4), nullable=False),
@@ -48,11 +48,12 @@ def upgrade() -> None:
         sa.Column("realized_pnl", sa.Numeric(14, 4), nullable=False),
         sa.Column("strategy_metadata", sa.JSON(), nullable=True),
     )
+    op.create_index("ix_backtest_trades_run_id", "backtest_trades", ["backtest_run_id"])
 
     op.create_table(
         "backtest_daily",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("backtest_run_id", sa.Integer(), nullable=False, index=True),
+        sa.Column("backtest_run_id", sa.Integer(), nullable=False),
         sa.Column("date", sa.DateTime(timezone=True), nullable=False),
         sa.Column("starting_equity", sa.Numeric(14, 4), nullable=False),
         sa.Column("ending_equity", sa.Numeric(14, 4), nullable=False),
@@ -61,6 +62,7 @@ def upgrade() -> None:
         sa.Column("max_drawdown", sa.Numeric(14, 4), nullable=False),
         sa.Column("current_drawdown_pct", sa.Numeric(14, 4), nullable=False),
     )
+    op.create_index("ix_backtest_daily_run_id", "backtest_daily", ["backtest_run_id"])
 
 
 def downgrade() -> None:
