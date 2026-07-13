@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from pdp.strategies.directional_strangle import DirectionalStrangle
+from pdp.strategy.readiness import ReadinessComponent, StrategyReadiness
 from pdp.strategy.routes import strangle_router
 
 
@@ -41,6 +42,9 @@ def mock_strategy():
         "n_open_momentum": 0,
     })
     strategy._activity = [{"event_type": "square_off", "ts": "2026-06-30T10:00:00"}]
+    strategy.check_readiness = AsyncMock(
+        return_value=StrategyReadiness.evaluate([ReadinessComponent("Indicators", "ok", "seeded")])
+    )
     return strategy
 
 

@@ -159,7 +159,7 @@ task app:run          # Flutter desktop
 # Operations
 task backtest:strangle -- --days 5    # Quick backtest
 task db:up            # Start containers
-task search:up        # OpenSearch (:9200 / :5601)
+task search:up        # OpenSearch (:9200 only; task search:dashboards:up for :5601)
 
 # For complete task list: task -l
 ```

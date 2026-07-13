@@ -31,6 +31,7 @@ def _make_service(eod_snapshot=True, mongo_db=None):
 
 def _make_pos_state():
     return PositionState(
+        strategy_id="test-strategy",
         security_id="13",
         exchange_segment="NSE_FNO",
         product="NRML",

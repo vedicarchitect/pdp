@@ -20,7 +20,15 @@ google_fonts (Inter).
    provider and never branches on data origin.
 4. **Backend config via dart-define.** Never hardcode hosts. `AppConfig` reads
    `API_BASE` / `WS_BASE` / `USE_MOCK`. REST under `/api/v1`, WS under `/ws`.
-5. **Verify after UI changes:** `flutter analyze && flutter test`.
+5. **Verify after UI changes:** `flutter analyze --fatal-infos && flutter test` (or `task app:test`
+   from repo root) — `analysis_options.yaml` alone does not fail the build on a new `info`-level
+   finding; `--fatal-infos` is the actual gate.
+6. **Test both sides of a breakpoint.** A widget whose layout branches on a width breakpoint
+   (`LayoutBuilder`, `MediaQuery.size.width`, etc.) gets a widget test at a viewport below the
+   breakpoint and one above it, each asserting `tester.takeException()` is null. A layout only ever
+   exercised at the developer's window size is not exercised — see `strategy_execution_tab_test.dart`
+   for the pattern (`tester.view.physicalSize` + `devicePixelRatio = 1.0` +
+   `addTearDown(tester.view.reset)`).
 
 ## Backend contract (this slice)
 

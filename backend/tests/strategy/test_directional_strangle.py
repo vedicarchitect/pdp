@@ -11,7 +11,7 @@ Tests cover:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -95,6 +95,13 @@ class _FakeOrders:
     async def cancel_open_entry_orders(self, security_id: str) -> list[int]:
         return []
 
+    async def get_positions(self) -> list:
+        return [
+            SimpleNamespace(security_id=sid, net_qty=p["net"], exchange_segment="NSE_FNO")
+            for sid, p in self._pos.items()
+            if p["net"] != 0
+        ]
+
     @property
     def strategy_id(self) -> str:
         return "directional_strangle"
@@ -120,12 +127,16 @@ async def _build_strategy(
     s._mode = "paper"
     s._slog = None
 
+
     # Fake indicators: return None for all (minimal; not under test here)
     ind = MagicMock()
     ind.ema.return_value = None
     ind.pivots.return_value = None
     ind.period_levels.return_value = None
     ind.vwap.return_value = None
+    # Add seeding summary mock to always return True for tests
+    ind.seeding_summary.return_value = {("ema", "5m"): True, ("pivots", "1w"): True}
+
 
     # Fake market: subscribe is no-op; ltp_with_age returns entry-level price
     market = MagicMock()
@@ -138,10 +149,30 @@ async def _build_strategy(
 
     orders = _FakeOrders()
 
-    # Fake session_maker: resolve_otm_option will be patched per test
+    # Fake session_maker: resolve_otm_option will be patched per test. The
+    # session supports the durable strategy_leg writes (add/commit/execute) the
+    # open/close paths now make; tests that assert on rehydrate override .scalars.
+    fake_session = MagicMock()
+    fake_session.add = MagicMock()
+    fake_session.commit = AsyncMock()
+    # Backs both the durable strategy_leg writes (result unused, fire-and-forget) and
+    # `lot_size_for_underlying`'s SELECT — resolve to the same lot_size the strategy was
+    # built with so on_bar's session-start resolution is a no-op for tests that don't
+    # care about it (see strangle-observability-gaps/lot-size-live-reconciliation).
+    _execute_result = MagicMock()
+    _execute_result.scalar_one_or_none.return_value = (params or {}).get("lot_size", 65)
+    fake_session.execute = AsyncMock(return_value=_execute_result)
+    _empty_scalars = MagicMock()
+    _empty_scalars.all.return_value = []
+    fake_session.scalars = AsyncMock(return_value=_empty_scalars)
+    fake_session.scalar = AsyncMock(return_value=None)
     session_maker = MagicMock()
-    session_maker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    session_maker.return_value.__aenter__ = AsyncMock(return_value=fake_session)
     session_maker.return_value.__aexit__ = AsyncMock(return_value=False)
+
+
+    fake_chain_hub = MagicMock()
+    fake_chain_hub.get_pcr.return_value = 1.0
 
     ctx = SimpleNamespace(
         params=params or {},
@@ -151,9 +182,12 @@ async def _build_strategy(
         market=market,
         orders=orders,
         session_maker=session_maker,
-        chain_hub=None,
+        chain_hub=fake_chain_hub,
         _event_service=None,
+        _session_maker=session_maker,
+        emit_critical=MagicMock(),
     )
+
 
     # Mirror StrategyContext.emit_critical: route to _event_service when wired.
     def _emit_critical(event_type, security_id, title, message, payload=None):
@@ -228,7 +262,12 @@ async def test_leg_status_after_bias_evaluated():
 @pytest.mark.asyncio
 async def test_roll_leg_fires_on_low_premium():
     """on_tick must call _roll_leg when ltp < roll_trigger_prem (default 20)."""
-    s = await _build_strategy(params={"roll_trigger_prem": 20.0, "roll_target_min_prem": 50.0})
+    # hedge_enabled=False: this test exercises the roll path only. With hedges on, the
+    # blanket resolve_otm_option stub would resolve the reopened short and its hedge to
+    # the same security_id, which the one-leg-per-security invariant correctly rejects.
+    s = await _build_strategy(
+        params={"roll_trigger_prem": 20.0, "roll_target_min_prem": 50.0, "hedge_enabled": False}
+    )
 
     # Manually inject an open short leg with high entry price
     fake_leg = OpenLeg(
@@ -239,7 +278,7 @@ async def test_roll_leg_fires_on_low_premium():
         lots=2,
         entry_price=Decimal("100"),
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
     s._ltp_cache["999"] = 100.0
     s._last_spot = 24000.0
 
@@ -283,7 +322,7 @@ async def test_take_profit_emits_exactly_one_terminal_event():
         lots=2,
         entry_price=Decimal("100"),
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
     s._ltp_cache["700"] = 100.0
     s.ctx.orders._pos["700"] = {"net": -130, "avg": Decimal("100"), "realized": Decimal("0")}
 
@@ -387,7 +426,7 @@ async def test_stop_all_emits_exactly_one_terminal_event():
         entry_price=Decimal("100"),
         half_stopped=True,
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
     s._ltp_cache["701"] = 100.0
     s.ctx.orders._pos["701"] = {"net": -65, "avg": Decimal("100"), "realized": Decimal("0")}
 
@@ -416,7 +455,7 @@ async def test_stop_half_then_stop_all_same_tick_does_not_double_close():
         lots=4,
         entry_price=Decimal("100"),
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
     s._ltp_cache["702"] = 100.0
     s.ctx.orders._pos["702"] = {"net": -260, "avg": Decimal("100"), "realized": Decimal("0")}
 
@@ -492,6 +531,7 @@ def test_strangle_status_route_registered():
     assert "/api/v1/strangle/legs" in paths
     assert "/api/v1/strangle/activity" in paths
     assert "/api/v1/strangle/stats" in paths
+    assert "/api/v1/strangle/readiness" in paths
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +577,41 @@ async def test_activity_newest_first_and_n_cap():
     assert events[0]["event_type"] == "test_event_9", "Newest event must be first"
 
 
+@pytest.mark.asyncio
+async def test_readiness_route_surfaces_check_readiness():
+    """GET /api/v1/strangle/readiness returns the same components check_readiness()
+    computes, so a dashboard can show *why* a strategy is blocked, not just that it
+    is — the platform-facing deliverable of strangle-observability-gaps."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from pdp.strategy.routes import strangle_router
+
+    app = FastAPI()
+    app.include_router(strangle_router)
+
+    s = await _build_strategy()
+    s._divergences.add("1001")  # force a "blocked" Reconciliation component
+
+    class _FakeState:
+        instance = s
+
+    class _FakeHost:
+        _running = {"directional_strangle": _FakeState()}
+
+    app.state.strategy_host = _FakeHost()
+
+    client = TestClient(app)
+    resp = client.get("/api/v1/strangle/readiness")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "blocked"
+    names = {c["name"] for c in body["components"]}
+    assert "Reconciliation" in names
+    reconciliation = next(c for c in body["components"] if c["name"] == "Reconciliation")
+    assert reconciliation["state"] == "blocked"
+
+
 # ---------------------------------------------------------------------------
 # R4 — Bucket-change hysteresis (bucket_confirm_bars)
 # ---------------------------------------------------------------------------
@@ -561,7 +636,7 @@ async def test_single_bar_bucket_flip_does_not_churn():
         lots=2,
         entry_price=Decimal("100"),
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
 
     # Mock score_bias to return MORE_BEAR for one bar.
     bear_result = BiasResult(
@@ -596,7 +671,11 @@ async def test_sustained_bucket_change_acts_after_n_bars():
     """N-bar sustained bucket change must close/reopen legs after confirmation."""
     from pdp.signals.bias import BiasBucket, BiasResult
 
-    s = await _build_strategy(params={"bucket_confirm_bars": 2})
+    # hedge_enabled=False: this test verifies the N-bar bucket-confirmation transition,
+    # not hedging. The bucket commit opens a PE and a CE short; the resolver stub below
+    # returns a distinct security_id per option type so the one-leg-per-security
+    # invariant is satisfied (a blanket single-instrument stub would collide).
+    s = await _build_strategy(params={"bucket_confirm_bars": 2, "hedge_enabled": False})
     s._current_bucket = "more_bull"
     fake_leg = OpenLeg(
         security_id="short_1",
@@ -606,7 +685,7 @@ async def test_sustained_bucket_change_acts_after_n_bars():
         lots=2,
         entry_price=Decimal("100"),
     )
-    s._short_legs.append(fake_leg)
+    s._add_leg(fake_leg)
     s.ctx.orders._p("short_1")["net"] = -2
 
     bear_result = BiasResult(
@@ -622,10 +701,13 @@ async def test_sustained_bucket_change_acts_after_n_bars():
     bar1 = _make_bar(ist_hhmm="10:20")
     bar2 = _make_bar(ist_hhmm="10:25")
 
-    new_inst = _make_instrument("pe_new", 24000.0, "PE")
+    def _resolve(*_a, **k):
+        ot = k.get("option_type", "CE")
+        return _make_instrument(f"{ot}_new", 24000.0, ot)
+
     with (
         patch("pdp.strategies.directional_strangle.score_bias", return_value=bear_result),
-        patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(return_value=new_inst)),
+        patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(side_effect=_resolve)),
     ):
         await s.on_bar(bar1)  # bar 1: pending_count = 1, no action
         assert s._current_bucket == "more_bull"
@@ -801,7 +883,7 @@ async def test_pcr_read_from_chain_hub_when_wired():
 async def test_pcr_is_none_when_chain_hub_not_wired():
     """Without a chain hub, PCR must stay None (vote is skipped by bias engine)."""
     s = await _build_strategy()
-    # ctx.chain_hub is None by default in _build_strategy
+    s.ctx.chain_hub = None  # _build_strategy wires a fake hub by default; unwire it here
 
     inputs = s._build_bias_inputs(24000.0)
 
@@ -820,7 +902,7 @@ async def test_close_unpriced_emits_critical_and_aborts():
     s.ctx._event_service = fake_es
 
     leg = OpenLeg(security_id="OPT1", segment="NFO", opt_type="CE", strike=24000.0, lots=1, entry_price=100.0)
-    s._short_legs = [leg]
+    s._add_leg(leg)
     s._ltp_cache["OPT1"] = 0.0  # unpriced
 
     await s._close_short_leg(leg, "take_profit")
@@ -837,7 +919,7 @@ async def test_close_unpriced_allowed_on_expiry():
     s.ctx._event_service = fake_es
 
     leg = OpenLeg(security_id="OPT1", segment="NFO", opt_type="CE", strike=24000.0, lots=1, entry_price=100.0)
-    s._short_legs = [leg]
+    s._add_leg(leg)
     s._ltp_cache["OPT1"] = 0.0  # unpriced
 
     await s._close_short_leg(leg, "expiry")
@@ -856,7 +938,8 @@ async def test_close_all_does_not_orphan_unpriced_leg():
 
     priced = OpenLeg(security_id="OPT_OK", segment="NFO", opt_type="CE", strike=24000.0, lots=1, entry_price=100.0)
     unpriced = OpenLeg(security_id="OPT_STUCK", segment="NFO", opt_type="PE", strike=23000.0, lots=1, entry_price=50.0)
-    s._short_legs = [priced, unpriced]
+    s._add_leg(priced)
+    s._add_leg(unpriced)
 
     s.ctx.orders._p("OPT_OK")["net"] = -65
     s.ctx.orders._p("OPT_STUCK")["net"] = -65
@@ -880,7 +963,7 @@ async def test_close_momentum_leg_self_prunes():
         security_id="OPT_MOM", segment="NFO", opt_type="CE", strike=24000.0,
         lots=1, entry_price=100.0, is_momentum=True,
     )
-    s._momentum_legs = [leg]
+    s._add_leg(leg)
     s.ctx.orders._p("OPT_MOM")["net"] = 65  # long position (momentum leg)
     s._ltp_cache["OPT_MOM"] = 120.0
 
@@ -911,10 +994,11 @@ async def test_rehydrate_sets_day_baseline_to_avoid_phantom_pnl():
         exchange_segment="NSE_FNO",
     )
     pos_result = SimpleNamespace(all=lambda: [fake_pos])
+    empty_legs_result = SimpleNamespace(all=lambda: [])
     inst_result = SimpleNamespace(all=lambda: [])
 
     session = s.ctx.session_maker.return_value.__aenter__.return_value
-    session.scalars = AsyncMock(side_effect=[pos_result, inst_result])
+    session.scalars = AsyncMock(side_effect=[pos_result, empty_legs_result, inst_result])
 
     await s._rehydrate_legs()
 
@@ -950,7 +1034,15 @@ async def test_open_short_refuses_when_already_at_cap():
     assert s.ctx.orders.calls == []  # no SELL placed — refused outright
     assert s._short_legs == []
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    # Assert the condition, not just the label: the cap-refusal payload names the
+    # existing/requested/cap lots — a close-path direction-mismatch alarm (the other
+    # condition this event name currently covers) would not carry these fields.
+    payload = call_args[4]
+    assert payload["existing_lots"] == 10
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -976,7 +1068,12 @@ async def test_open_short_clips_lots_to_stay_within_cap():
     assert len(s._short_legs) == 1
     assert s._short_legs[0].lots == 2
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 8
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -1000,7 +1097,12 @@ async def test_open_hedge_refuses_when_already_at_cap():
     assert s.ctx.orders.calls == []  # no BUY placed — refused outright
     assert s._hedge_legs == []
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 10
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
 
 
 @pytest.mark.asyncio
@@ -1022,4 +1124,118 @@ async def test_open_hedge_clips_lots_to_stay_within_cap():
     assert len(s._hedge_legs) == 1
     assert s._hedge_legs[0].lots == 2
     fake_es.emit_critical.assert_called_once()
-    assert fake_es.emit_critical.call_args[0][0].name == "POSITION_SIZE_CAPPED"
+    call_args = fake_es.emit_critical.call_args[0]
+    assert call_args[0].name == "POSITION_SIZE_CAPPED"
+    payload = call_args[4]
+    assert payload["existing_lots"] == 8
+    assert payload["requested_lots"] == 5
+    assert payload["cap"] == 10
+
+
+# ---------------------------------------------------------------------------
+# check_readiness() — strangle-observability-gaps tasks 1.3-1.9, 6.5
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_readiness_blocked_when_indicator_unseeded():
+    """An unseeded indicator on any watched timeframe blocks the Indicators
+    component, naming the family/period/timeframe in the reason (task 1.3)."""
+    s = await _build_strategy()
+    s._last_spot = 24000.0  # keep Bias component ok so only Indicators trips
+
+    def _seeding_summary(underlying, tf):
+        if tf == "1H":
+            return {("ema", "200"): False}
+        return {}
+
+    s.ctx.indicators.seeding_summary.side_effect = _seeding_summary
+
+    readiness = await s.check_readiness()
+
+    ind = next(c for c in readiness.components if c.name == "Indicators")
+    assert ind.state == "blocked"
+    assert "EMA(200)" in ind.reason
+    assert "1H" in ind.reason
+    assert readiness.state == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_check_readiness_all_ok_composite():
+    """Every component satisfied (paper mode bypasses broker sync, spot present,
+    indicators seeded, PCR not required) composes to an overall `ok` (task 1.5)."""
+    s = await _build_strategy()
+    s._last_spot = 24000.0
+
+    readiness = await s.check_readiness()
+
+    assert readiness.state == "ok"
+    assert all(c.state == "ok" for c in readiness.components)
+
+
+@pytest.mark.asyncio
+async def test_check_readiness_degraded_on_stale_broker_sync():
+    """A `BrokerFund.synced_at` older than 60s degrades the Broker Sync component
+    in live mode (paper mode always bypasses this check) (task 1.4)."""
+    s = await _build_strategy()
+    s._last_spot = 24000.0
+    s._mode = "live"
+
+    stale_row = SimpleNamespace(synced_at=datetime.now(UTC) - timedelta(seconds=120))
+    session = s.ctx.session_maker.return_value.__aenter__.return_value
+    session.scalar = AsyncMock(return_value=stale_row)
+
+    readiness = await s.check_readiness()
+
+    broker = next(c for c in readiness.components if c.name == "Broker Sync")
+    assert broker.state == "degraded"
+    assert readiness.state == "degraded"
+
+
+def _block_indicators(s: DirectionalStrangle) -> None:
+    """Force the Indicators readiness component to `blocked` regardless of spot
+    (on_bar sets `_last_spot` from the bar's own close before the readiness
+    check runs, so Bias can't be used to gate on_bar in a test)."""
+    s.ctx.indicators.seeding_summary.side_effect = lambda underlying, tf: (
+        {("ema", "200"): False} if tf == "1H" else {}
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_bar_refuses_entry_and_emits_once_while_blocked():
+    """`on_bar` refuses new entries while any readiness component is blocked and
+    emits `strategy_not_ready` exactly once on the ok->blocked transition, not
+    once per bar (tasks 1.6, 1.9, 6.2, 6.5)."""
+    s = await _build_strategy()
+    _block_indicators(s)
+
+    bar = _make_bar(security_id=s.sid)
+
+    await s.on_bar(bar)
+    await s.on_bar(bar)
+    await s.on_bar(bar)
+
+    not_ready_events = [
+        e for e in s._activity if e.get("event_type") == StrangleEventType.STRATEGY_NOT_READY
+    ]
+    assert len(not_ready_events) == 1, "must emit once on the transition, not once per bar"
+    # No bias evaluation ran (blocked before scoring) -> no bias_evaluated event.
+    assert not any(e.get("event_type") == StrangleEventType.BIAS_EVALUATED for e in s._activity)
+
+
+@pytest.mark.asyncio
+async def test_on_bar_resumes_entries_once_readiness_recovers():
+    """Once the blocking condition clears, the next bar resumes normal bias
+    evaluation (readiness recovers -> entries resume) (task 1.8)."""
+    s = await _build_strategy()
+    _block_indicators(s)
+
+    bar = _make_bar(security_id=s.sid)
+    await s.on_bar(bar)
+    assert not any(e.get("event_type") == StrangleEventType.BIAS_EVALUATED for e in s._activity)
+
+    s.ctx.indicators.seeding_summary.side_effect = None
+    s.ctx.indicators.seeding_summary.return_value = {("ema", "5m"): True, ("pivots", "1w"): True}
+    await s.on_bar(bar)
+
+    assert any(e.get("event_type") == StrangleEventType.BIAS_EVALUATED for e in s._activity)

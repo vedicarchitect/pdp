@@ -1,3 +1,9 @@
+# market-bars Specification
+
+## Purpose
+Tick-to-bar aggregation, MongoDB persistence, Redis fan-out, WebSocket delivery, and REST access for
+OHLCV market bars.
+## Requirements
 ### Requirement: OHLCV bar aggregation
 
 The system SHALL aggregate incoming ticks per `(security_id, timeframe)` into OHLCV bars where `timeframe` is one of `1m`, `5m`, `15m`, `30m`, or `1H`. Each bar's boundary SHALL be determined by wall-clock UTC truncation of the tick's `ltt` field. A `BarClosed` event SHALL be emitted synchronously on boundary crossing so downstream consumers (MongoDB writer, Redis stream, WS hub) receive it within the same event-loop iteration.
@@ -24,7 +30,7 @@ The system SHALL aggregate incoming ticks per `(security_id, timeframe)` into OH
 
 ### Requirement: Batched MongoDB bar persistence
 
-The system SHALL persist closed bars to the `market_bars` MongoDB time-series collection via batched motor `insert_many` writes. The flush trigger SHALL be whichever occurs first: 1 second elapsed since last flush, or 500 documents accumulated. Each document SHALL have `ts` set to the bar's `bar_time` (UTC datetime), `metadata` set to `{"security_id": <str>, "timeframe": <str>}`, and OHLCV/OI fields at the top level. `insert_many` SHALL use `ordered=False` so duplicate bars are skipped without aborting the batch; any write errors SHALL be logged as warnings with the error count.
+The system SHALL persist closed bars to the `market_bars` MongoDB time-series collection via batched motor writes. The flush trigger SHALL be whichever occurs first: 1 second elapsed since last flush, or 500 documents accumulated. Each document SHALL have `ts` set to the bar's `bar_time` (UTC datetime), `metadata` set to `{"security_id": <str>, "timeframe": <str>}`, and OHLCV/OI fields at the top level. A MongoDB time-series collection cannot carry a unique index, so `insert_many` alone cannot reject a duplicate `(ts, metadata)` write; each flush SHALL therefore delete any pre-existing document for every exact `(security_id, timeframe, ts)` bucket in the batch before inserting, and SHALL dedupe within the batch itself (last write wins) before that delete — this makes every flush idempotent regardless of why a bucket was enqueued twice. Any write errors SHALL be logged as warnings with the error count.
 
 #### Scenario: Bar document written within 2 seconds
 
@@ -36,10 +42,14 @@ The system SHALL persist closed bars to the `market_bars` MongoDB time-series co
 - **WHEN** the unwritten bar buffer exceeds 10,000 documents (MongoDB unavailable)
 - **THEN** the oldest documents are dropped and a `bar_writer_overflow` structured log is emitted
 
-#### Scenario: Duplicate bar silently skipped
+#### Scenario: Duplicate bucket write is prevented at the application level
 
-- **WHEN** `insert_many` is called with a batch containing a document whose `(ts, metadata)` already exists
-- **THEN** the duplicate is skipped, the rest of the batch is written, and a warning is logged with the error count
+- **WHEN** the same `(security_id, timeframe, ts)` bucket is enqueued twice — e.g. a network-delayed
+  tick reopens a bucket `BarSessionScheduler.flush_session()` already force-closed at 15:30 IST, and
+  the next boundary-crossing tick emits a second `BarClosed` for it — whether across two separate
+  flushes or within the same flush batch
+- **THEN** exactly one document survives in `market_bars` for that bucket: `BarWriter._flush()`
+  deletes any existing document for the bucket before inserting the batch's (deduped) copy
 
 ### Requirement: Redis stream bar fan-out
 
@@ -101,3 +111,4 @@ The system SHALL achieve a tick-to-WebSocket-out p99 latency of 50ms or less whe
 
 - **WHEN** `locust -f loadtest/locustfile.py --users 200 --spawn-rate 20` is run against a running instance
 - **THEN** the p99 of `(client_receive_ts - tick_server_ts)` across all clients is ≤ 50ms
+

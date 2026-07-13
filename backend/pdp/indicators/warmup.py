@@ -10,13 +10,15 @@ Priority:
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import structlog
 
-from pdp.market.bars import BarClosed
+from pdp.market.bars import BarClosed, bar_is_complete
 
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -29,6 +31,8 @@ log = structlog.get_logger()
 # NIFTY session start: 09:15 IST = 03:45 UTC
 _SESSION_START_UTC_H = 3
 _SESSION_START_UTC_M = 45
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 # Bars expected from a full prior trading session (375-minute NIFTY session).
 _TF_SESSION_BARS: dict[str, int] = {
@@ -44,22 +48,64 @@ _TF_SESSION_BARS: dict[str, int] = {
 }
 _DEFAULT_SESSION_BARS = 75
 
-# Calendar days to look back per timeframe so EMA(200) is fully seeded on startup
-# (Kite matrix parity). EMA(200) needs >=200 bars; sessions/calendar-day ~
-# _TF_SESSION_BARS. Windows sized to seed well beyond 200 bars (padding for
-# weekends/holidays).
-_TF_WARMUP_CALENDAR_DAYS: dict[str, int] = {
-    "1m": 2,
-    "5m": 10,  # 75 bars/session x ~7 sessions >> 200
-    "15m": 40,  # 25 bars/session x ~28 sessions >> 200
-    "25m": 40,
-    "30m": 45,  # 13 bars/session x ~32 sessions >> 200
-    "1H": 90,  # 7 bars/session x ~64 sessions >> 200
-    "1h": 90,
-    "1D": 400,  # 1 bar/session x ~280 sessions >> 200
-    "1w": 700,  # ~100 weeks; enough for weekly EMA200 + pivot seed
-}
-_DEFAULT_WARMUP_CALENDAR_DAYS = 1
+# Period-like keys scanned across every configured indicator family to derive
+# the warmup depth. Deliberately broad (covers ema/rsi/macd/vwma/elder_impulse)
+# rather than family-specific, so a new family's period configuration is picked
+# up without touching this module.
+_PERIOD_KEYS: frozenset[str] = frozenset(
+    {
+        "periods",
+        "period",
+        "ma_period",
+        "fast",
+        "slow",
+        "signal",
+        "ema_period",
+        "macd_fast",
+        "macd_slow",
+        "macd_signal",
+    }
+)
+
+
+def required_bars(indicators: list[dict[str, Any]]) -> int:
+    """Bars needed to fully converge the largest configured period.
+
+    ``5 x max(period)`` across every period-like key in every configured
+    indicator family (merged over registry defaults), floored at 200 bars so
+    a config with only short periods still gets a comfortably-converged
+    tracker. Replaces the hand-maintained ``_TF_WARMUP_CALENDAR_DAYS`` table —
+    widening a config's largest period widens this automatically.
+    """
+    from pdp.indicators.registry import family_defaults
+
+    max_period = 0
+    for cfg in indicators:
+        family = cfg.get("family") if isinstance(cfg, dict) else None
+        if not family:
+            continue
+        merged = {**family_defaults(family), **{k: v for k, v in cfg.items() if k != "family"}}
+        for key in _PERIOD_KEYS:
+            val = merged.get(key)
+            if isinstance(val, int):
+                max_period = max(max_period, val)
+            elif isinstance(val, list):
+                max_period = max([max_period, *(v for v in val if isinstance(v, int))])
+    return max(200, 5 * max_period)
+
+
+def lookback_days(timeframe: str, bars_needed: int) -> int:
+    """Calendar-day lookback so ``bars_needed`` bars are covered, with a
+    weekend/holiday pad (``x 7 / 5``, rounded up).
+
+    Raises ``ValueError`` on a timeframe absent from ``_TF_SESSION_BARS``
+    rather than silently defaulting to a one-day lookback.
+    """
+    session_bars = _TF_SESSION_BARS.get(timeframe)
+    if session_bars is None:
+        raise ValueError(timeframe)
+    return math.ceil(bars_needed / session_bars * 7 / 5)
+
 
 # Timeframe label → Dhan interval integer
 _TF_TO_DHAN_INTERVAL: dict[str, int] = {
@@ -83,7 +129,7 @@ _SEGMENT_TO_INSTRUMENT: dict[str, str] = {
 
 def _prior_trading_day(holiday_set: set[date], *, _today: date | None = None) -> date:
     """Return the most recent prior trading day (IST calendar), walking back over weekends/holidays."""
-    today = _today or (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    today = _today or datetime.now(_IST).date()
     d = today - timedelta(days=1)
     while d.weekday() >= 5 or d in holiday_set:
         d -= timedelta(days=1)
@@ -106,10 +152,20 @@ async def warm_up_indicator_engine(
     for entry in watchlist:
         sid = str(entry["security_id"])
         segment = str(entry["exchange_segment"])
+        indicators = entry.get("indicators", [])
+        req = required_bars(indicators)
         for tf in entry.get("timeframes", []):
-            # Per-timeframe lookback: slower TFs (1H/15m) need more history for EMA(50).
-            lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(tf, _DEFAULT_WARMUP_CALENDAR_DAYS)
-            warmup_from = prior_day - timedelta(days=lookback_days - 1)
+            try:
+                days_back = lookback_days(tf, req)
+            except ValueError as exc:
+                log.warning(
+                    "indicator_warmup_failed",
+                    security_id=sid,
+                    timeframe=tf,
+                    exc=str(exc),
+                )
+                continue
+            warmup_from = prior_day - timedelta(days=days_back - 1)
             since = datetime(
                 warmup_from.year,
                 warmup_from.month,
@@ -119,7 +175,9 @@ async def warm_up_indicator_engine(
                 tzinfo=UTC,
             )
             try:
-                await _warm_one(engine, mongo_db, settings, sid, segment, tf, since, warmup_from, prior_day)
+                await _warm_one(
+                    engine, mongo_db, settings, sid, segment, tf, since, warmup_from, prior_day, indicators, req
+                )
             except Exception as exc:
                 log.warning(
                     "indicator_warmup_failed",
@@ -139,15 +197,14 @@ async def _warm_one(
     since: datetime,
     warmup_from: date,
     prior_day: date,
+    indicators: list[dict[str, Any]],
+    target_bars: int,
 ) -> None:
     col = mongo_db["market_bars"]
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
 
-    # Minimum bars expected across the full lookback window (not just one session).
-    # Demand at least 200 bars so EMA(200) fully seeds (Kite parity).
-    lookback_days = _TF_WARMUP_CALENDAR_DAYS.get(timeframe, _DEFAULT_WARMUP_CALENDAR_DAYS)
-    session_bars = _TF_SESSION_BARS.get(timeframe, _DEFAULT_SESSION_BARS)
-    target_bars = max(200, session_bars * max(1, lookback_days // 2))
+    # target_bars is the depth required by the configured indicator families
+    # (derive_bars x max period, floor 200) — see required_bars().
     if len(bars) < target_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
@@ -179,6 +236,25 @@ async def _warm_one(
     if not engine._suite_trackers.get((security_id, timeframe)):
         log.debug("indicator_warmup_suite_not_configured", security_id=security_id, timeframe=timeframe)
 
+    # One indicator_warmup_short per (sid, tf, family) that didn't reach its own
+    # required depth — a family with a smaller max period may already be fully
+    # converged even when the entry's overall target_bars (driven by the largest
+    # period across all families) was not met.
+    for cfg in indicators:
+        family = cfg.get("family") if isinstance(cfg, dict) else None
+        if not family:
+            continue
+        family_needed = required_bars([cfg])
+        if len(bars) < family_needed:
+            log.warning(
+                "indicator_warmup_short",
+                security_id=security_id,
+                timeframe=timeframe,
+                family=family,
+                bars_found=len(bars),
+                bars_needed=family_needed,
+            )
+
     # Seed period_levels (PWH/PWL/PMH/PML) from the trailing ~40 days that predate
     # the prior-session bars below, so week/month boundaries are correct on day one.
     history = await _fetch_history_before(col, security_id, timeframe, since, days=40)
@@ -187,20 +263,30 @@ async def _warm_one(
 
     fed = engine.seed_from_bars(bars)
 
-    # Derive prior-session HLC for PivotTrackers in the suite bundle.
-    # Use only bars from the most recent prior trading day to get its HLC, not the
-    # entire extended lookback window (which would give a multi-day high/low).
+    # Derive prior-period HLC for PivotTrackers in the suite bundle.
     if bars:
-        prior_day_start = datetime(
-            prior_day.year,
-            prior_day.month,
-            prior_day.day,
-            _SESSION_START_UTC_H,
-            _SESSION_START_UTC_M,
-            tzinfo=UTC,
-        )
-        prior_session_bars = [b for b in bars if b.bar_time >= prior_day_start]
-        pivot_bars = prior_session_bars if prior_session_bars else bars[-10:]
+        if _TF_SESSION_BARS.get(timeframe) == 1:
+            # One bar IS one whole period (1D: one bar/day, 1w: one bar/ISO week) --
+            # the prior period is simply the most recently completed bar itself.
+            # The day-boundary filter below only makes sense for sub-daily bars: a
+            # Monday-anchored 1w bar's timestamp is never >= "yesterday", so it fell
+            # through to the bars[-10:] fallback and wrongly aggregated up to 10
+            # prior weeks' high/low together instead of using the single most
+            # recent completed week's own HLC.
+            pivot_bars = [bars[-1]]
+        else:
+            prior_day_start = datetime(
+                prior_day.year,
+                prior_day.month,
+                prior_day.day,
+                _SESSION_START_UTC_H,
+                _SESSION_START_UTC_M,
+                tzinfo=UTC,
+            )
+            # Use only bars from the most recent prior trading day to get its HLC, not
+            # the entire extended lookback window (which would give a multi-day range).
+            prior_session_bars = [b for b in bars if b.bar_time >= prior_day_start]
+            pivot_bars = prior_session_bars if prior_session_bars else bars[-10:]
         prior_h = max(float(b.high) for b in pivot_bars)
         prior_l = min(float(b.low) for b in pivot_bars)
         prior_c = float(pivot_bars[-1].close)
@@ -345,8 +431,16 @@ def _fetch_from_dhan(
     segment: str,
     timeframe: str,
     prior_day: date | None = None,
+    *,
+    now: datetime | None = None,
 ) -> list[BarClosed]:
-    """Blocking — call via run_in_executor."""
+    """Blocking — call via run_in_executor.
+
+    `now` is injectable for tests; production calls always fall through to the
+    real wall clock. Any bar whose period has not fully elapsed as of `now` is
+    dropped before it can be persisted or seed an indicator — see
+    `dhan-same-day-data`.
+    """
     from dhanhq import dhanhq as DhanClient  # noqa: N812
 
     is_daily = timeframe in ("1D", "1w", "1M")
@@ -356,7 +450,8 @@ def _fetch_from_dhan(
         return []
 
     instrument = _SEGMENT_TO_INSTRUMENT.get(segment, "EQUITY")
-    today_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    effective_now = now if now is not None else datetime.now(UTC)
+    today_ist = effective_now.astimezone(_IST).date()
     from_d = prior_day if prior_day is not None else today_ist - timedelta(days=1)
     from_date = from_d.strftime("%Y-%m-%d")
     to_date = today_ist.strftime("%Y-%m-%d")
@@ -425,7 +520,17 @@ def _fetch_from_dhan(
             continue
 
     bars.sort(key=lambda b: b.bar_time)
-    return bars
+
+    complete_bars = [b for b in bars if bar_is_complete(b.bar_time, timeframe, effective_now)]
+    dropped = len(bars) - len(complete_bars)
+    if dropped:
+        log.info(
+            "indicator_warmup_incomplete_bar_dropped",
+            security_id=security_id,
+            timeframe=timeframe,
+            count=dropped,
+        )
+    return complete_bars
 
 
 # ── Monitor indicator-matrix bootstrap ─────────────────────────────────────────
@@ -493,7 +598,14 @@ async def configure_matrix_suites(
     for sid in _MATRIX_INDEX_SIDS.values():
         for tf in _MATRIX_TFS:
             engine.configure_suite(sid, tf, _MATRIX_SPOT_INDICATORS)
-        entries.append({"security_id": sid, "exchange_segment": "IDX_I", "timeframes": list(_MATRIX_TFS)})
+        entries.append(
+            {
+                "security_id": sid,
+                "exchange_segment": "IDX_I",
+                "timeframes": list(_MATRIX_TFS),
+                "indicators": _MATRIX_SPOT_INDICATORS,
+            }
+        )
 
     # Futures volume indicators — resolve the front-month FUTIDX per index.
     fut_map: dict[str, str] = {}
@@ -509,7 +621,12 @@ async def configure_matrix_suites(
         for tf in _MATRIX_TFS:
             engine.configure_suite(fut_sid, tf, _MATRIX_FUT_INDICATORS)
         entries.append(
-            {"security_id": fut_sid, "exchange_segment": "NSE_FNO", "timeframes": list(_MATRIX_TFS)}
+            {
+                "security_id": fut_sid,
+                "exchange_segment": "NSE_FNO",
+                "timeframes": list(_MATRIX_TFS),
+                "indicators": _MATRIX_FUT_INDICATORS,
+            }
         )
 
     engine.matrix_futures_sids = fut_map  # type: ignore[attr-defined]

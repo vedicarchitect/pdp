@@ -61,5 +61,11 @@ def build_tracker(family: str, params: dict[str, Any] | None = None) -> Any:
     return cls(**merged)
 
 
+def family_defaults(family: str) -> dict[str, Any]:
+    """Default constructor kwargs for a family, or ``{}`` for an unknown one."""
+    _, defaults = _REGISTRY.get(family, (None, {}))
+    return dict(defaults)
+
+
 def available_families() -> list[str]:
     return list(_REGISTRY)

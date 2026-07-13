@@ -73,12 +73,36 @@ class BarWriter:
     async def _flush(self) -> None:
         from pymongo.errors import BulkWriteError
 
-        batch: list[dict] = []
-        while self._buffer and len(batch) < _FLUSH_BATCH:
-            batch.append(self._buffer.popleft())
-        if not batch:
+        raw_batch: list[dict] = []
+        while self._buffer and len(raw_batch) < _FLUSH_BATCH:
+            raw_batch.append(self._buffer.popleft())
+        if not raw_batch:
             return
+        # Dedup within this batch first (last write wins) — two enqueue() calls for the
+        # same bucket before a flush must not both survive into insert_many.
+        by_key: dict[tuple, dict] = {}
+        for doc in raw_batch:
+            key = (doc["metadata"]["security_id"], doc["metadata"]["timeframe"], doc["ts"])
+            by_key[key] = doc
+        batch = list(by_key.values())
         try:
+            # Delete-then-insert per exact (security_id, timeframe, ts) bucket, mirroring
+            # rebuild_market_bars.py — a timeseries collection can't carry a unique index, and
+            # `insert_many` alone duplicates a bucket that's enqueued twice (a late tick can
+            # reopen a builder BarSessionScheduler.flush_session() already force-closed, or a
+            # process restart can re-aggregate an overlapping tick window). Idempotent: safe to
+            # run even if this exact batch was already flushed once.
+            dedup_query = {
+                "$or": [
+                    {
+                        "ts": doc["ts"],
+                        "metadata.security_id": doc["metadata"]["security_id"],
+                        "metadata.timeframe": doc["metadata"]["timeframe"],
+                    }
+                    for doc in batch
+                ]
+            }
+            await self._col.delete_many(dedup_query)
             await self._col.insert_many(batch, ordered=False)
             log.debug("bar_writer_flushed", rows=len(batch))
         except BulkWriteError as exc:

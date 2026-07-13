@@ -86,7 +86,6 @@ class _PositionsBody extends ConsumerWidget {
     final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
     final trades = tradesAsync.asData?.value;
 
-    final positions = _PositionsColumn(snap: snap, trades: trades);
     final indicators = IndicatorPanel(indicators: snap.indicators);
 
     return LayoutBuilder(
@@ -101,7 +100,10 @@ class _PositionsBody extends ConsumerWidget {
                   ? Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(flex: 3, child: positions),
+                        Expanded(
+                          flex: 3,
+                          child: _PositionsColumn(snap: snap, trades: trades),
+                        ),
                         const VerticalDivider(width: 1),
                         SizedBox(width: 440, child: indicators),
                       ],
@@ -109,7 +111,7 @@ class _PositionsBody extends ConsumerWidget {
                   : ListView(
                       padding: EdgeInsets.zero,
                       children: [
-                        positions,
+                        _PositionsColumn(snap: snap, trades: trades, nested: true),
                         const Divider(),
                         SizedBox(height: 360, child: indicators),
                       ],
@@ -127,7 +129,17 @@ class _PositionsBody extends ConsumerWidget {
 class _PositionsColumn extends StatelessWidget {
   final MonitorSnapshot snap;
   final StrangleTrades? trades;
-  const _PositionsColumn({required this.snap, required this.trades});
+
+  /// Set when this sits inside the narrow layout's outer `ListView`, which
+  /// supplies no height bound. Shrink-wrapping keeps the outer list the only
+  /// scrollable; the section count is small so the cost is negligible.
+  final bool nested;
+
+  const _PositionsColumn({
+    required this.snap,
+    required this.trades,
+    this.nested = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -142,6 +154,8 @@ class _PositionsColumn extends StatelessWidget {
       });
 
     return ListView(
+      shrinkWrap: nested,
+      physics: nested ? const NeverScrollableScrollPhysics() : null,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
         _OverallStatusBar(snap: snap),
@@ -177,11 +191,24 @@ class _OverallStatusBar extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
-            _BucketChip(bucket: bkt),
-            const SizedBox(width: 8),
-            if (snap.score != null)
-              Text('Score: ${snap.score!.toStringAsFixed(2)}',
-                  style: Theme.of(context).textTheme.bodySmall),
+            // Scrolls horizontally rather than overflowing on a narrow phone —
+            // this cluster grows with score/readiness and Day P&L must stay visible.
+            Flexible(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _BucketChip(bucket: bkt),
+                    const SizedBox(width: 8),
+                    if (snap.score != null)
+                      Text('Score: ${snap.score!.toStringAsFixed(2)}',
+                          style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(width: 8),
+                    _ReadinessChip(readiness: snap.readiness),
+                  ],
+                ),
+              ),
+            ),
             const Spacer(),
             Text('Day P&L  ', style: Theme.of(context).textTheme.bodySmall),
             PnlText(snap.dayPnl,
@@ -367,19 +394,25 @@ class _IndexPriceRow extends StatelessWidget {
           return Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text('$name  ',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: cs.primary)),
-                  Text(
-                    price != null ? price.spot.toStringAsFixed(2) : '--',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
+              // Three fixed-share cells: on a phone "BANKNIFTY 52100.00" is
+              // wider than its third of the strip. Scale rather than ellipsize
+              // so the index name stays readable.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('$name  ',
+                        style: Theme.of(context)
+                            .textTheme
+                            .labelMedium
+                            ?.copyWith(color: cs.primary)),
+                    Text(
+                      price != null ? price.spot.toStringAsFixed(2) : '--',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
               ),
             ),
           );
@@ -405,6 +438,57 @@ class _BucketChip extends StatelessWidget {
       ),
       child: Text(bucket,
           style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+/// Strategy readiness gate (`ok`/`degraded`/`blocked`, composed from
+/// Reconciliation/Broker Sync/Indicators/Chain/Bias components — see
+/// `GET /api/v1/strangle/readiness` and `pdp/events/CLAUDE.md`).
+///
+/// `ok` renders nothing (unobtrusive); `degraded`/`blocked` render a chip whose
+/// tooltip lists every non-ok component + reason, per-underlying.
+class _ReadinessChip extends StatelessWidget {
+  final MonitorReadiness readiness;
+  const _ReadinessChip({required this.readiness});
+
+  @override
+  Widget build(BuildContext context) {
+    if (readiness.state == 'ok') return const SizedBox.shrink();
+
+    final blocked = readiness.state == 'blocked';
+    final color = blocked ? AppColors.loss : Colors.amber;
+    final label = blocked ? 'BLOCKED' : 'DEGRADED';
+
+    final reasons = <String>[];
+    for (final entry in readiness.byUnderlying.entries) {
+      for (final c in entry.value.components) {
+        if (c.state != 'ok') {
+          reasons.add('${entry.key} · ${c.name}: ${c.reason ?? c.state}');
+        }
+      }
+    }
+    final tooltipMsg = reasons.isEmpty ? 'Readiness $label' : reasons.join('\n');
+
+    return Tooltip(
+      message: tooltipMsg,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: blocked ? 0.18 : 0.12),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: color.withValues(alpha: 0.6)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(blocked ? Icons.block : Icons.warning_amber_rounded, size: 12, color: color),
+            const SizedBox(width: 3),
+            Text(label,
+                style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w700)),
+          ],
+        ),
+      ),
     );
   }
 }

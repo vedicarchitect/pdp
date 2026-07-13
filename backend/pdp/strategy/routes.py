@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,7 @@ from pdp.strategy.schemas import (
     StranglePnlOut,
     StrangleTradesOut,
     StrangleMonitorOut,
+    StrangleReadinessOut,
     LevelsResponseOut,
 )
 
@@ -184,6 +186,24 @@ async def strangle_status(
     return StrangleStatusOut(**data)
 
 
+@strangle_router.get("/readiness", response_model=StrangleReadinessOut)
+async def strangle_readiness(
+    request: Request,
+    strategy_id: str | None = Query(default=None),
+) -> StrangleReadinessOut:
+    """Live readiness gate — surfaces the same checks that block new entries in
+    `state()` (reconciliation, broker sync, indicators, chain, bias inputs), so a
+    dashboard can show *why* a strategy isn't trading, not just that it isn't."""
+    strategy = _get_strangle(request, strategy_id)
+    readiness = await strategy.check_readiness()
+    return StrangleReadinessOut(
+        state=readiness.state,
+        components=[
+            {"name": c.name, "state": c.state, "reason": c.reason} for c in readiness.components
+        ],
+    )
+
+
 @strangle_router.get("/legs", response_model=StrangleLegsOut)
 async def strangle_legs(
     request: Request,
@@ -313,7 +333,6 @@ async def strangle_trades(
     from datetime import date as date_type
 
     from pdp.instruments.symbols import symbol_for
-    from pdp.mongo.collections import get_events_collection
     from pdp.strategies.directional_strangle import DirectionalStrangle
     from pdp.strategy.trade_ledger import (
         compute_totals,
@@ -324,15 +343,6 @@ async def strangle_trades(
 
     query_date = parse_ist_date(date)
 
-    # Resolve Mongo collection from app state (graceful None if not available)
-    mongo_col = None
-    try:
-        mongo_db = getattr(request.app.state, "mongo_db", None)
-        if mongo_db is not None:
-            mongo_col = get_events_collection(mongo_db)
-    except Exception:
-        pass
-
     host: StrategyHost = request.app.state.strategy_host
     strategies = [
         (sid, state.instance)
@@ -340,9 +350,10 @@ async def strangle_trades(
         if isinstance(state.instance, DirectionalStrangle) and (strategy_id is None or sid == strategy_id)
     ]
 
+    mongo_db = getattr(request.app.state, "mongo_db", None)
     all_rows: list[dict[str, Any]] = []
     for sid, strategy in strategies:
-        events = await read_durable_day_events(sid, query_date, mongo_collection=mongo_col)
+        events = await read_durable_day_events(sid, query_date, mongo_db=mongo_db)
         rows = pair_trades(events)
         # Lazy symbol resolution for rows with symbol=null
         for row in rows:
@@ -465,8 +476,8 @@ async def _get_greeks_for_strike(
     return result
 
 
-def _build_indicator_cell(engine: Any, sid: str, tf: str, fut_sid: str | None = None) -> dict[str, Any]:
-    """Build one indicator cell for (sid, tf).
+def _build_indicator_cell_inproc(engine: Any, sid: str, tf: str, fut_sid: str | None = None) -> dict[str, Any]:
+    """Build one indicator cell for (sid, tf) from the in-process ``IndicatorEngine``.
 
     Price-based indicators (EMA/ST/PSAR/RSI) are read from the spot ``sid``; the
     volume-anchored VWAP/VWMA are read from ``fut_sid`` (the index futures contract)
@@ -512,6 +523,85 @@ def _build_indicator_cell(engine: Any, sid: str, tf: str, fut_sid: str | None = 
         cell["vwma"] = vwma_state.vwma
 
     return cell
+
+
+async def _build_indicator_cell_from_redis(redis: Any, sid: str, tf: str, fut_sid: str | None = None) -> dict[str, Any]:
+    """Build one indicator cell for (sid, tf) from the ``ind:<sid>:<tf>`` / ``st:<sid>:<tf>``
+    Redis snapshots published by the engine process (``market/router.py`` on bar close).
+
+    Used when no in-process ``IndicatorEngine`` is attached (``pdp-api`` role, decoupled from
+    ``pdp-engine``) — see ``api-worker-decoupling`` requirement "Engine-published state
+    snapshots". Field layout mirrors ``_build_indicator_cell_inproc`` exactly.
+    """
+    cell: dict[str, Any] = {}
+    if redis is None:
+        return cell
+
+    vwap_src = fut_sid or sid
+    try:
+        ind_raw = await redis.get(f"ind:{sid}:{tf}")
+        st_raw = await redis.get(f"st:{sid}:{tf}")
+        vwap_raw = ind_raw if vwap_src == sid else await redis.get(f"ind:{vwap_src}:{tf}")
+    except Exception as exc:
+        log.warning("indicator_redis_snapshot_read_failed", sid=sid, tf=tf, exc=str(exc))
+        return cell
+
+    if ind_raw:
+        snap = json.loads(ind_raw)
+        ema = snap.get("ema") or {}
+        if ema:
+            cell["ema9"] = ema.get("9")
+            cell["ema20"] = ema.get("20")
+            cell["ema50"] = ema.get("50")
+            cell["ema100"] = ema.get("100")
+            cell["ema200"] = ema.get("200")
+        psar = snap.get("psar")
+        if psar:
+            cell["psar"] = psar.get("sar")
+        if "rsi" in snap:
+            cell["rsi"] = snap.get("rsi")
+        if "rsi_ma" in snap:
+            cell["rsi_ma"] = snap.get("rsi_ma")
+
+    if st_raw:
+        st = json.loads(st_raw)
+        if st.get("value") is not None:
+            cell["st_val"] = float(st["value"])
+        cell["st_dir"] = "up" if st.get("direction") == 1 else "down"
+
+    if vwap_raw:
+        vwap_snap = json.loads(vwap_raw)
+        if "vwap" in vwap_snap:
+            cell["vwap"] = vwap_snap.get("vwap")
+        if "vwma" in vwap_snap:
+            cell["vwma"] = vwap_snap.get("vwma")
+
+    return cell
+
+
+async def _build_indicator_cell(
+    engine: Any, redis: Any, sid: str, tf: str, fut_sid: str | None = None
+) -> dict[str, Any]:
+    """Build one indicator cell, preferring the in-process engine (zero-latency, ``all``/
+    ``engine`` role) and falling back to the Redis snapshot when no engine is attached
+    (``pdp-api`` role — see api-worker-decoupling's "Engine-published state snapshots").
+    """
+    if engine is not None:
+        return _build_indicator_cell_inproc(engine, sid, tf, fut_sid)
+    return await _build_indicator_cell_from_redis(redis, sid, tf, fut_sid)
+
+
+async def _get_matrix_futures_sids(engine: Any, redis: Any) -> dict[str, str]:
+    """Index sid → front-month futures sid, from the in-process engine or its Redis mirror
+    (``matrix:futures_sids``, published once at startup by ``FeedEngineGroup``)."""
+    in_proc = getattr(engine, "matrix_futures_sids", None)
+    if in_proc:
+        return in_proc
+    try:
+        raw = await redis.get("matrix:futures_sids")
+    except Exception:
+        return {}
+    return json.loads(raw) if raw else {}
 
 
 async def _build_levels_cells(store: Any, sid: str, session_date: date) -> dict[str, Any]:
@@ -599,11 +689,12 @@ async def strangle_monitor(
     )
 
     states = [await s.state() for s in strategies]
+    readinesses = [await s.check_readiness() for s in strategies]
 
     # ── Indices spot + future LTPs ──────────────────────────────────────────
     # Futures SID comes from the matrix's startup-resolved map (configure_matrix_suites),
     # not the strategy (bias-scoring dropped its own futures-SID path in backtest-paper-parity).
-    matrix_fut_sids: dict[str, str] = getattr(engine, "matrix_futures_sids", {}) or {}
+    matrix_fut_sids: dict[str, str] = await _get_matrix_futures_sids(engine, redis)
     indices: dict[str, dict[str, Any]] = {}
     for idx_name, idx_sid in _INDEX_SIDS.items():
         spot_ltp = await _get_ltp_redis(redis, idx_sid)
@@ -671,6 +762,21 @@ async def strangle_monitor(
         for und, legs in legs_by_underlying.items()
     ]
 
+    # ── Readiness — per-underlying + worst-case overall ─────────────────────
+    _state_rank = {"ok": 0, "degraded": 1, "blocked": 2}
+    readiness_by_underlying = {
+        strategies[i].underlying: {
+            "state": r.state,
+            "components": [
+                {"name": c.name, "state": c.state, "reason": c.reason} for c in r.components
+            ],
+        }
+        for i, r in enumerate(readinesses)
+    }
+    overall_readiness_state = max(
+        (r.state for r in readinesses), key=lambda s: _state_rank[s], default="ok"
+    )
+
     # ── Overall totals ──────────────────────────────────────────────────────
     totals = {
         "day_realized": sum(s.get("day_realized", 0.0) for s in states),
@@ -686,6 +792,7 @@ async def strangle_monitor(
         "n_open_hedges": sum(s.get("n_open_hedges", 0) for s in states),
         "n_open_momentum": sum(s.get("n_open_momentum", 0) for s in states),
         "by_underlying": underlying_status,
+        "readiness": {"state": overall_readiness_state, "by_underlying": readiness_by_underlying},
     }
 
     # ── Recent events (newest-first, closed legs + exit reasons) ───────────
@@ -712,7 +819,7 @@ async def strangle_monitor(
     )
     session_date_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
 
-    fut_sids: dict[str, str] = getattr(engine, "matrix_futures_sids", {}) or {}
+    fut_sids: dict[str, str] = await _get_matrix_futures_sids(engine, redis)
 
     indicators: dict[str, Any] = {}
     for sid in matrix_sids:
@@ -720,7 +827,7 @@ async def strangle_monitor(
         tf_data: dict[str, Any] = {}
         fut_sid = fut_sids.get(sid)
         for tf in _MATRIX_TFS:
-            tf_data[tf] = _build_indicator_cell(engine, sid, tf, fut_sid)
+            tf_data[tf] = await _build_indicator_cell(engine, redis, sid, tf, fut_sid)
         sid_data["tf"] = tf_data
         if levels_store is not None:
             sid_data.update(await _build_levels_cells(levels_store, sid, session_date_ist))

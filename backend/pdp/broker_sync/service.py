@@ -1,8 +1,18 @@
-"""BrokerSyncService — orchestrates the daily Dhan account archival.
+"""BrokerSyncService — Dhan account state refresh + daily archival.
 
-Flow (``run_daily``): create a run row → for each report fetch + archive to Mongo (per-report
-errors are caught so one bad report doesn't abort the rest) → replace the PG current-state
-mirror → reconcile broker positions vs the internal ledger → finalize the run row.
+Two entry points, deliberately separate:
+
+* ``refresh_state`` — the *intraday* path. Fetches holdings/positions/funds, replaces the PG
+  current-state mirror, re-subscribes the feed. No Mongo snapshot, no run row, no reconcile.
+  Cheap enough to call every few minutes.
+* ``run_daily`` — the *end-of-day* path. Creates a run row → fetches and archives every report to
+  Mongo (per-report errors are caught so one bad report doesn't abort the rest) → replaces the PG
+  mirror → reconciles broker positions vs the internal ledger → finalizes the run row.
+
+Reconciliation compares the internal ledger against the broker, so it is meaningful only when
+orders actually reach the broker. In paper mode it is skipped (``recon.skipped == "paper_mode"``)
+rather than emitting a mismatch for every simulated position. It is read-only in all modes.
+
 Credential-less runs are recorded ``skipped`` and never raise.
 """
 
@@ -12,6 +22,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import delete, select
@@ -35,9 +46,20 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
+_IST = ZoneInfo("Asia/Kolkata")
+
 # (report_type, source method name) for the per-day archival sweep.
 _STATE_REPORTS = (("holdings", "fetch_holdings"), ("positions", "fetch_positions"), ("funds", "fetch_funds"))
 _TXN_REPORTS = (("orders", "fetch_orders"), ("trades", "fetch_trades"))
+
+# Triggers that satisfy the EOD idempotency guard. Intraday activity must never pre-empt the
+# scheduled archival, so anything else recorded for a date leaves `already_succeeded` false.
+_ARCHIVAL_TRIGGERS = (SyncTrigger.AUTO, SyncTrigger.MANUAL)
+
+
+def ist_today() -> str:
+    """Today's Indian trading date as ``YYYY-MM-DD``."""
+    return datetime.now(_IST).strftime("%Y-%m-%d")
 
 
 def _get(row: dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -70,12 +92,17 @@ class BrokerSyncService:
         snapshots_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
         client: BrokerAccountClient,
         event_service: Any | None = None,
+        live_mode: bool = False,
     ) -> None:
         self._session_maker = session_maker
         self._col = snapshots_col
         self._client = client
         self._adapter: Any | None = None
         self._event_service = event_service  # for POSITION_RECONCILE_MISMATCH alerts
+        # Reconcile compares the internal ledger against the broker. Only meaningful when orders
+        # actually reach the broker; in paper mode the ledger is simulated and every position
+        # would mismatch.
+        self._live_mode = live_mode
 
     def set_market_adapter(self, adapter: Any) -> None:
         self._adapter = adapter
@@ -102,6 +129,14 @@ class BrokerSyncService:
     def account_id(self) -> str:
         return self._client.account_id or "primary"
 
+    @property
+    def has_credentials(self) -> bool:
+        return self._client.has_credentials
+
+    @property
+    def live_mode(self) -> bool:
+        return self._live_mode
+
     async def already_succeeded(self, snapshot_date: str) -> bool:
         async with self._session_maker() as session:
             row = await session.scalar(
@@ -109,14 +144,68 @@ class BrokerSyncService:
                     BrokerSyncRun.account_id == self.account_id,
                     BrokerSyncRun.snapshot_date == snapshot_date,
                     BrokerSyncRun.status == SyncStatus.OK,
+                    BrokerSyncRun.trigger.in_(_ARCHIVAL_TRIGGERS),
                 )
             )
             return row is not None
 
+    async def last_run(self) -> dict[str, Any] | None:
+        """Most recently started archival run, or ``None`` if none has run today."""
+        async with self._session_maker() as session:
+            row = await session.scalar(
+                select(BrokerSyncRun)
+                .where(BrokerSyncRun.account_id == self.account_id)
+                .order_by(BrokerSyncRun.started_at.desc())
+                .limit(1)
+            )
+            return _run_dict(row) if row is not None else None
+
+    async def last_state_refresh(self) -> str | None:
+        """When the PG mirror was last written, or ``None`` if it never has been.
+
+        The intraday path writes no run row, so ``last_run`` stays ``None`` until the EOD
+        archival. This is the signal that tells "never synced" apart from "flat account".
+        """
+        async with self._session_maker() as session:
+            row = await session.scalar(
+                select(BrokerFund).where(BrokerFund.account_id == self.account_id)
+            )
+            return row.synced_at.isoformat() if row is not None and row.synced_at else None
+
+    # ── Intraday: current-state refresh ────────────────────────────────────────
+    async def refresh_state(self) -> dict[str, int]:
+        """Refresh the PG current-state mirror from the broker.
+
+        The intraday path. Fetches only the three point-in-time reports and replaces the mirror.
+        Writes no run row and no Mongo snapshot, so the day's archived snapshot keeps its
+        end-of-day meaning and the EOD idempotency guard stays untouched.
+        """
+        if not self._client.has_credentials:
+            log.debug("broker_refresh_skipped_no_creds", account_id=self.account_id)
+            return {}
+
+        counts: dict[str, int] = {}
+        rows_by_type: dict[str, list[dict[str, Any]]] = {}
+        for report_type, method in _STATE_REPORTS:
+            rows = await getattr(self._client, method)()
+            rows_by_type[report_type] = rows
+            counts[report_type] = len(rows)
+
+        await self._replace_mirror(
+            self.account_id,
+            rows_by_type["holdings"],
+            rows_by_type["positions"],
+            rows_by_type["funds"],
+        )
+        await self.subscribe_current_positions()
+        log.debug("broker_state_refreshed", account_id=self.account_id, counts=counts)
+        return counts
+
+    # ── End of day: full archival ──────────────────────────────────────────────
     async def run_daily(
         self, snapshot_date: str | None = None, trigger: str = SyncTrigger.MANUAL
     ) -> dict[str, Any]:
-        date_str = snapshot_date or datetime.now(UTC).strftime("%Y-%m-%d")
+        date_str = snapshot_date or ist_today()
         account_id = self.account_id
 
         if not self._client.has_credentials:
@@ -196,18 +285,20 @@ class BrokerSyncService:
 
         recon = await self._replace_state_and_reconcile(account_id, holdings, positions, funds)
 
-        # EOD enhanced reconcile: compare PG vs. broker; emit POSITION_RECONCILE_MISMATCH on mismatch
-        from pdp.broker_sync.eod_reconcile import reconcile_day_positions
+        # EOD enhanced reconcile: compare PG vs. broker; emit POSITION_RECONCILE_MISMATCH on mismatch.
+        # Live mode only — see `_live_mode`.
+        if self._live_mode:
+            from pdp.broker_sync.eod_reconcile import reconcile_day_positions
 
-        try:
-            eod_recon = await reconcile_day_positions(
-                self._session_maker,
-                broker_positions=positions,
-                event_service=self._event_service,
-            )
-            recon = {**recon, "eod": eod_recon}
-        except Exception as exc:
-            log.warning("eod_reconcile_failed", error=str(exc))
+            try:
+                eod_recon = await reconcile_day_positions(
+                    self._session_maker,
+                    broker_positions=positions,
+                    event_service=self._event_service,
+                )
+                recon = {**recon, "eod": eod_recon}
+            except Exception as exc:
+                log.warning("eod_reconcile_failed", error=str(exc))
 
         await self.subscribe_current_positions()
 
@@ -226,6 +317,20 @@ class BrokerSyncService:
         positions: list[dict[str, Any]],
         funds: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        await self._replace_mirror(account_id, holdings, positions, funds)
+        if not self._live_mode:
+            return {"skipped": "paper_mode"}
+        async with self._session_maker() as session:
+            return await self._reconcile(session, account_id, positions)
+
+    async def _replace_mirror(
+        self,
+        account_id: str,
+        holdings: list[dict[str, Any]],
+        positions: list[dict[str, Any]],
+        funds: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace this account's PG current-state rows. Shared by both entry points."""
         async with self._session_maker() as session:
             async with session.begin():
                 await session.execute(delete(BrokerHolding).where(BrokerHolding.account_id == account_id))
@@ -274,8 +379,6 @@ class BrokerSyncService:
                             raw=fund,
                         )
                     )
-
-            return await self._reconcile(session, account_id, positions)
 
     async def _reconcile(
         self, session: AsyncSession, account_id: str, broker_positions: list[dict[str, Any]]

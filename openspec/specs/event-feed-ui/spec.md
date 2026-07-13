@@ -1,12 +1,50 @@
 # event-feed-ui Specification
 
 ## Purpose
-TBD - created by archiving change replace-frontend-flutter. Update Purpose after archive.
-## Requirements
-### Requirement: Retired — React event feed UI removed
-This capability (React events page, Web Push) SHALL be considered retired with `frontend/`. Future event feed UI requirements MUST be specified in a new Flutter events change reusing the `trading-app` shell + WS-client pattern. The backend `events` capability and `/ws/events` are unaffected.
 
-#### Scenario: No active requirements
-- **WHEN** this spec is referenced
-- **THEN** redirect to a future Flutter events change for active requirements
+Flutter Live Events sidebar consuming the backend market-structure event stream (EMA crossover,
+price/EMA break, SuperTrend flip, Camarilla touch, level break) for NIFTY/BANKNIFTY/SENSEX. Replaces
+the retired React events page; reuses the `trading-app` shell + WS-client pattern. The backend
+`events` capability and `/ws/events` are unaffected.
+
+## Requirements
+
+### Requirement: Flutter Live Events sidebar consumes the backend event stream
+
+The app SHALL present a Live Events sidebar that seeds from `GET /api/v1/events` and then
+streams live events from `WS /ws/events`, rendering the meaningful market-structure events
+the backend publishes (EMA crossover, price/EMA break, SuperTrend flip, Camarilla touch,
+level break) for NIFTY/BANKNIFTY/SENSEX across all configured timeframes. The event parser
+SHALL match the backend `Event.to_dict()` contract: it SHALL accept WS frames that carry an
+`event_type` (there is no `type` envelope field), read the timestamp from `ts` (falling back
+to `timestamp`), and normalise `severity` case-insensitively so backend `INFO`/`WARNING`/
+`ERROR`/`CRITICAL` values map to the correct visual styling. Live frames SHALL append to the
+feed, not only the initial REST backfill.
+
+#### Scenario: Live WS event appended
+
+- **WHEN** the backend publishes a `SUPERTREND_FLIP` event to `/ws/events` while the sidebar is open
+- **THEN** the event is parsed (via its `event_type` and `ts`) and appended to the Live Events feed without requiring a refresh
+
+#### Scenario: Severity styling from backend case
+
+- **WHEN** an event arrives with `severity: "CRITICAL"` or `"WARNING"`
+- **THEN** it renders with the loss/warning styling respectively, not the default info styling
+
+#### Scenario: Backend REST backfill parses
+
+- **WHEN** the sidebar seeds from `GET /api/v1/events`
+- **THEN** each returned event (same `to_dict` shape with `ts`) parses successfully and is shown
+
+### Requirement: Execution tab shows meaningful events, not strategy heartbeats
+
+The Execution tab SHALL surface the Live Events sidebar (market-structure events) and SHALL
+NOT render the strategy heartbeat log (`bias_evaluated`, `leg_status`, repeated `leg_open`)
+as its event feed. The monitor payload MAY still carry `recent_events` for debugging, but the
+Execution tab UI SHALL NOT present that heartbeat list as the primary event view.
+
+#### Scenario: No heartbeat list on the Execution tab
+
+- **WHEN** the user opens the Execution tab while the strangle is running
+- **THEN** the meaningful Live Events sidebar is visible and the `bias_evaluated`/`leg_status` heartbeat list is not shown
 

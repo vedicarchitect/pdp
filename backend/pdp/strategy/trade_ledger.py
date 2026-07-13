@@ -33,6 +33,8 @@ _TERMINAL_CLOSE_TYPES = frozenset(
 _PARTIAL_CLOSE_TYPE = "stop_half"
 # Open event
 _OPEN_TYPE = "leg_open"
+# Every event type the ledger pairs — used to scope the Mongo query.
+_LEDGER_EVENT_TYPES = _TERMINAL_CLOSE_TYPES | {_PARTIAL_CLOSE_TYPE, _OPEN_TYPE}
 
 # Cache of parsed events keyed by (path, mtime_ns, size), so a repeated poll
 # against an unchanged file (the common case — most polls land between two
@@ -46,75 +48,53 @@ async def read_durable_day_events(
     strategy_id: str,
     day: date,
     *,
-    mongo_collection: Any | None = None,
+    mongo_db: Any = None,
     logs_dir: Path = Path("logs"),
 ) -> list[dict[str, Any]]:
     """Read strategy events for a given IST day from the durable store.
 
-    Primary source: Mongo ``events`` collection (leg_open, leg_close, stop_half,
-    take_profit, stop_all).  Converts each document to the same flat-dict format
-    as the JSONL reader so ``pair_trades()`` can be reused unchanged.
-
-    Fallback: local JSONL log file (last-resort — survives Mongo unavailability or
-    empty collection for pre-DB-migration days).
+    Primary source: the Mongo ``events`` collection (survives process restarts and works
+    across stateless API replicas, unlike the local JSONL log). Falls back to the JSONL log
+    file when ``mongo_db`` isn't passed, Mongo is unavailable, or the collection has no rows
+    for this day (pre-migration days, or a fresh deployment whose events haven't landed yet).
 
     Args:
-        strategy_id: The strategy identifier (used as Mongo filter field).
+        strategy_id: The strategy identifier (matches the ``strategy_id`` field written by
+            ``DirectionalStrangle._emit_event``).
         day: The IST date whose events to read.
-        mongo_collection: Motor AsyncIOMotorCollection for the ``events`` collection.
-            Pass ``None`` to skip the durable path (falls straight to JSONL).
+        mongo_db: The shared Motor database handle (``app.state.mongo_db``). Optional so
+            callers without a Mongo connection (tests, scripts) still get the JSONL behavior.
         logs_dir: Directory root for the JSONL fallback files.
     """
-    _LEG_EVENT_TYPES = frozenset(
-        {"leg_open", "leg_close", "take_profit", "stop_all", "stop_half"}
-    )
-
-    # IST-day boundary in UTC-naive storage convention used by the events pipeline
-    # (09:00 IST = 03:30 UTC; events arrive 09:15–15:30 IST).
-    import datetime as _dt
-
-    day_start_ist = _dt.datetime(day.year, day.month, day.day, 0, 0, 0)
-    day_end_ist = _dt.datetime(day.year, day.month, day.day, 23, 59, 59)
-    # Convert IST → UTC-naive (subtract 5:30)
-    ist_offset = _dt.timedelta(hours=5, minutes=30)
-    day_start_utc = day_start_ist - ist_offset
-    day_end_utc = day_end_ist - ist_offset
-
-    if mongo_collection is not None:
-        try:
-            cursor = mongo_collection.find(
-                {
-                    "event_type": {"$in": list(_LEG_EVENT_TYPES)},
-                    "strategy_id": strategy_id,
-                    "ts": {"$gte": day_start_utc, "$lte": day_end_utc},
-                },
-                sort=[("ts", 1)],
-            )
-            docs: list[dict[str, Any]] = []
-            async for doc in cursor:
-                doc.pop("_id", None)
-                # Normalise ts → ISO string for downstream consumers
-                ts_raw = doc.get("ts")
-                if isinstance(ts_raw, _dt.datetime):
-                    doc["ts"] = ts_raw.isoformat()
-                docs.append(doc)
-            if docs:
-                return docs
-            log.debug(
-                "trade_ledger_durable_empty_fallback",
-                strategy_id=strategy_id,
-                day=str(day),
-            )
-        except Exception as exc:
-            log.warning(
-                "trade_ledger_durable_read_failed",
-                strategy_id=strategy_id,
-                day=str(day),
-                error=str(exc),
-            )
-
-    # Fallback: JSONL log file
+    if mongo_db is not None:
+        events = await _read_mongo_day_events(mongo_db, strategy_id, day)
+        if events:
+            return events
     return read_day_events(strategy_id, day, logs_dir=logs_dir)
+
+
+async def _read_mongo_day_events(mongo_db: Any, strategy_id: str, day: date) -> list[dict[str, Any]]:
+    """Query the durable ``events`` collection for one IST day's leg-open/close events."""
+    start_ist = datetime(day.year, day.month, day.day, tzinfo=_IST)
+    end_ist = datetime(day.year, day.month, day.day, 23, 59, 59, 999999, tzinfo=_IST)
+    query = {
+        "strategy_id": strategy_id,
+        "event_type": {"$in": list(_LEDGER_EVENT_TYPES)},
+        "ts": {"$gte": start_ist.astimezone(_UTC), "$lte": end_ist.astimezone(_UTC)},
+    }
+    try:
+        cursor = mongo_db["events"].find(query, sort=[("ts", 1)])
+        out: list[dict[str, Any]] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            ts = doc.get("ts")
+            if ts is not None and hasattr(ts, "isoformat"):
+                doc["ts"] = ts.isoformat()
+            out.append(doc)
+        return out
+    except Exception as exc:
+        log.warning("trade_ledger_mongo_read_failed", strategy_id=strategy_id, day=str(day), exc=str(exc))
+        return []
 
 
 def read_day_events(strategy_id: str, day: date, *, logs_dir: Path = Path("logs")) -> list[dict[str, Any]]:

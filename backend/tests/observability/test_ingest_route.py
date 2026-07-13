@@ -35,7 +35,7 @@ def test_valid_batch_accepted(mock_indexer):
         ]
     }
     resp = client.post("/api/v1/logs/ingest", json=payload)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert resp.json()["accepted"] == 2
     assert mock_indexer._queue.qsize() == 2
 
@@ -61,5 +61,5 @@ def test_no_active_indexer_still_returns_accepted():
     set_active_indexer(None)
     payload = {"records": [{"event": "no_index"}]}
     resp = client.post("/api/v1/logs/ingest", json=payload)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert resp.json()["accepted"] == 1

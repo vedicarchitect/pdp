@@ -6,6 +6,7 @@ existing `/ws/market` + `/ws/portfolio` sockets, not this endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from dataclasses import asdict
 from decimal import Decimal
@@ -21,6 +22,7 @@ from pdp.intel.sections import (
     compute_news,
     compute_next_expiry,
     compute_sentiment,
+    compute_vix,
 )
 from pdp.intel.schemas import DashboardOut
 from pdp.options.fii_dii import StubFIIDIISource
@@ -168,20 +170,47 @@ async def _strategy_chips_section(request: Request) -> dict:
 
 @router.get("/dashboard", response_model=DashboardOut)
 async def get_dashboard(request: Request) -> DashboardOut:
+    # All 12 sections are independent reads (Redis/Mongo/Postgres) — run concurrently so total
+    # latency is the slowest section, not their sum.
+    (
+        indices,
+        global_indices,
+        commodities,
+        vix,
+        next_expiry,
+        fii_dii,
+        news,
+        sentiment,
+        portfolio,
+        today_pnl,
+        margin,
+        strategies,
+    ) = await asyncio.gather(
+        _index_section(request),
+        compute_global_indices(request),
+        compute_commodities(request),
+        compute_vix(request),
+        compute_next_expiry(),
+        _fii_dii_section(request),
+        compute_news(request),
+        compute_sentiment(request),
+        _portfolio_section(),
+        _today_pnl_section(request),
+        _margin_section(),
+        _strategy_chips_section(request),
+    )
     return DashboardOut(
-        {
-            "as_of": datetime.datetime.now(datetime.UTC).isoformat(),
-            "indices": await _index_section(request),
-            "global_indices": await compute_global_indices(request),
-            "commodities": await compute_commodities(request),
-            "vix": await compute_vix(request),
-            "next_expiry": await compute_next_expiry(),
-            "fii_dii": await _fii_dii_section(request),
-            "news": await compute_news(request),
-            "sentiment": await compute_sentiment(request),
-            "portfolio": await _portfolio_section(),
-            "today_pnl": await _today_pnl_section(request),
-            "margin": await _margin_section(),
-            "strategies": await _strategy_chips_section(request),
-        }
+        as_of=datetime.datetime.now(datetime.UTC).isoformat(),
+        indices=indices,
+        global_indices=global_indices,
+        commodities=commodities,
+        vix=vix,
+        next_expiry=next_expiry,
+        fii_dii=fii_dii,
+        news=news,
+        sentiment=sentiment,
+        portfolio=portfolio,
+        today_pnl=today_pnl,
+        margin=margin,
+        strategies=strategies,
     )

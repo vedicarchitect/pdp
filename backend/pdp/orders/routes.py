@@ -26,29 +26,13 @@ from pdp.db.session import get_db
 from pdp.deps import require_auth, PaginationParams
 from pdp.orders.models import Order, OrderType, Position, Product, Side, Trade
 from pdp.orders.router import select_broker
-from pdp.orders.schemas import OrderOut, TradeOut, PositionOut
+from pdp.orders.schemas import OrderOut, OrderRequest, TradeOut, PositionOut
 from pdp.schemas import Page
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/api/v1", tags=["orders"])
 
-
-# ------------------------------------------------------------------ #
-# Request / response schemas                                          #
-# ------------------------------------------------------------------ #
-
-
-class OrderRequest(BaseModel):
-    client_order_id: str | None = None
-    security_id: str
-    exchange_segment: str
-    side: Side
-    qty: int = Field(gt=0)
-    order_type: OrderType
-    price: Decimal | None = Field(default=None, gt=0)
-    trigger_price: Decimal | None = None
-    product: Product
-    strategy_id: str | None = None
+__all__ = ["router", "OrderRequest"]
 
 
 def _add_mode_header(response: Response, request: Request) -> None:

@@ -199,7 +199,7 @@ class _DailyBody extends StatelessWidget {
           trailing: openRows.isNotEmpty
               ? Chip(
                   label: const Text('ACTIVE'),
-                  backgroundColor: Colors.orange.withOpacity(0.15),
+                  backgroundColor: Colors.orange.withValues(alpha: 0.15),
                   labelStyle: const TextStyle(
                       color: Colors.orange,
                       fontSize: 10,
@@ -209,7 +209,7 @@ class _DailyBody extends StatelessWidget {
               : null,
         ),
         if (openRows.isEmpty)
-          _EmptyCard(
+          const _EmptyCard(
             icon: Icons.check_circle_outline,
             message: 'No open legs — all squared off',
           )
@@ -429,10 +429,10 @@ class _TradesTable extends StatelessWidget {
     return Card(
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Row(
-              children: const [
+              children: [
                 Expanded(flex: 3, child: _ColHeader('Symbol')),
                 Expanded(flex: 1, child: _ColHeader('Lots')),
                 Expanded(flex: 2, child: _ColHeader('Entry')),
@@ -605,7 +605,7 @@ class _OpenLegsCard extends StatelessWidget {
             ),
             trailing: Chip(
               label: const Text('OPEN'),
-              backgroundColor: Colors.amber.withOpacity(0.15),
+              backgroundColor: Colors.amber.withValues(alpha: 0.15),
               labelStyle: const TextStyle(
                   color: Colors.amber,
                   fontSize: 10,

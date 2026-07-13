@@ -44,9 +44,17 @@ TTL: `OPTIONS_CHAIN_TTL_DAYS` (default 7). Index: `(underlying, expiry, strike, 
 |-----|---------|
 | `OPTIONS_POLL_INTERVAL_SECONDS` | 30 |
 | `OPTIONS_RISK_FREE_RATE` | 0.065 |
-| `OPTIONS_UNDERLYINGS` | `["NIFTY","BANKNIFTY"]` |
 | `OPTIONS_CHAIN_TTL_DAYS` | 7 |
 | `OPTIONS_POLLER_ENABLED` | `true` |
+
+**Which underlyings get polled is not a setting** (since `bias-input-completeness`,
+2026-07-12) — `OptionsChainPoller` is constructed with an explicit `underlyings`
+list computed by `pdp.strategy.registry.strategy_underlyings(strategies_dir)`, the
+union of every loaded strategy YAML's `params.underlying`. A strategy YAML
+declaring `params.underlying: SENSEX` is the only step needed to bring SENSEX's
+chain online; there is no `OPTIONS_UNDERLYINGS` env var to also edit. (Previously
+`OPTIONS_UNDERLYINGS` lived in `.env` and could silently drift from what strategies
+actually needed — see `bias-input-completeness`'s SENSEX-PCR finding.)
 
 ## Gap Backfill
 

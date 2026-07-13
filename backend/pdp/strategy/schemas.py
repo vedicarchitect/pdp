@@ -130,5 +130,9 @@ class StrangleMonitorOut(BaseModel):
     recent_events: list[dict[str, Any]]
     indicators: dict[str, Any]
 
+class StrangleReadinessOut(BaseModel):
+    state: str
+    components: list[dict[str, Any]]
+
 class LevelsResponseOut(BaseModel):
     model_config = ConfigDict(extra="allow")

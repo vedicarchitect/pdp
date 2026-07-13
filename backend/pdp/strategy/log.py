@@ -20,6 +20,7 @@ class StrangleEventType(StrEnum):
     BIAS_EVALUATED = "bias_evaluated"
     LEG_STATUS = "leg_status"
     SQUARE_OFF = "square_off"
+    STRATEGY_NOT_READY = "strategy_not_ready"
 
 _IST = ZoneInfo("Asia/Kolkata")
 _LOGS_DIR = Path("logs")

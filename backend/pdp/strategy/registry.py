@@ -89,6 +89,27 @@ def import_strategy_class(dotted: str):  # type: ignore[return]
     return cls
 
 
+def strategy_underlyings(strategies_dir: Path) -> set[str]:
+    """Underlyings every loaded strategy's ``params.underlying`` declares.
+
+    Single source of truth for "which underlyings does live trading need
+    options/chain data for" -- derived from the strategy configs themselves
+    rather than a hand-maintained global settings list. Adding a new strategy YAML is the
+    only step needed to bring its underlying's chain/warehouse online; a
+    strategy that no longer needs one drops off automatically when its YAML
+    is removed or edited. Read at process start by the options poller and the
+    standalone warehouse service -- both filter this against their own
+    supported-underlying registry, so an unrecognised value here is simply
+    not requested rather than raising.
+    """
+    underlyings: set[str] = set()
+    for cfg in load_all(strategies_dir):
+        u = cfg.params.get("underlying")
+        if u:
+            underlyings.add(str(u))
+    return underlyings
+
+
 def get_strategy(
     strategy_id: str, strategies_dir: Path = Path("strategies")
 ) -> Strategy:

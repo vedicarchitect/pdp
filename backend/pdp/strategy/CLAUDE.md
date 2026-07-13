@@ -67,3 +67,11 @@ ctx.session      # AsyncSession (PostgreSQL)
 - **Position isolation**: all `StrategyContext` position queries (`get_net_qty`, `get_position`, `get_realized_pnl`, `get_positions`) filter by `strategy_id`. Each strategy sees only its own rows — no cross-strategy bleed. Fixed 2026-06-18 via migration `0012`.
 - Active specs: `live-supertrend-session-warmup`.
 - Adding a new strategy/params without a code change: use `/strategy:add` (`.claude/skills/strategy-add/SKILL.md`) — registers via `POST /api/v1/strategies/register`, immediately visible in `GET /api/v1/strategies` and launchable as a backtest. See `openspec/specs/strategy-registry/spec.md`.
+- **Session-start lot-size resolution** (`lot-size-live-reconciliation`): a live strategy's `lot_size`
+  is resolved from the instruments table (`strikes.lot_size_for_underlying`) once per IST trading day,
+  not read from YAML. YAML `lot_size` is advisory-only — a mismatch just logs a warning; the resolved
+  value always wins. An empty instruments table degrades new-entry trading for that underlying (blocks
+  `_open_short`/`_open_hedge`/`_open_momentum`) while existing legs keep pricing/closing on the
+  last-known-good value; the next successful resolution clears the degraded state automatically. See
+  `DirectionalStrangle._maybe_resolve_lot_size`. Backtest's own lot-size handling
+  (`pdp/backtest/*_config.py`) is a separate, out-of-scope system — it never reads these live YAMLs.

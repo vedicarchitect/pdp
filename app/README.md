@@ -47,7 +47,7 @@ flutter run -d <device-id> \
 ## Test & lint
 
 ```bash
-flutter analyze
+flutter analyze --fatal-infos
 flutter test
 ```
 

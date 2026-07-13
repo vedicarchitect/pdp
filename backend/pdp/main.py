@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -22,6 +23,15 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from pdp.runtime.groups import GROUPS_BY_ROLE
+
+    # Emitted before any group starts (and before configure_logging() re-configures structlog's
+    # processors), so a restart is attributable from `app_start` alone — no /healthz polling.
+    log.info(
+        "app_start",
+        started_at=datetime.now(UTC).isoformat(),
+        reload="--reload" in sys.argv,
+    )
+
     settings = get_settings()
     role = getattr(settings, "PDP_ROLE", "all")
     group_classes = GROUPS_BY_ROLE.get(role, GROUPS_BY_ROLE["all"])
@@ -35,9 +45,20 @@ async def lifespan(app: FastAPI):
             await group.start(app)
             started.append(group)
         except Exception as exc:
-            log.error("group_start_failed", group=group.name, exc=str(exc))
-            # Continue starting other groups (fault isolation)
-            
+            required = getattr(group, "required", False)
+            log.error("group_start_failed", group=group.name, required=required, exc=str(exc))
+            if required:
+                # A live-trading group is dead. Serving traffic now yields a healthy-looking API
+                # with a silently broken subsystem — refuse to start instead.
+                for g in reversed(started):
+                    try:
+                        await g.stop(app)
+                    except Exception as stop_exc:
+                        log.error("group_stop_failed", group=g.name, exc=str(stop_exc))
+                raise
+            # Non-critical groups stay fault-isolated.
+
+
     try:
         yield
     finally:
@@ -175,7 +196,7 @@ def create_app() -> FastAPI:
         try:
             await app.state.redis.ping()
             val = await app.state.redis.get("engine:status")
-            engine_state = val.decode("utf-8") if val else "down"
+            engine_state = val if val else "down"
         except Exception as exc:
             redis_state = f"error: {exc.__class__.__name__}"
         try:

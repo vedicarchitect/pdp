@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     DHAN_ACCESS_TOKEN: str = ""
 
     # Broker account sync (chunk 2: broker-account-sync)
-    BROKER_SYNC_ENABLED: bool = False
+    BROKER_SYNC_ENABLED: bool = True  # credential-gated: no creds ⇒ run recorded `skipped`
     BROKER_SYNC_EOD_TIME: str = "15:45"  # IST HH:MM — daily archival fires after close
     BROKER_INTRADAY_POLL_SECONDS: int = 300  # 5 minutes
     BROKER_ACCOUNT_LABEL: str = "primary"
@@ -84,7 +84,6 @@ class Settings(BaseSettings):
 
     OPTIONS_POLL_INTERVAL_SECONDS: int = 30
     OPTIONS_RISK_FREE_RATE: float = 0.065
-    OPTIONS_UNDERLYINGS: str = '["NIFTY","BANKNIFTY"]'
     OPTIONS_CHAIN_TTL_DAYS: int = 7
     # Options poller is read-only market data; safe to run in paper sessions.
     # Set OPTIONS_POLLER_ENABLED=false to disable without removing credentials.
@@ -108,9 +107,10 @@ class Settings(BaseSettings):
     EXPIRY_CACHE_PATH: str = "data/expiry/nifty_expiries.json"
     BANKNIFTY_EXPIRY_CACHE_PATH: str = "data/expiry/banknifty_expiries.json"
     SENSEX_EXPIRY_CACHE_PATH: str = "data/expiry/sensex_expiries.json"
-    # Underlyings to warehouse live: any subset of {"NIFTY","BANKNIFTY","SENSEX"}.
-    # Set WAREHOUSE_UNDERLYINGS='["NIFTY","BANKNIFTY"]' to enable multi-index mode.
-    WAREHOUSE_UNDERLYINGS: list[str] = ["NIFTY"]
+    # Underlyings to warehouse/poll are NOT a setting here -- derived from loaded
+    # strategy YAMLs' params.underlying (pdp.strategy.registry.strategy_underlyings).
+    # Adding a strategy for a new underlying is the only step needed to bring its
+    # chain/warehouse online; see bias-input-completeness.
     # Standalone warehouser band: current+next weekly (+optional monthly), ATM±N strikes.
     WAREHOUSE_STRIKE_BAND: int = 10
     WAREHOUSE_STRIKE_STEP: int = 50
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     # Continuously monitors manual Dhan positions + the underlying market and emits
     # de-duplicated realtime events to the in-app feed + browser push. Alerts-only.
     EVENTS_ENABLED: bool = True
-    # JSON list/dict strings parsed via pdp.events.config helpers (mirrors OPTIONS_UNDERLYINGS).
+    # JSON list/dict strings parsed via pdp.events.config helpers.
     EVENTS_SPOT_TIMEFRAMES: str = '["5m","15m","30m","1H","1D"]'
     EVENTS_EMA_PAIRS: str = "[[9,20],[9,50],[20,50]]"  # fast/slow EMA crossover pairs
     EVENTS_PRICE_EMA_PERIODS: str = "[50]"  # EMAs to watch for price crosses

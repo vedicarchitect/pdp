@@ -58,6 +58,9 @@ services:
       DISABLE_INSTALL_DEMO_CONFIG: "true"
       bootstrap.memory_lock: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # PA agent is a separate always-on process the docker image starts by default —
+      # continuous idle CPU cost with zero dev value here.
+      DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI: "true"
     ulimits:
       memlock:
         soft: -1
@@ -99,6 +102,93 @@ services:
       - "5050:80"
     depends_on:
       - postgres
+
+  # --- App services (api-worker-decoupling) ---------------------------------
+  # One image (backend/Dockerfile), three roles selected via PDP_ROLE + command.
+  # Behind the "app" profile so plain `task db:up` / `docker compose up` (infra only)
+  # is unaffected, and so `api`'s 8000:8000 mapping never fights `task dev`'s host
+  # uvicorn on the same port. Run with: `docker compose --profile app up -d --build`.
+  # env_file supplies shared/secret settings (e.g. DHAN_CLIENT_ID); the `environment:`
+  # block below overrides DATABASE_URL/REDIS_URL/MONGO_URI because backend/.env points
+  # at host-mapped `localhost` ports, which don't resolve inside the compose network —
+  # containers must address the other services by their compose service name instead.
+  api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    image: pdp:latest
+    container_name: pdp-api
+    profiles: ["app"]
+    command: ["pdp-api"]
+    env_file:
+      - ../../backend/.env
+    environment:
+      PDP_ROLE: api
+      DATABASE_URL: postgresql+asyncpg://pdp:pdp@postgres:5432/pdp
+      DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@postgres:5432/pdp
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URI: mongodb://mongo:27017
+      OPENSEARCH_URL: http://opensearch:9200
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  engine:
+    image: pdp:latest
+    container_name: pdp-engine
+    profiles: ["app"]
+    command: ["pdp-engine"]
+    env_file:
+      - ../../backend/.env
+    environment:
+      PDP_ROLE: engine
+      DATABASE_URL: postgresql+asyncpg://pdp:pdp@postgres:5432/pdp
+      DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@postgres:5432/pdp
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URI: mongodb://mongo:27017
+      OPENSEARCH_URL: http://opensearch:9200
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  ops:
+    image: pdp:latest
+    container_name: pdp-ops
+    profiles: ["app"]
+    command: ["pdp-ops"]
+    env_file:
+      - ../../backend/.env
+    environment:
+      PDP_ROLE: ops
+      DATABASE_URL: postgresql+asyncpg://pdp:pdp@postgres:5432/pdp
+      DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@postgres:5432/pdp
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URI: mongodb://mongo:27017
+      OPENSEARCH_URL: http://opensearch:9200
+      INTEL_ENABLED: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:

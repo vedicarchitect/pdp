@@ -13,8 +13,15 @@ from pdp.broker_sync.models import BrokerFund, BrokerHolding, BrokerPosition, Br
 from pdp.broker_sync.service import BrokerSyncService, _run_dict
 from pdp.db.session import get_db
 from pdp.deps import require_auth, PaginationParams
-from pdp.broker_sync.schemas import BrokerSyncRunOut, BrokerHoldingOut, BrokerPositionOut, BrokerFundOut
+from pdp.broker_sync.schemas import (
+    BrokerSyncRunOut,
+    BrokerSyncStatusOut,
+    BrokerHoldingOut,
+    BrokerPositionOut,
+    BrokerFundOut,
+)
 from pdp.schemas import Page
+from pdp.settings import get_settings
 
 log = structlog.get_logger()
 
@@ -22,6 +29,11 @@ router = APIRouter(prefix="/api/v1/broker-sync", tags=["broker-sync"])
 
 
 def _service(request: Request) -> BrokerSyncService:
+    """Guard for every route that reads broker state.
+
+    Without this, a disabled subsystem and a genuinely flat account are indistinguishable: the
+    mirror tables are simply empty and the reads return `200 []`.
+    """
     svc = getattr(request.app.state, "broker_sync_service", None)
     if svc is None:
         raise HTTPException(status_code=503, detail="broker sync not enabled")
@@ -38,11 +50,36 @@ def _service(request: Request) -> BrokerSyncService:
 )
 async def run_sync(
     request: Request,
-    date: str | None = Query(default=None, description="YYYY-MM-DD; defaults to today (UTC)"),
+    date: str | None = Query(default=None, description="YYYY-MM-DD; defaults to today (IST)"),
 ) -> BrokerSyncRunOut:
     """Trigger a sync now (manual). Idempotent for a given date."""
     result = await _service(request).run_daily(date, trigger="manual")
     return BrokerSyncRunOut(**result)
+
+
+@router.get(
+    "/status",
+    response_model=BrokerSyncStatusOut,
+    summary="Broker sync status",
+    description="Whether sync is enabled, credentialed, live, and when it last ran.",
+)
+async def get_status(request: Request) -> BrokerSyncStatusOut:
+    settings = get_settings()
+    svc: BrokerSyncService | None = getattr(request.app.state, "broker_sync_service", None)
+    if svc is None:
+        return BrokerSyncStatusOut(
+            enabled=False,
+            has_credentials=bool(settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN),
+            live_mode=settings.LIVE and settings.BROKER == "dhan",
+        )
+    run = await svc.last_run()
+    return BrokerSyncStatusOut(
+        enabled=True,
+        has_credentials=svc.has_credentials,
+        live_mode=svc.live_mode,
+        last_state_refresh_at=await svc.last_state_refresh(),
+        last_run=BrokerSyncRunOut(**run) if run else None,
+    )
 
 
 @router.get("/runs", response_model=Page[BrokerSyncRunOut])
@@ -70,7 +107,7 @@ async def get_run(run_id: str, session: AsyncSession = Depends(get_db)) -> Broke
     return BrokerSyncRunOut(**_run_dict(run))
 
 
-@router.get("/holdings", response_model=Page[BrokerHoldingOut])
+@router.get("/holdings", response_model=Page[BrokerHoldingOut], dependencies=[Depends(_service)])
 async def get_holdings(
     session: AsyncSession = Depends(get_db),
     pagination: PaginationParams = Depends(),
@@ -94,7 +131,7 @@ async def get_holdings(
     return Page(items=items, limit=pagination.limit, offset=pagination.offset)
 
 
-@router.get("/positions", response_model=Page[BrokerPositionOut])
+@router.get("/positions", response_model=Page[BrokerPositionOut], dependencies=[Depends(_service)])
 async def get_positions(
     session: AsyncSession = Depends(get_db),
     pagination: PaginationParams = Depends(),
@@ -119,7 +156,7 @@ async def get_positions(
     return Page(items=items, limit=pagination.limit, offset=pagination.offset)
 
 
-@router.get("/funds", response_model=Page[BrokerFundOut])
+@router.get("/funds", response_model=Page[BrokerFundOut], dependencies=[Depends(_service)])
 async def get_funds(
     session: AsyncSession = Depends(get_db),
     pagination: PaginationParams = Depends(),

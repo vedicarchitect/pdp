@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pdp
+          POSTGRES_PASSWORD: pdp
+          POSTGRES_DB: pdp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pdp -d pdp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        working-directory: backend
+        run: uv sync
+
+      - name: Run migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://pdp:pdp@localhost:5432/pdp
+          DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@localhost:5432/pdp
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run alembic upgrade head
+
+      - name: Run tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://pdp:pdp@localhost:5432/pdp
+          DATABASE_SYNC_URL: postgresql+psycopg://pdp:pdp@localhost:5432/pdp
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest
+
+  flutter-analyze-test:
+    name: Flutter analyze + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      - name: flutter analyze
+        working-directory: app
+        run: flutter analyze --fatal-infos
+
+      - name: flutter test
+        working-directory: app
+        run: flutter test

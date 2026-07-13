@@ -36,15 +36,6 @@ dependencies = [
     "vadersentiment>=3.3.2",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=6.0",
-    "ruff>=0.8",
-    "pyright>=1.1.390",
-]
-
 [project.scripts]
 pdp = "pdp.cli:main"
 pdp-api = "pdp.runtime.entrypoints:run_api"
@@ -87,6 +78,11 @@ addopts = "-ra --strict-markers"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
     "playwright>=1.60.0",
     "pytest-playwright>=0.8.0",
 ]

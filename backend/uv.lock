@@ -1357,19 +1357,15 @@ dependencies = [
     { name = "yfinance" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
+    { name = "playwright" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "playwright" },
     { name = "pytest-playwright" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -1391,14 +1387,9 @@ requires-dist = [
     { name = "py-vollib-vectorized", specifier = ">=0.1.1" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.390" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pywebpush", specifier = ">=2.0" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.2" },
     { name = "rich", specifier = ">=13.7" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -1406,12 +1397,16 @@ requires-dist = [
     { name = "websockets", specifier = ">=14" },
     { name = "yfinance", specifier = ">=1.5.1" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "playwright", specifier = ">=1.60.0" },
+    { name = "pyright", specifier = ">=1.1.390" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-cov", specifier = ">=6.0" },
     { name = "pytest-playwright", specifier = ">=0.8.0" },
+    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]

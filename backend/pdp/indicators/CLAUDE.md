@@ -102,4 +102,64 @@ if ema is not None:
 
 **RSI signal line:** `RSIState.ma` holds an EMA of the RSI values (default `ma_period=9`). It is `None` until `ma_period` RSI values have been seen. Configure via `{"family": "rsi", "period": 14, "ma_period": 9}`. Redis snapshot publishes it as `rsi_ma` (flat float, separate from the `rsi` key — backward-compatible).
 
-**Backtest parity for suite indicators:** `StrategyConfig.suite_indicators` (list of family dicts, default `[]`) gates which families `sim.py` builds and replays per bar. The resulting `Snapshot` is available as `_suite_snap` in the series loop.
+**Backtest parity for suite indicators:** `StrategyConfig.suite_indicators` (list of family dicts, default `[]`) gates which families `sim.py` builds and replays per bar. The resulting `Snapshot` is available as `_suite_snap` in the series loop. Note this applies to `sim.py`'s generic index backtest only — `StrangleConfig` (the directional-strangle backtest) has no `suite_indicators` field; its EMA input is a separate, hardcoded 9/20/50 alignment vote (`pdp/signals/bias.py`), sharing `EMATracker` and the `tf_ema_from_values()` conversion with live but not the period-200 console concept.
+
+## Warmup depth (`indicator-history-depth`, 2026-07-12)
+
+A period is missing from a tracker's state for exactly one of two reasons, and the fix is
+different for each:
+
+1. **Not configured** — the watchlist's `indicators:` never asked for it (e.g. `ema` declared
+   `periods: [9, 20, 50, 100]`, no 200). `EMATracker` computes exactly the periods it is given;
+   nothing seeds a period that isn't in the list. Fix: add the period to the YAML.
+2. **Not yet converged** — configured, but the tracker hasn't consumed enough bars yet.
+   `EMATracker.update()` already omits an unconverged period from `values` rather than
+   reporting a partial/wrong number (same is already true of RSI's `ma`, and of MACD/VWMA,
+   which return `None` entirely until seeded) — so `--` in the console means "genuinely not
+   available yet", never "silently wrong".
+
+`warmup.py::required_bars(indicators)` derives how many bars warmup needs: `5 x max(period)`
+across every period-like key (`periods`, `period`, `ma_period`, `fast`, `slow`, `signal`, ...)
+in every configured family, floored at 200. `lookback_days(timeframe, bars_needed)` converts
+that to a calendar window using `_TF_SESSION_BARS` plus a weekend/holiday pad. Widening a
+config's largest period widens the warmup window automatically — there is no hand-maintained
+calendar-day table to keep in sync (`_TF_WARMUP_CALENDAR_DAYS` was deleted; it silently
+defaulted an unlisted timeframe to a 1-day lookback, and its ">> 200 bars" assumption broke
+the moment a period grew past what the table's margin assumed).
+
+If `market_bars` doesn't hold `required_bars()` bars for a `(sid, tf)`, warmup logs one
+`indicator_warmup_short` per `(sid, tf, family)` naming `bars_found`/`bars_needed`, and
+`IndicatorEngine.seeding_summary(sid, tf)` reports the same gap as `{(family, period): False}`
+— surfaced once per strategy at startup as `indicator_seeding_summary`
+(`pdp/runtime/groups.py`), so an unseeded EMA(200) is visible in the boot log, not just as a
+`--` discovered later in the console. Run `scripts/backfill_market_bars.py` to close a
+depth gap — it derives 15m/30m/1H from the stored 1m series (reusing
+`scripts/oneoff/rebuild_market_bars.py`'s session-anchored rollup) and falls back to Dhan
+only for windows where 1m coverage itself is absent.
+
+## Same-day Dhan fetch contract (`dhan-same-day-data`, confirmed 2026-07-13)
+
+`warmup.py::_fetch_from_dhan` sets `to_date = today` (IST), so the Dhan top-up fetch always *asks*
+for the current, possibly in-progress session. Live-probed 2026-07-13 11:30 IST
+(`scripts/oneoff/probe_dhan_same_day.py`):
+
+- **Intraday (`intraday_minute_data`, 5m and presumably 15m/30m/1H):** Dhan **does** return a
+  still-forming final candle for the in-progress bucket — the probe's last candle (`bar_time`
+  11:30:00, queried at 11:30:37) had real, distinct OHLC but volume ~10x lower than its neighbors
+  (429,514 vs 2.5M-11.5M), the classic partial-candle fingerprint.
+- **Daily (`historical_daily_data`, 1D/1w):** Dhan returns **nothing** for the current, in-progress
+  trading day — `todays_candle_count=0`. No in-progress daily candle exists to accidentally persist.
+
+See `openspec/changes/dhan-same-day-data/README.md` for the full probe output and reasoning.
+
+Because of the intraday answer, `pdp/market/bars.py::bar_is_complete(bar_time, timeframe, now)` is
+enforced unconditionally: any bar whose period hasn't fully elapsed (`bar_time + period > now`) is
+dropped by `_fetch_from_dhan` before it can reach `_persist_bars` or seed a tracker — so a
+still-forming final candle can never be written into `market_bars`, independent of whether Dhan
+itself would have returned one. The same guard is applied everywhere else a broker fetch writes
+`market_bars`: `scripts/backfill_spot.py` and `scripts/backfill_vix.py` (both default to
+`--to date.today()`).
+
+IST trading-day boundaries in `warmup.py` are computed via `datetime.now(ZoneInfo("Asia/Kolkata"))`,
+not a fixed `+5:30` offset — the ~18 other fixed-offset IST derivations elsewhere in `pdp/` are
+left as-is; they're bit-identical to `ZoneInfo` since India has no DST, not merely "safe today."

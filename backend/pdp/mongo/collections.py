@@ -20,7 +20,6 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_advisory_snapshots(db)
     await _ensure_positional_eod_snapshots(db)
     await _ensure_broker_snapshots(db)
-    await _ensure_events(db, settings.EVENTS_TTL_DAYS)
     await _ensure_backtest_runs(db)
     await _ensure_backtest_days(db)
     await _ensure_backtest_folds(db)
@@ -29,6 +28,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_backtest_decisions(db)
     await _ensure_backtest_promotions(db)
     await _ensure_index_levels(db)
+    await _ensure_events(db, settings.EVENTS_TTL_DAYS)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -236,29 +236,6 @@ async def _ensure_broker_snapshots(db: AsyncIOMotorDatabase) -> None:  # type: i
     )
 
 
-async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # type: ignore[type-arg]
-    """Realtime monitoring events emitted by the event-publisher (TTL-expired)."""
-    try:
-        await db.create_collection("events")
-        log.info("mongo_collection_created", collection="events")
-    except CollectionInvalid:
-        log.debug("mongo_collection_exists", collection="events")
-
-    await db["events"].create_index(
-        [("ts", DESCENDING)],
-        name="idx_ts_desc",
-    )
-    await db["events"].create_index(
-        [("ts", ASCENDING)],
-        expireAfterSeconds=ttl_days * 86400,
-        name="ttl_ts",
-    )
-    await db["events"].create_index(
-        [("security_id", ASCENDING), ("event_type", ASCENDING), ("ts", DESCENDING)],
-        name="idx_sid_type_ts",
-    )
-
-
 async def _ensure_backtest_runs(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """Queryable index of every strangle backtest / sweep / walk-forward run."""
     try:
@@ -358,10 +335,6 @@ async def _ensure_backtest_promotions(db: AsyncIOMotorDatabase) -> None:  # type
     await col.create_index([("promoted_at", DESCENDING)], name="idx_promoted_at")
 
 
-def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
-    return db["events"]
-
-
 def get_broker_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["broker_snapshots"]
 
@@ -384,6 +357,10 @@ def get_chains_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  
 
 def get_positional_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["positional_eod_snapshots"]
+
+
+def get_events_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["events"]
 
 
 def get_oi_snapshots_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
@@ -420,6 +397,34 @@ def get_backtest_promotions_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotor
 
 def get_index_levels_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
     return db["index_levels"]
+
+
+async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # type: ignore[type-arg]
+    """Alerts/decision events written by ``EventService``/``EventStore`` (field ``security_id``)
+    and, since `strangle-observability-gaps`, the strangle strategy's leg-open/leg-close events
+    via ``EventWriter`` (field ``sid``, plus ``strategy_id`` — the two writers do not share a
+    security-id field name). Regular (not time-series) collection — matches ``EventStore``'s
+    existing ``insert_one``/``find`` usage, which time-series collections don't support
+    identically. Indexes only cover fields both writers set (``event_type``, ``ts``); a query
+    needing the leg identifier must filter client-side on ``sid`` vs ``security_id`` until the
+    two event shapes are unified.
+    """
+    try:
+        await db.create_collection("events")
+        log.info("mongo_collection_created", collection="events")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="events")
+
+    col = db["events"]
+    await col.create_index(
+        [("ts", ASCENDING)],
+        expireAfterSeconds=ttl_days * 86400,
+        name="ttl_ts",
+    )
+    await col.create_index(
+        [("event_type", ASCENDING), ("ts", DESCENDING)],
+        name="idx_type_ts",
+    )
 
 
 async def _ensure_index_levels(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]

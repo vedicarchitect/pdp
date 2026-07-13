@@ -6,6 +6,11 @@ net-qty mismatches.  Discrepancies trigger a POSITION_RECONCILE_MISMATCH
 critical event so the operator sees them in the execution console alert feed
 immediately.
 
+Precondition: the caller invokes this only in live mode (``LIVE`` and ``BROKER == "dhan"``). It
+aggregates every PG ``Position`` row, and in paper mode those rows are written by ``PaperBroker``
+and have no broker counterpart — every one of them would mismatch. ``BrokerSyncService`` enforces
+this gate.
+
 Design constraints:
 * Read-only: never mutates PG positions (that is the operator's job).
 * Non-blocking: all mismatches are logged + emitted; the function returns even

@@ -10,6 +10,7 @@ import 'package:pdp_app/features/manage/presentation/tabs/broker_tab.dart';
 /// staleness badge — the parallel view for manual broker rows.
 void main() {
   BrokerAccount account({String? syncedAt}) => BrokerAccount(
+        state: BrokerSyncState.ready,
         holdings: [
           BrokerHolding(
             securityId: '1',
@@ -69,5 +70,28 @@ void main() {
   testWidgets('shows a stale warning when never synced', (tester) async {
     await pump(tester, account(syncedAt: null));
     expect(find.textContaining('Never synced'), findsOneWidget);
+  });
+
+  // An empty account and a subsystem that never ran must not look the same.
+  testWidgets('explains a disabled subsystem instead of showing an empty list', (tester) async {
+    await pump(tester, const BrokerAccount(state: BrokerSyncState.disabled));
+    expect(find.text('Broker sync is off'), findsOneWidget);
+    expect(find.textContaining('no open broker positions'), findsNothing);
+  });
+
+  testWidgets('explains missing credentials', (tester) async {
+    await pump(tester, const BrokerAccount(state: BrokerSyncState.noCredentials));
+    expect(find.text('No Dhan credentials'), findsOneWidget);
+  });
+
+  testWidgets('explains an unsynced mirror', (tester) async {
+    await pump(tester, const BrokerAccount(state: BrokerSyncState.neverSynced));
+    expect(find.text('Waiting for first sync'), findsOneWidget);
+  });
+
+  testWidgets('a ready but flat account shows the normal empty sections', (tester) async {
+    await pump(tester, const BrokerAccount(state: BrokerSyncState.ready));
+    expect(find.textContaining('no open broker positions'), findsOneWidget);
+    expect(find.text('Broker sync is off'), findsNothing);
   });
 }

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel
 from redis.asyncio import Redis
 
-from pdp.orders.models import OrderRequest
+from pdp.orders.schemas import OrderRequest
 
 class OrderCommand(BaseModel):
     cmd_id: str
@@ -38,14 +38,18 @@ class CommandProducer:
                 detail="engine unavailable (status != ready)"
             )
             
+        # Capture the current tail of orders.results BEFORE enqueueing the command. Real
+        # Redis resolves "$" to "now" separately on *every* XREAD call — polling with a
+        # literal "$" each iteration misses any result the engine writes between polls
+        # (or before the very first poll, if the engine is faster than us). Anchoring to
+        # a concrete ID once, up front, makes every subsequent read gap-free.
+        last_entry = await self.redis.xrevrange("orders.results", count=1)
+        last_id = last_entry[0][0] if last_entry else "0-0"
+
         await self.redis.xadd("orders.commands", {"data": cmd.model_dump_json()})
-        
+
         # Poll for result (Wait for ack in orders.results)
-        # Using pub/sub or scanning orders.results. For simplicity, we can XREAD.
-        # But we need a specific cmd_id. It's easier if engine also publishes result to pub/sub
-        # or we just poll the stream. We'll poll `orders.results` from the end.
         end_time = asyncio.get_event_loop().time() + self.timeout
-        last_id = "$"
         while asyncio.get_event_loop().time() < end_time:
             resp = await self.redis.xread({"orders.results": last_id}, count=100, block=500)
             if resp:

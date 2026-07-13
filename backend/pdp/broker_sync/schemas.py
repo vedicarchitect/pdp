@@ -3,14 +3,30 @@ from typing import Any
 from datetime import datetime
 
 class BrokerSyncRunOut(BaseModel):
+    """Mirrors the keys produced by ``service._run_dict``."""
+
     id: str
-    sync_date: str | None = None
-    status: str
+    account_id: str
+    snapshot_date: str
     trigger: str
+    status: str
+    counts: dict[str, int] = {}
+    recon: dict[str, Any] | None = None
+    error: str | None = None
     started_at: str | None = None
-    completed_at: str | None = None
-    error_message: str | None = None
-    summary: dict[str, Any] | None = None
+    finished_at: str | None = None
+
+
+class BrokerSyncStatusOut(BaseModel):
+    """Lets a client tell apart: disabled, no credentials, never run, empty account."""
+
+    enabled: bool
+    has_credentials: bool
+    live_mode: bool
+    # Mirror freshness. The intraday refresh writes no run row, so this — not `last_run` —
+    # is what distinguishes "never synced" from "synced, account is flat".
+    last_state_refresh_at: str | None = None
+    last_run: BrokerSyncRunOut | None = None
 
 class BrokerHoldingOut(BaseModel):
     account_id: str

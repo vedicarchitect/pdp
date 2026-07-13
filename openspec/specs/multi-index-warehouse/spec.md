@@ -5,28 +5,44 @@ TBD - created by archiving change multi-index-warehouse. Update Purpose after ar
 ## Requirements
 ### Requirement: Configurable warehouse underlyings
 
-`WarehouseService` SHALL support a configurable list of underlyings via `settings.WAREHOUSE_UNDERLYINGS` (a `list[str]`, default `["NIFTY"]`). For each underlying in the list it SHALL subscribe to the corresponding index spot feed and the ATM ± N option band, using the correct security ID and strike step for that underlying. Adding `"BANKNIFTY"` or `"SENSEX"` to `WAREHOUSE_UNDERLYINGS` SHALL not require any code changes — only the environment variable.
+`WarehouseService` SHALL accept its list of underlyings as an explicit constructor
+argument (`underlyings: list[str]`), not read from a settings/environment value. The
+caller SHALL derive that list via `pdp.strategy.registry.strategy_underlyings(strategies_dir)`
+— the union of every loaded strategy YAML's `params.underlying`. For each underlying in
+the list the service SHALL subscribe to the corresponding index spot feed and the ATM ±
+N option band, using the correct security ID and strike step for that underlying. Adding
+a new underlying SHALL require only adding or editing a strategy YAML — no code change
+and no environment-variable edit.
 
-#### Scenario: Default behaviour is unchanged
+#### Scenario: Default behaviour is unchanged with only a NIFTY strategy configured
 
-- **WHEN** `WAREHOUSE_UNDERLYINGS` is unset or `["NIFTY"]`
-- **THEN** the service subscribes only to NIFTY (sid 13, step 50) and behaviour is identical to before this change
+- **WHEN** `strategies/` contains only strategy YAMLs with `params.underlying: NIFTY`
+- **THEN** the derived underlyings list is `["NIFTY"]` and the service subscribes only to
+  NIFTY (sid 13, step 50)
 
-#### Scenario: BANKNIFTY added to underlyings
+#### Scenario: BANKNIFTY added via a strategy YAML
 
-- **WHEN** `WAREHOUSE_UNDERLYINGS=["NIFTY","BANKNIFTY"]`
-- **THEN** the service subscribes to both NIFTY (sid 13, step 50) and BANKNIFTY (sid 25, step 100) option bands; closed bars for each are written to `option_bars` with the correct `underlying` and `security_id` fields
+- **WHEN** a strategy YAML declaring `params.underlying: BANKNIFTY` is added to `strategies/`
+  and the warehouse process (re)starts
+- **THEN** the derived underlyings list includes `"BANKNIFTY"` and the service subscribes to
+  both NIFTY (sid 13, step 50) and BANKNIFTY (sid 25, step 100) option bands; closed bars for
+  each are written to `option_bars` with the correct `underlying` and `security_id` fields
 
 ---
 
 ### Requirement: Per-underlying static config registry
 
-The warehouse module SHALL maintain a static registry mapping each supported underlying name to `(security_id, strike_step, expiry_calendar_path)`. Attempting to configure an unsupported underlying SHALL raise a clear startup error. The supported set SHALL be at minimum `{"NIFTY", "BANKNIFTY", "SENSEX"}`.
+The warehouse module SHALL maintain a static registry mapping each supported underlying name
+to `(security_id, strike_step, expiry_calendar_path)`. Attempting to configure an unsupported
+underlying (present in the derived `underlyings` list but absent from the registry) SHALL raise
+a clear startup error. The supported set SHALL be at minimum `{"NIFTY", "BANKNIFTY", "SENSEX"}`.
 
 #### Scenario: Unsupported underlying rejected at startup
 
-- **WHEN** `WAREHOUSE_UNDERLYINGS=["NIFTY","MIDCAP"]` and `MIDCAP` is not in the registry
-- **THEN** the service raises a `ValueError` at startup naming the unsupported symbol, before any Dhan connection is opened
+- **WHEN** the derived underlyings list is `["NIFTY", "MIDCAP"]` and `MIDCAP` is not in the
+  registry
+- **THEN** the service raises a `ValueError` at startup naming the unsupported symbol, before
+  any Dhan connection is opened
 
 ---
 
@@ -42,23 +58,25 @@ All Dhan WS subscriptions (across all configured underlyings) SHALL be handled b
 ---
 
 ### Requirement: Self-healing gap-fill per underlying
-The periodic gap-backfill loop inside `WarehouseService` SHALL run for each configured underlying
-independently, passing the correct `underlying`, `underlying_sid`, and `strike_step` to
-`gap_backfill.backfill_gaps()`. Because `multi-index-options-backfill` has landed, BANKNIFTY and
-SENSEX SHALL be self-healed in the background like NIFTY — the previous "skip non-NIFTY with a
-warning" behavior is removed. An underlying SHALL only be skipped if its expiry-calendar cache is
-missing, in which case a clear warning naming the missing file is logged.
+
+The periodic gap-backfill loop inside `WarehouseService` SHALL run for each underlying in its
+constructor-provided `underlyings` list independently, passing the correct `underlying`,
+`underlying_sid`, and `strike_step` to `gap_backfill.backfill_gaps()`. BANKNIFTY and SENSEX
+SHALL be self-healed in the background like NIFTY whenever they are present in that list. An
+underlying SHALL only be skipped if its expiry-calendar cache is missing, in which case a
+clear warning naming the missing file is logged.
 
 #### Scenario: Gap-heal runs per underlying
-- **WHEN** `WAREHOUSE_UNDERLYINGS=["NIFTY","BANKNIFTY"]` and the gap-heal interval fires
-- **THEN** `backfill_gaps()` is called once for NIFTY and once for BANKNIFTY with the correct params for each
 
-#### Scenario: BANKNIFTY/SENSEX are no longer skipped
-- **WHEN** the gap-heal interval fires with SENSEX configured and its expiry cache present
-- **THEN** SENSEX missing days are backfilled in the background rather than skipped with a "not implemented" warning
+- **WHEN** the service was constructed with `underlyings=["NIFTY","BANKNIFTY"]` and the
+  gap-heal interval fires
+- **THEN** `backfill_gaps()` is called once for NIFTY and once for BANKNIFTY with the correct
+  params for each
 
 #### Scenario: A missing expiry cache is skipped with a clear warning
-- **WHEN** an underlying is configured but its expiry-calendar cache file is missing
+
+- **WHEN** an underlying is present in the constructor-provided `underlyings` list but its
+  expiry-calendar cache file is missing
 - **THEN** that underlying's gap-heal is skipped and a warning naming the missing file is logged
 
 ### Requirement: Removed module-level INDEX_SID constant

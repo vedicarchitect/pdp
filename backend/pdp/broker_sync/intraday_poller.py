@@ -1,8 +1,11 @@
 """Intraday broker account poller.
 
-A market-hours loop that refreshes the broker account state (holdings, positions,
-funds) periodically. This ensures that the platform's view of the broker's
-holdings and funds is fresh throughout the day, and positions stay in sync.
+A market-hours loop that refreshes the broker account state (holdings, positions, funds)
+periodically, so the platform's view of the broker stays fresh through the session.
+
+Calls ``refresh_state``, never ``run_daily``: the daily archival writes a run row that would
+satisfy the EOD scheduler's idempotency guard, and overwrite the day's Mongo snapshot with a
+mid-session view. Keep the two paths apart.
 
 Paper-safe: skips gracefully if credentials are not configured.
 """
@@ -10,7 +13,7 @@ Paper-safe: skips gracefully if credentials are not configured.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -57,15 +60,12 @@ class BrokerIntradayPoller:
     async def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                if self._is_market_hours() and self._service._client.has_credentials:
+                if self._is_market_hours():
                     log.debug("broker_intraday_poll")
-                    # Use the same run_daily machinery but mark it as intraday
-                    await self._service.run_daily(trigger="intraday_poll")
-                elif not self._service._client.has_credentials:
-                    log.debug("broker_intraday_poll_skipped_no_creds")
+                    await self._service.refresh_state()
             except Exception as exc:
                 log.warning("broker_intraday_poll_failed", error=str(exc))
-            
+
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),

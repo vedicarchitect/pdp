@@ -111,15 +111,63 @@ class BrokerFund {
       );
 }
 
+/// Why the broker tab may have nothing to show. An empty account and a subsystem
+/// that never ran look identical in the data alone, so the state is carried
+/// explicitly rather than inferred from empty lists.
+enum BrokerSyncState {
+  /// `BROKER_SYNC_ENABLED` is false — the reads return 503.
+  disabled,
+
+  /// Enabled, but no Dhan credentials are configured, so nothing is ever fetched.
+  noCredentials,
+
+  /// Enabled and credentialed, but the mirror has never been written.
+  neverSynced,
+
+  /// Mirror is populated. Empty lists here genuinely mean an empty account.
+  ready,
+}
+
+/// `GET /api/v1/broker-sync/status`.
+class BrokerSyncStatus {
+  final bool enabled;
+  final bool hasCredentials;
+  final bool liveMode;
+  final String? lastStateRefreshAt;
+
+  const BrokerSyncStatus({
+    required this.enabled,
+    required this.hasCredentials,
+    required this.liveMode,
+    this.lastStateRefreshAt,
+  });
+
+  factory BrokerSyncStatus.fromJson(Map<String, dynamic> json) => BrokerSyncStatus(
+        enabled: json['enabled'] as bool? ?? false,
+        hasCredentials: json['has_credentials'] as bool? ?? false,
+        liveMode: json['live_mode'] as bool? ?? false,
+        lastStateRefreshAt: json['last_state_refresh_at'] as String?,
+      );
+
+  BrokerSyncState get state {
+    if (!enabled) return BrokerSyncState.disabled;
+    if (!hasCredentials) return BrokerSyncState.noCredentials;
+    if (lastStateRefreshAt == null) return BrokerSyncState.neverSynced;
+    return BrokerSyncState.ready;
+  }
+}
+
 /// Aggregate of the three broker reads for the Broker (Dhan) tab.
 class BrokerAccount {
+  final BrokerSyncState state;
   final List<BrokerHolding> holdings;
   final List<BrokerPosition> positions;
   final BrokerFund? fund;
 
   const BrokerAccount({
-    required this.holdings,
-    required this.positions,
+    required this.state,
+    this.holdings = const [],
+    this.positions = const [],
     this.fund,
   });
 

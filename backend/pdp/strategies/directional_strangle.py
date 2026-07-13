@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -63,6 +63,7 @@ from pdp.strategy.strikes import (
 if TYPE_CHECKING:
     from pdp.market.bars import BarClosed
     from pdp.strategy.context import StrategyContext
+    from pdp.strategy.readiness import StrategyReadiness
 
 _IST = ZoneInfo("Asia/Kolkata")
 _VIX_RECENT_WINDOW = 3
@@ -82,6 +83,29 @@ def _to_tf_ema(ema_state: Any, price: float) -> TimeframeEMA | None:
     if 9 not in v or 20 not in v or 50 not in v:
         return None
     return TimeframeEMA(price=price, ema9=v[9], ema20=v[20], ema50=v[50])
+
+
+def weights_from_params(p: dict[str, Any]) -> BiasWeights:
+    """Build BiasWeights from strategy params.
+
+    Shared by ``on_init`` and ``StrategyHost``'s load-time satisfiability check
+    (``pdp.signals.bias.check_bias_satisfiability``) so both read identical
+    defaults -- a duplicated copy would silently drift the moment either one's
+    defaults changed without the other.
+    """
+    return BiasWeights(
+        w_ema_1h=float(p.get("w_ema_1h", 2.5)),
+        w_ema_15m=float(p.get("w_ema_15m", 2.0)),
+        w_ema_5m=float(p.get("w_ema_5m", 1.5)),
+        w_cam_daily=float(p.get("w_cam_daily", 1.0)),
+        w_cam_weekly=float(p.get("w_cam_weekly", 1.0)),
+        w_swing=float(p.get("w_swing", 1.0)),
+        w_orb=float(p.get("w_orb", 1.0)),
+        w_pcr=float(p.get("w_pcr", 1.0)),
+        th_complete=float(p.get("th_complete", 0.85)),
+        th_most=float(p.get("th_most", 0.60)),
+        th_more=float(p.get("th_more", 0.30)),
+    )
 
 
 def _to_cam(pivot_state: Any) -> CamLevels | None:
@@ -113,6 +137,17 @@ class OpenLeg:
     # trader-facing "day range" for the leg (updated on every on_tick for this sid).
     day_high: float | None = None
     day_low: float | None = None
+    # Canonical, durable classifier: "short" | "hedge" | "momentum". Maps 1:1 onto
+    # strategy_legs.leg_kind. `is_hedge`/`is_momentum` are kept as synced aliases so
+    # existing read sites and OpenLeg(is_hedge=True) constructions keep working.
+    kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is None:
+            self.kind = "hedge" if self.is_hedge else ("momentum" if self.is_momentum else "short")
+        else:
+            self.is_hedge = self.kind == "hedge"
+            self.is_momentum = self.kind == "momentum"
 
 
 def _leg_pnl(leg: OpenLeg, price: float, lots: int, lot_size: int) -> float:
@@ -147,7 +182,13 @@ class DirectionalStrangle(Strategy):
         self.option_segment: str = p.get("option_segment", "NSE_FNO")
         self._vix_sid: str = str(p.get("vix_security_id", "21"))
 
+        # Last-known-good lot size: YAML seeds it for the very first bar (before the
+        # session-start DB resolution in `_maybe_resolve_lot_size` runs); after that the
+        # instruments table is authoritative and YAML is only a sanity-check comparison.
         self._lot_size: int = int(p.get("lot_size", 65))
+        self._lot_size_yaml: int | None = int(p["lot_size"]) if p.get("lot_size") is not None else None
+        self._lot_size_day: date | None = None
+        self._lot_size_degraded: bool = False
         self._scale_lots: int = int(p.get("scale_lots", 2))
         self._otm_steps: int = int(p.get("otm_steps", 2))
         self._hedge_prem_min: float = float(p.get("hedge_prem_min", 2.0))
@@ -187,19 +228,7 @@ class DirectionalStrangle(Strategy):
         self._roll_target_min_prem: float = float(p.get("roll_target_min_prem", 50.0))
 
         # Bias weights (dominant tren/cons walk-forward config)
-        self._weights = BiasWeights(
-            w_ema_1h=float(p.get("w_ema_1h", 2.5)),
-            w_ema_15m=float(p.get("w_ema_15m", 2.0)),
-            w_ema_5m=float(p.get("w_ema_5m", 1.5)),
-            w_cam_daily=float(p.get("w_cam_daily", 1.0)),
-            w_cam_weekly=float(p.get("w_cam_weekly", 1.0)),
-            w_swing=float(p.get("w_swing", 1.0)),
-            w_orb=float(p.get("w_orb", 1.0)),
-            w_pcr=float(p.get("w_pcr", 1.0)),
-            th_complete=float(p.get("th_complete", 0.85)),
-            th_most=float(p.get("th_most", 0.60)),
-            th_more=float(p.get("th_more", 0.30)),
-        )
+        self._weights = weights_from_params(p)
 
         raw_rt: dict = p.get("ratio_table", {})
         self._ratio_table: dict[BiasBucket, tuple[int, int]] = (
@@ -217,16 +246,29 @@ class DirectionalStrangle(Strategy):
         )
 
         # Runtime state
-        self._short_legs: list[OpenLeg] = []
-        self._hedge_legs: list[OpenLeg] = []
-        self._momentum_legs: list[OpenLeg] = []
+        # Single source of truth: one OpenLeg per security_id. The per-kind views
+        # (_short_legs / _hedge_legs / _momentum_legs) are read-only projections;
+        # opening/closing goes through _add_leg/_remove_leg so a duplicate
+        # security_id is structurally rejected (one leg owns a security).
+        self._legs: dict[str, OpenLeg] = {}
         # Per-sid locks serializing "check position cap, then open" so concurrent
         # opens on the same sid can't both pass the cap check and jointly exceed it.
         self._leg_locks: dict[str, asyncio.Lock] = {}
         self._current_bucket: str | None = None
         self._last_score: float = 0.0
-        self._done_for_day = False
+        self._done_for_day: bool = False
         self._day_key: date | None = None
+        self._last_readiness_state: str = "ok"
+        # Separate from `_last_readiness_state` above (which check_readiness() itself
+        # mutates on every call, before on_bar's own gate check ever sees it — using
+        # the same flag for both made the gate's "emit once on transition" dead code).
+        self._entry_gate_blocked: bool = False
+        # Security ids whose in-memory lots disagree with the broker (drives the
+        # readiness "Reconciliation" component). `_divergence_shapes` rate-limits
+        # the critical event to once per (sid, mem, broker) shape per session.
+        self._divergences: set[str] = set()
+        self._divergence_shapes: set[str] = set()
+
         self._subscribed_option_sids: set[str] = set()
         self._halt_checked: bool = False  # checked once per day to avoid repeated Redis reads
         self._pending_bucket: str | None = None  # candidate new bucket awaiting confirmation
@@ -317,8 +359,132 @@ class DirectionalStrangle(Strategy):
         await self._rehydrate_legs()
 
     # ------------------------------------------------------------------ #
-    # Bar handler                                                          #
+    # Leg structure — one OpenLeg per security_id                          #
     # ------------------------------------------------------------------ #
+
+    @property
+    def _short_legs(self) -> list[OpenLeg]:
+        return [l for l in self._legs.values() if l.kind == "short"]
+
+    @property
+    def _hedge_legs(self) -> list[OpenLeg]:
+        return [l for l in self._legs.values() if l.kind == "hedge"]
+
+    @property
+    def _momentum_legs(self) -> list[OpenLeg]:
+        return [l for l in self._legs.values() if l.kind == "momentum"]
+
+    def _add_leg(self, leg: OpenLeg) -> None:
+        """Register a leg. A second leg for a security already tracked is a state
+        divergence (the exact 4→8→16 growth mechanism) — reject it loudly."""
+        from pdp.events.models import EventType
+
+        existing = self._legs.get(leg.security_id)
+        if existing is not None:
+            self.ctx.emit_critical(
+                EventType.LEG_STATE_DIVERGED,
+                leg.security_id,
+                "Duplicate leg for security",
+                f"attempted to open a {leg.kind} leg for {leg.security_id} already "
+                f"tracked as {existing.kind}",
+                {"strategy_id": self.strategy_id},
+            )
+            raise ValueError(f"duplicate leg for security_id {leg.security_id}")
+        self._legs[leg.security_id] = leg
+
+    def _remove_leg(self, sid: str) -> None:
+        self._legs.pop(sid, None)
+
+    async def check_readiness(self) -> StrategyReadiness:
+        from pdp.strategy.readiness import ReadinessComponent, StrategyReadiness
+        from pdp.broker_sync.models import BrokerFund
+        from sqlalchemy import select
+        from datetime import datetime, UTC
+
+        components = []
+        is_paper = self._mode == "paper"
+
+        # 1. State Reconciliation
+        if len(self._divergences) > 0:
+            components.append(ReadinessComponent(
+                name="Reconciliation",
+                state="blocked",
+                reason=f"{len(self._divergences)} leg(s) diverged"
+            ))
+        else:
+            components.append(ReadinessComponent(name="Reconciliation", state="ok", reason="State synchronized"))
+
+        # 2. Broker Connection
+        if is_paper:
+            components.append(ReadinessComponent(name="Broker Sync", state="ok", reason="Paper mode (bypassed)"))
+        else:
+            last_refresh = None
+            if self.ctx.session_maker:
+                async with self.ctx.session_maker() as session:
+                    row = await session.scalar(select(BrokerFund).where(BrokerFund.account_id == self._account_id))
+                    if row is not None and row.synced_at is not None:
+                        last_refresh = row.synced_at
+
+            if last_refresh is None:
+                components.append(ReadinessComponent(name="Broker Sync", state="blocked", reason="Broker sync never ran"))
+            else:
+                age = (datetime.now(UTC) - last_refresh).total_seconds()
+                if age > 60:
+                    components.append(ReadinessComponent(name="Broker Sync", state="degraded", reason=f"Stale broker state ({int(age)}s old)"))
+                else:
+                    components.append(ReadinessComponent(name="Broker Sync", state="ok", reason="Broker state fresh"))
+
+        # 3. Indicators
+        ind_blocked = []
+        for tf in ["5m", "15m", "1H", "1w"]:
+            summary = self.ctx.indicators.seeding_summary(self.underlying, tf) if self.ctx.indicators else {}
+            for (family, period), is_seeded in summary.items():
+                if not is_seeded:
+                    suffix = f"({period})" if period else ""
+                    ind_blocked.append(f"{family.upper()}{suffix} on {tf}")
+
+        if ind_blocked:
+            components.append(ReadinessComponent(
+                name="Indicators",
+                state="blocked",
+                reason=f"Unseeded: {', '.join(ind_blocked)}"
+            ))
+        else:
+            components.append(ReadinessComponent(name="Indicators", state="ok", reason="Indicators seeded"))
+
+        # 4. Chain (PCR)
+        w_pcr = getattr(self._weights, "w_pcr", 0)
+        if w_pcr > 0:
+            pcr_val = self.ctx.chain_hub.get_pcr(self.underlying) if self.ctx.chain_hub else None
+            if pcr_val is None:
+                components.append(ReadinessComponent(name="Chain", state="blocked", reason="PCR unavailable"))
+            else:
+                components.append(ReadinessComponent(name="Chain", state="ok", reason="PCR available"))
+        else:
+            components.append(ReadinessComponent(name="Chain", state="ok", reason="PCR not required"))
+
+        # 5. Bias Satisfiability — spot is the one input every bucket vote needs;
+        # a null spot means score_bias() cannot run at all this bar.
+        if self._last_spot is None:
+            components.append(ReadinessComponent(name="Bias", state="blocked", reason="Spot price unavailable"))
+        else:
+            components.append(ReadinessComponent(name="Bias", state="ok", reason="Bias inputs satisfiable"))
+
+        readiness = StrategyReadiness.evaluate(components)
+        
+        # Emit state change if it flipped
+        if readiness.state != self._last_readiness_state:
+            from pdp.events.models import EventType
+            self.ctx.emit_critical(
+                EventType.STRATEGY_READINESS_CHANGED,
+                self.sid,
+                "Readiness State Changed",
+                f"Strategy readiness transitioned to {readiness.state}",
+                {"previous": self._last_readiness_state, "current": readiness.state, "components": [{"name": c.name, "state": c.state, "reason": c.reason} for c in components]}
+            )
+            self._last_readiness_state = readiness.state
+            
+        return readiness
 
     async def on_bar(self, bar: BarClosed) -> None:
         if bar.security_id != self.sid:
@@ -329,6 +495,7 @@ class DirectionalStrangle(Strategy):
         now = ist.time()
 
         self._maybe_reset_day(bar_day)
+        await self._maybe_resolve_lot_size(bar_day)
 
         # On first bar of each day, check Redis for a persisted halt marker.
         if not self._halt_checked:
@@ -397,6 +564,19 @@ class DirectionalStrangle(Strategy):
         # Existing legs are still managed (exits run in on_tick; bucket-change closes below).
         entry_allowed = await self._entry_within_dte(bar_day)
 
+
+        readiness = await self.check_readiness()
+        if readiness.is_blocked:
+            if not self._entry_gate_blocked:
+                self.ctx.log.warning("strategy_not_ready", components=[c.name for c in readiness.components if c.state == "blocked"])
+                self._emit_event(StrangleEventType.STRATEGY_NOT_READY, reason=readiness.components[0].reason)
+                self._entry_gate_blocked = True
+            return
+
+        if self._entry_gate_blocked:
+            self.ctx.log.info("strategy_ready")
+            self._entry_gate_blocked = False
+
         inp = self._build_bias_inputs(spot)
         result = score_bias(inp, weights=self._weights, ratio_table=self._ratio_table)
         self._last_score = result.score
@@ -411,6 +591,14 @@ class DirectionalStrangle(Strategy):
             shorts=len(self._short_legs),
             momentum=len(self._momentum_legs),
             votes=result.votes,
+            # Per-input vote/weight/abstained, keyed by input name -- queryable field
+            # names in OpenSearch (breakdown.cam_weekly.abstained), not a formatted
+            # string, so a permanently-abstaining input is visible in the log rather
+            # than inferred from a suspicious bucket distribution.
+            breakdown={
+                name: {"vote": vb.vote, "weight": vb.weight, "abstained": vb.abstained}
+                for name, vb in result.breakdown.items()
+            },
         )
 
         # Leg status heartbeat after every bias_evaluated
@@ -515,9 +703,20 @@ class DirectionalStrangle(Strategy):
             if entry <= 0:
                 continue
 
-            # Rollup: close and reopen when premium decays below roll_trigger_prem
-            if ltp < self._roll_trigger_prem and leg.security_id not in self._rolling:
-                await self._roll_leg(leg, old_ltp=ltp)
+            # Rollup: close and reopen when premium decays below roll_trigger_prem.
+            # Claim the roll atomically under the sid lock so two concurrent ticks
+            # can't both pass the `not in _rolling` check and roll the same leg
+            # twice. The lock is released before _roll_leg runs (it re-acquires the
+            # same lock per close/open), so there is no non-reentrant deadlock.
+            if ltp < self._roll_trigger_prem:
+                async with self._lock_for(sid):
+                    if sid in self._rolling:
+                        return
+                    self._rolling.add(sid)
+                try:
+                    await self._roll_leg(leg, old_ltp=ltp)
+                finally:
+                    self._rolling.discard(sid)
                 return
 
             if ltp <= entry * self._take_profit_pct:
@@ -529,31 +728,33 @@ class DirectionalStrangle(Strategy):
                 await self._close_matching_hedge(leg)
                 return
             if not leg.half_stopped and ltp >= entry * (1 + self._pct_stop_half):
-                close_lots = leg.lots // 2
-                if close_lots > 0:
-                    # Capture exit fields BEFORE mutating leg.lots
-                    exit_fields = self._leg_exit_fields(leg, ltp, "stop_half", close_lots=close_lots)
-                    await self._place(sid, leg.segment, "BUY", close_lots)
-                    leg.lots -= close_lots
-                    leg.half_stopped = True
-                    self._emit_event(
+                if leg.lots // 2 > 0:
+                    # Partial close through the shared locked helper: side derives
+                    # from the broker net_qty sign (never a hardcoded BUY), so a
+                    # misclassified long leg is flattened with SELL, not grown.
+                    closed = await self._partial_close(
+                        leg,
+                        leg.lots // 2,
+                        "stop_half",
                         StrangleEventType.STOP_HALF,
-                        sid=sid,
                         ltp=ltp,
-                        remaining=leg.lots,
-                        partial=True,
-                        **exit_fields,
                     )
-                    # Record stop gate for this side
-                    self._stop_gate[leg.opt_type] = {
-                        "exit_px": ltp,
-                        "sid": sid,
-                        "n_below": 0,
-                    }
-                    # leg.lots just changed (halved) — re-check stop-all against the
-                    # now-smaller remaining position on the NEXT tick, not this one,
-                    # so we never emit two terminal closes for one tick.
-                    continue
+                    if closed:
+                        leg.half_stopped = True
+                        # Record stop gate for this side
+                        self._stop_gate[leg.opt_type] = {
+                            "exit_px": ltp,
+                            "sid": sid,
+                            "n_below": 0,
+                        }
+                        # leg.lots just changed (halved) — re-check stop-all against
+                        # the now-smaller remaining position on the NEXT tick, not
+                        # this one, so we never emit two terminal closes for one tick.
+                        continue
+                    # closed == False: broker held fewer lots than expected (e.g. a
+                    # transient divergence) and nothing was actually reduced. Do not
+                    # latch half_stopped — fall through so this same threshold can
+                    # retry on a later tick once the broker position catches up.
             if ltp >= entry * (1 + self._pct_stop_all):
                 # Record stop gate before closing
                 self._stop_gate[leg.opt_type] = {
@@ -619,6 +820,14 @@ class DirectionalStrangle(Strategy):
         self.ctx.log.info(
             event_type, **{k: str(v) if isinstance(v, Decimal) else v for k, v in record.items()}
         )
+
+        # Durable DB-first persistence
+        event_service = self.ctx._event_service
+        if event_service is not None and event_service.writer is not None:
+            mongo_doc = dict(record)
+            mongo_doc["ts"] = datetime.now(UTC)  # needed for TTL
+            self.ctx._event_service.writer.enqueue(mongo_doc)
+
         if self._slog:
             self._slog.write(record)
         self._activity.append(record)
@@ -693,10 +902,9 @@ class DirectionalStrangle(Strategy):
         ema_15m = _to_tf_ema(ind.ema(self.sid, "15m"), spot) if ind else None
         ema_1h = _to_tf_ema(ind.ema(self.sid, "1H"), spot) if ind else None
 
-        pivot = ind.pivots(self.sid, "5m") if ind else None
+        pivot = ind.pivots(self.sid, "1D") if ind else None
         cam_daily = _to_cam(pivot)
 
-        # Weekly Camarilla: read from "1w" pivot snapshot (seeded by 1w BarAggregator)
         weekly_pivot = ind.pivots(self.sid, "1w") if ind else None
         cam_weekly = _to_cam(weekly_pivot)
 
@@ -809,6 +1017,8 @@ class DirectionalStrangle(Strategy):
         return await self._resolve_fill_price(sid)
 
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
+        if self._lot_size_degraded:
+            return
         # Stop-gate check: block re-entry for 3 bars after a stop on this side
         if opt_type in self._stop_gate:
             self._emit_event(StrangleEventType.STOP_GATE_WAIT, opt_type=opt_type, reason="open_blocked")
@@ -876,7 +1086,16 @@ class DirectionalStrangle(Strategy):
                 entry_reason=_reason,
                 expiry=inst.expiry,
             )
-            self._short_legs.append(leg)
+            try:
+                self._add_leg(leg)
+            except ValueError:
+                # _add_leg already emitted LEG_STATE_DIVERGED critical. The broker
+                # order above already filled — do not crash the whole strategy over
+                # a leg we can't register; the orphan position surfaces via the next
+                # _reconcile_divergences() poll instead of taking every other leg's
+                # management offline with it.
+                return
+            await self._persist_leg_open(leg)
             self._emit_event(
                 StrangleEventType.LEG_OPEN,
                 sid=sid,
@@ -900,6 +1119,8 @@ class DirectionalStrangle(Strategy):
         picks the furthest-OTM strike whose LTP falls in the premium band.
         Falls back to the cheapest available if none qualifies.
         """
+        if self._lot_size_degraded:
+            return
         if self.ctx.session_maker is None:
             return
 
@@ -982,20 +1203,25 @@ class DirectionalStrangle(Strategy):
                 return
             h_strike = float(target.strike) if target.strike is not None else 0.0
             _reason = f"{self._current_bucket}@{self._last_score:.2f}"
-            self._hedge_legs.append(
-                OpenLeg(
-                    security_id=h_sid,
-                    segment=segment,
-                    opt_type=opt_type,
-                    strike=h_strike,
-                    lots=lots,
-                    entry_price=avg_px,
-                    is_hedge=True,
-                    entry_time=datetime.now(tz=_IST),
-                    entry_reason=_reason,
-                    expiry=target.expiry,
-                )
+            hedge_leg = OpenLeg(
+                security_id=h_sid,
+                segment=segment,
+                opt_type=opt_type,
+                strike=h_strike,
+                lots=lots,
+                entry_price=avg_px,
+                is_hedge=True,
+                entry_time=datetime.now(tz=_IST),
+                entry_reason=_reason,
+                expiry=target.expiry,
             )
+            try:
+                self._add_leg(hedge_leg)
+            except ValueError:
+                # See _open_short's identical guard: the broker order already
+                # filled, so swallow rather than crash every other leg's management.
+                return
+            await self._persist_leg_open(hedge_leg)
             self._emit_event(
                 StrangleEventType.LEG_OPEN,
                 sid=h_sid,
@@ -1013,6 +1239,8 @@ class DirectionalStrangle(Strategy):
 
     async def _open_momentum(self, spot: float, bucket: BiasBucket) -> None:
         """Buy ITM+1 option sized to momentum_premium_target (default Rs 50,000)."""
+        if self._lot_size_degraded:
+            return
         opt_type = "CE" if bucket == BiasBucket.COMPLETE_BULL else "PE"
 
         if self.ctx.session_maker is None:
@@ -1091,20 +1319,25 @@ class DirectionalStrangle(Strategy):
                 )
                 return
             _reason = f"{self._current_bucket}@{self._last_score:.2f}"
-            self._momentum_legs.append(
-                OpenLeg(
-                    security_id=sid,
-                    segment=segment,
-                    opt_type=opt_type,
-                    strike=strike,
-                    lots=lots,
-                    entry_price=avg_px,
-                    is_momentum=True,
-                    entry_time=datetime.now(tz=_IST),
-                    entry_reason=_reason,
-                    expiry=inst.expiry,
-                )
+            momentum_leg = OpenLeg(
+                security_id=sid,
+                segment=segment,
+                opt_type=opt_type,
+                strike=strike,
+                lots=lots,
+                entry_price=avg_px,
+                is_momentum=True,
+                entry_time=datetime.now(tz=_IST),
+                entry_reason=_reason,
+                expiry=inst.expiry,
             )
+            try:
+                self._add_leg(momentum_leg)
+            except ValueError:
+                # See _open_short's identical guard: the broker order already
+                # filled, so swallow rather than crash every other leg's management.
+                return
+            await self._persist_leg_open(momentum_leg)
             self._emit_event(
                 StrangleEventType.LEG_OPEN,
                 sid=sid,
@@ -1127,122 +1360,66 @@ class DirectionalStrangle(Strategy):
                 await self._close_momentum_leg(leg, "score_exit")
 
     async def _close_momentum_leg(self, leg: OpenLeg, reason: str) -> None:
-        ltp = self._ltp_cache.get(leg.security_id)
-        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
-            from pdp.events.models import EventType
-
-            self.ctx.emit_critical(
-                EventType.CLOSE_UNPRICED,
-                leg.security_id,
-                "Close rejected",
-                f"Momentum leg unpriced (LTP {ltp}) on close attempt",
-                {"strategy_id": self.strategy_id, "reason": reason},
-            )
-            return
-
-        await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
-        net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
-        if net_qty == 0:
-            self._momentum_legs = [l for l in self._momentum_legs if l is not leg]
-            return
-        sell_lots = abs(net_qty) // self._lot_size
-        if sell_lots > 0:
-            # Same direction-correctness guard as _close_short_leg/_close_hedge_leg:
-            # derive the side from the actual net_qty sign, not from "this is the
-            # momentum list" — protects against a misclassified rehydrated leg.
-            if net_qty < 0:
-                from pdp.events.models import EventType
-
-                self.ctx.emit_critical(
-                    EventType.POSITION_SIZE_CAPPED,
-                    leg.security_id,
-                    "Leg direction mismatch on close",
-                    f"Leg {leg.security_id} tracked as momentum(long) but broker net_qty is {net_qty} "
-                    "(short) — closing with BUY instead of SELL to avoid growing the position",
-                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
-                )
-            side = "BUY" if net_qty < 0 else "SELL"
-            await self._place(leg.security_id, leg.segment, side, sell_lots)
-        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
-        await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(
-            StrangleEventType.LEG_CLOSE,
-            sid=leg.security_id,
-            reason=reason,
-            is_momentum=True,
-            **self._leg_exit_fields(leg, exit_px, reason),
-        )
-        self._momentum_legs = [l for l in self._momentum_legs if l is not leg]
+        await self._close_leg(leg, reason)
 
     # ------------------------------------------------------------------ #
     # Rollup                                                               #
     # ------------------------------------------------------------------ #
 
     async def _roll_leg(self, leg: OpenLeg, old_ltp: float) -> None:
-        """Close a decayed short (LTP < roll_trigger_prem) and reopen at same OTM level."""
-        sid = leg.security_id
-        self._rolling.add(sid)
+        """Roll a decayed short (LTP < roll_trigger_prem) to the same OTM level.
+
+        All-or-nothing: every precondition (spot, a resolvable instrument, and
+        sufficient premium on it) is verified BEFORE the old short and its hedge
+        are closed. A roll that cannot reopen therefore leaves the existing
+        position exactly as it was, rather than closing it and stranding the
+        strategy short-less (the leg-growth incident closed first, then failed to
+        reopen, and the next bar opened *another* leg). The `_rolling` claim and
+        its release are owned by the `on_tick` caller under the sid lock.
+        """
         old_strike = leg.strike
         old_opt_type = leg.opt_type
         old_lots = leg.lots
-        try:
-            await self._close_short_leg(leg, "roll")
-            await self._close_matching_hedge(leg)
 
-            spot = self._last_spot
-            if spot is None or self.ctx.session_maker is None:
-                self._emit_event(
-                    StrangleEventType.ROLLED,
-                    opt_type=old_opt_type,
-                    old_strike=old_strike,
-                    old_ltp=round(old_ltp, 2),
-                    lots=old_lots,
-                    result="skipped_no_spot",
-                )
-                return
-
-            # Check if the new OTM strike has sufficient premium before opening
-            async with self.ctx.session_maker() as session:
-                new_inst = await resolve_otm_option(
-                    session,
-                    underlying=self.underlying,
-                    spot=spot,
-                    option_type=old_opt_type,
-                    otm_steps=self._otm_steps,
-                    strike_step=self._strike_step,
-                )
-            if new_inst is None:
-                self._emit_event(
-                    StrangleEventType.ROLLED,
-                    opt_type=old_opt_type,
-                    old_strike=old_strike,
-                    old_ltp=round(old_ltp, 2),
-                    lots=old_lots,
-                    result="no_instrument",
-                )
-                return
-
-            ltp, _ = (
-                await self.ctx.market.ltp_with_age(new_inst.security_id) if self.ctx.market else (None, None)
+        spot = self._last_spot
+        if not spot or self.ctx.session_maker is None:
+            self._emit_event(
+                StrangleEventType.ROLLED,
+                opt_type=old_opt_type,
+                old_strike=old_strike,
+                old_ltp=round(old_ltp, 2),
+                lots=old_lots,
+                result="skipped_no_spot",
             )
-            new_ltp = float(ltp) if ltp and ltp > 0 else 0.0
-            new_strike = float(new_inst.strike or 0)
+            return
 
-            if new_ltp < self._roll_target_min_prem:
-                self._emit_event(
-                    StrangleEventType.ROLLED,
-                    opt_type=old_opt_type,
-                    old_strike=old_strike,
-                    old_ltp=round(old_ltp, 2),
-                    new_strike=new_strike,
-                    new_ltp=round(new_ltp, 2),
-                    lots=old_lots,
-                    result="skipped_low_prem",
-                )
-                return
+        async with self.ctx.session_maker() as session:
+            new_inst = await resolve_otm_option(
+                session,
+                underlying=self.underlying,
+                spot=spot,
+                option_type=old_opt_type,
+                otm_steps=self._otm_steps,
+                strike_step=self._strike_step,
+            )
+        if new_inst is None:
+            self._emit_event(
+                StrangleEventType.ROLLED,
+                opt_type=old_opt_type,
+                old_strike=old_strike,
+                old_ltp=round(old_ltp, 2),
+                lots=old_lots,
+                result="no_instrument",
+            )
+            return
 
-            # Open the new short (stop-gate check is inside _open_short)
-            await self._open_short(spot, old_opt_type, old_lots)
+        ltp, _ = (
+            await self.ctx.market.ltp_with_age(new_inst.security_id) if self.ctx.market else (None, None)
+        )
+        new_ltp = float(ltp) if ltp and ltp > 0 else 0.0
+        new_strike = float(new_inst.strike or 0)
+
+        if new_ltp < self._roll_target_min_prem:
             self._emit_event(
                 StrangleEventType.ROLLED,
                 opt_type=old_opt_type,
@@ -1251,10 +1428,43 @@ class DirectionalStrangle(Strategy):
                 new_strike=new_strike,
                 new_ltp=round(new_ltp, 2),
                 lots=old_lots,
-                result="ok",
+                result="skipped_low_prem",
             )
-        finally:
-            self._rolling.discard(sid)
+            return
+
+        # All preconditions satisfied — only now mutate the book.
+        await self._close_leg(leg, "roll")
+        await self._close_matching_hedge(leg)
+        legs_before = set(self._legs.keys())
+        await self._open_short(spot, old_opt_type, old_lots)
+        reopened = bool(set(self._legs.keys()) - legs_before)
+        if not reopened:
+            # _open_short can silently no-op (stop-gate, lot_size_degraded, cap
+            # exhausted, unresolved fill price) — none of those raise, so the only
+            # way to know the reopen actually landed a leg is to check the book.
+            # Without this, ROLLED result="ok" would claim success while the
+            # strategy sits naked on this side — the exact closed-then-failed-to-
+            # reopen failure mode this rewrite's docstring says it prevents.
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.NAKED_POSITION,
+                leg.security_id,
+                "Roll failed to reopen",
+                f"rolled {old_opt_type} leg (old strike {old_strike}) closed, but "
+                f"reopen produced no new leg — strategy is naked on this side",
+                {"strategy_id": self.strategy_id, "opt_type": old_opt_type, "old_strike": old_strike},
+            )
+        self._emit_event(
+            StrangleEventType.ROLLED,
+            opt_type=old_opt_type,
+            old_strike=old_strike,
+            old_ltp=round(old_ltp, 2),
+            new_strike=new_strike,
+            new_ltp=round(new_ltp, 2),
+            lots=old_lots,
+            result="ok" if reopened else "reopen_failed",
+        )
 
     # ------------------------------------------------------------------ #
     # Leg close                                                            #
@@ -1292,6 +1502,7 @@ class DirectionalStrangle(Strategy):
             "opt_type": leg.opt_type,
             "strike": leg.strike,
             "is_hedge": leg.is_hedge,
+            "is_momentum": leg.is_momentum,
             "expiry": leg.expiry.isoformat() if leg.expiry else None,
             "symbol": symbol,
         }
@@ -1302,17 +1513,38 @@ class DirectionalStrangle(Strategy):
         (`on_bar`) emits the single day summary event (SQUARE_OFF/DAY_LOSS_CAP)
         with the day's final realized total, whether or not any legs were open.
         """
-        # Each _close_*_leg call prunes itself from its list on a successful
-        # close. A leg that is rejected (e.g. unpriced LTP) deliberately stays
-        # in its list so the next bar retries it — do NOT blanket-clear here,
-        # or a rejected close silently orphans the underlying broker position
-        # (still open in Postgres) while the strategy forgets it ever existed.
-        for leg in list(self._short_legs):
-            await self._close_short_leg(leg, reason)
-        for leg in list(self._hedge_legs):
-            await self._close_hedge_leg(leg, reason)
-        for leg in list(self._momentum_legs):
-            await self._close_momentum_leg(leg, reason)
+        # Each _close_leg call prunes the leg on a successful close. A leg
+        # rejected (e.g. unpriced LTP) deliberately stays so the next bar retries
+        # it — _close_leg does not remove a leg it could not close.
+        for leg in list(self._legs.values()):
+            await self._close_leg(leg, reason)
+        # The broker is the source of truth at square-off: close any position the
+        # in-memory book never knew about (an orphan) instead of trusting _legs.
+        for pos in await self._broker_positions():
+            net = int(getattr(pos, "net_qty", 0) or 0)
+            sid = getattr(pos, "security_id", None)
+            if net == 0 or sid is None or sid in self._legs:
+                continue
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.LEG_STATE_DIVERGED,
+                sid,
+                "Orphan position at square-off",
+                f"broker holds net_qty={net} for {sid} with no tracked leg",
+                {"strategy_id": self.strategy_id, "reason": reason},
+            )
+            async with self._lock_for(sid):
+                net2 = await self.ctx.orders.get_net_qty(sid)
+                if net2 == 0:
+                    continue
+                side = "SELL" if net2 > 0 else "BUY"
+                await self._place(
+                    sid,
+                    getattr(pos, "exchange_segment", "NSE_FNO"),
+                    side,
+                    abs(net2) // self._lot_size,
+                )
         self._current_bucket = None
         self._stop_gate.clear()
 
@@ -1323,6 +1555,155 @@ class DirectionalStrangle(Strategy):
             await self._close_hedge_leg(leg, reason)
         self._current_bucket = None
 
+    async def _close_leg(
+        self,
+        leg: OpenLeg,
+        reason: str,
+        *,
+        event_type: str = StrangleEventType.LEG_CLOSE,
+    ) -> None:
+        """Close any leg atomically and emit exactly one terminal event for it.
+
+        The whole cancel → read net_qty → place sequence runs under the per-sid
+        lock (the same lock the open path holds) so a concurrent open/close on
+        the same security cannot interleave its read-modify-write with ours. Two
+        invariants make the position unable to grow on a close:
+
+        1. **Side from the broker sign, never from the leg's kind.** A rehydrated
+           or contradicted leg can be misclassified; flattening a `net_qty>0`
+           position always SELLs and a `net_qty<0` position always BUYs.
+        2. **Close at most this leg's lots** (`min(leg.lots, broker_lots)`), so a
+           divergence where the broker holds more never over-trades.
+
+        `event_type` lets a caller tag the close (TAKE_PROFIT/STOP_ALL) instead of
+        the generic LEG_CLOSE — callers must NOT also emit their own terminal
+        event, or the ledger double-counts.
+        """
+        sid = leg.security_id
+        ltp = self._ltp_cache.get(sid)
+        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
+            from pdp.events.models import EventType
+
+            self.ctx.emit_critical(
+                EventType.CLOSE_UNPRICED,
+                sid,
+                "Close rejected",
+                f"{leg.kind} leg unpriced (LTP {ltp}) on close attempt",
+                {"strategy_id": self.strategy_id, "reason": reason},
+            )
+            return
+
+        async with self._lock_for(sid):
+            await self.ctx.orders.cancel_open_entry_orders(sid)
+            net_qty = await self.ctx.orders.get_net_qty(sid)
+            if net_qty == 0:
+                self._remove_leg(sid)
+                return
+            broker_lots = abs(net_qty) // self._lot_size
+            close_lots = min(leg.lots, broker_lots)
+            if close_lots == 0:
+                # net_qty != 0 (checked above) but rounds down to fewer than one
+                # full lot — a genuine broker/memory divergence, not a clean
+                # close. Placing no order here (nothing to sell/buy a fraction of
+                # a lot) while still emitting a terminal close + removing the leg
+                # would orphan the residual broker position with zero further
+                # tracking. Flag it and leave the leg in place so the next
+                # _reconcile_divergences() poll — and a human — see it.
+                self._flag_divergence(sid, leg.lots, broker_lots)
+                return
+            # A short is expected to sit at net_qty<0, a hedge/momentum long at
+            # net_qty>0. A sign that contradicts the leg's tracked kind is
+            # evidence the durable state is wrong — alarm on it (but still
+            # flatten by the real sign below, never grow the position).
+            expected_sign = -1 if leg.kind == "short" else 1
+            actual_sign = 1 if net_qty > 0 else -1
+            if actual_sign != expected_sign:
+                self._on_sign_contradiction(leg, net_qty, reason)
+            side = "SELL" if net_qty > 0 else "BUY"
+            await self._place(sid, leg.segment, side, close_lots)
+            exit_px = self._ltp_cache.get(sid) or 0.0
+            await self._unsubscribe_option(sid, leg.segment)
+            self._emit_event(
+                event_type,
+                sid=sid,
+                reason=reason,
+                **self._leg_exit_fields(leg, exit_px, reason),
+            )
+            await self._persist_leg_close(sid)
+            self._remove_leg(sid)
+
+    def _on_sign_contradiction(self, leg: OpenLeg, net_qty: int, reason: str) -> None:
+        """A leg's broker net_qty sign contradicts its tracked kind on close.
+
+        This is a data-corruption alarm distinct from the risk-limit cap
+        (`POSITION_SIZE_CAPPED`), so it gets its own `LEG_TYPE_CONTRADICTED`
+        type — a dashboard counting cap events must not confuse "the cap did its
+        job" with "leg-type tracking is broken". In live mode the underlying is
+        halted for the session; paper emits and continues so the session's
+        remaining behaviour is still observable.
+        """
+        from pdp.events.models import EventType
+
+        self.ctx.emit_critical(
+            EventType.LEG_TYPE_CONTRADICTED,
+            leg.security_id,
+            "Leg type contradicts broker sign",
+            f"Leg {leg.security_id} tracked as {leg.kind} but broker net_qty is {net_qty} "
+            "— flattening by the broker sign to avoid growing the position",
+            {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
+        )
+        if self._mode == "live":
+            self._done_for_day = True
+
+    async def _persist_leg_open(self, leg: OpenLeg) -> None:
+        """Durably record an open leg's *kind* + identity in PostgreSQL.
+
+        Rehydration after a restart reads this table alone (see
+        `_rehydrate_legs`); a leg's kind is what decides its closing direction,
+        so it must survive a restart rather than living only in memory. Written
+        right after the fill is confirmed, under the sid lock the caller already
+        holds. (The broker owns the Position row in its own transaction, so this
+        cannot literally share that transaction — it is a separate durable write
+        immediately after the fill.)
+        """
+        if self.ctx.session_maker is None:
+            return
+        from pdp.orders.models import StrategyLeg
+
+        async with self.ctx.session_maker() as s:
+            s.add(
+                StrategyLeg(
+                    strategy_id=self.strategy_id,
+                    security_id=leg.security_id,
+                    leg_kind=leg.kind or "short",
+                    opt_type=leg.opt_type,
+                    strike=Decimal(str(leg.strike)),
+                    expiry=leg.expiry,
+                )
+            )
+            await s.commit()
+
+    async def _persist_leg_close(self, sid: str) -> None:
+        """Mark the leg's durable row closed (sets `closed_at`); never deletes,
+        so the partial-unique index frees the sid for a future re-open."""
+        if self.ctx.session_maker is None:
+            return
+        from sqlalchemy import func, update
+
+        from pdp.orders.models import StrategyLeg
+
+        async with self.ctx.session_maker() as s:
+            await s.execute(
+                update(StrategyLeg)
+                .where(
+                    StrategyLeg.strategy_id == self.strategy_id,
+                    StrategyLeg.security_id == sid,
+                    StrategyLeg.closed_at.is_(None),
+                )
+                .values(closed_at=func.now())
+            )
+            await s.commit()
+
     async def _close_short_leg(
         self,
         leg: OpenLeg,
@@ -1330,58 +1711,7 @@ class DirectionalStrangle(Strategy):
         *,
         event_type: str = StrangleEventType.LEG_CLOSE,
     ) -> None:
-        """Close a short leg and emit exactly one terminal event for it.
-
-        `event_type` lets a caller tag the close with its specific reason
-        (TAKE_PROFIT/STOP_ALL) instead of the generic LEG_CLOSE — callers must
-        NOT also emit their own terminal event, or the ledger double-counts.
-        """
-        ltp = self._ltp_cache.get(leg.security_id)
-        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
-            from pdp.events.models import EventType
-
-            self.ctx.emit_critical(
-                EventType.CLOSE_UNPRICED,
-                leg.security_id,
-                "Close rejected",
-                f"Short leg unpriced (LTP {ltp}) on close attempt",
-                {"strategy_id": self.strategy_id, "reason": reason},
-            )
-            return
-
-        await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
-        net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
-        if net_qty == 0:
-            self._short_legs = [l for l in self._short_legs if l is not leg]
-            return
-        close_lots = abs(net_qty) // self._lot_size
-        if close_lots > 0:
-            # Derive the closing side from the ACTUAL broker position sign, not
-            # from "this is the short-leg list" — a rehydrated leg can be
-            # misclassified (see _rehydrate_legs), and blindly placing BUY here
-            # against an already-long position would GROW it instead of
-            # flattening it. net_qty<0 is the expected short case; net_qty>0
-            # means this leg is not really short and we alert instead of
-            # compounding the position.
-            if net_qty > 0:
-                from pdp.events.models import EventType
-
-                self.ctx.emit_critical(
-                    EventType.POSITION_SIZE_CAPPED,
-                    leg.security_id,
-                    "Leg direction mismatch on close",
-                    f"Leg {leg.security_id} tracked as short but broker net_qty is +{net_qty} "
-                    "(long) — closing with SELL instead of BUY to avoid growing the position",
-                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
-                )
-            side = "SELL" if net_qty > 0 else "BUY"
-            await self._place(leg.security_id, leg.segment, side, close_lots)
-        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
-        await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(
-            event_type, sid=leg.security_id, reason=reason, **self._leg_exit_fields(leg, exit_px, reason)
-        )
-        self._short_legs = [l for l in self._short_legs if l is not leg]
+        await self._close_leg(leg, reason, event_type=event_type)
 
     async def _close_hedge_leg(
         self,
@@ -1390,50 +1720,96 @@ class DirectionalStrangle(Strategy):
         *,
         event_type: str = StrangleEventType.LEG_CLOSE,
     ) -> None:
-        """Close a hedge leg and emit exactly one terminal event for it (see
-        `_close_short_leg` docstring for the `event_type` contract)."""
-        ltp = self._ltp_cache.get(leg.security_id)
-        if (ltp is None or float(ltp) <= 0) and reason != "expiry":
-            from pdp.events.models import EventType
+        await self._close_leg(leg, reason, event_type=event_type)
 
-            self.ctx.emit_critical(
-                EventType.CLOSE_UNPRICED,
-                leg.security_id,
-                "Close rejected",
-                f"Hedge leg unpriced (LTP {ltp}) on close attempt",
-                {"strategy_id": self.strategy_id, "reason": reason},
+    async def _partial_close(
+        self,
+        leg: OpenLeg,
+        close_lots: int,
+        reason: str,
+        event_type: str,
+        **extra: Any,
+    ) -> bool:
+        """Partially close a leg (e.g. stop_half) — same lock + broker-sign
+        discipline as `_close_leg`, but the leg stays open with its lots reduced
+        by however many were actually closed (never more than the broker holds).
+
+        Returns whether an order was actually placed — callers must not latch a
+        one-shot flag (e.g. ``half_stopped``) on this call without checking the
+        return value, or a no-op (broker holds fewer lots than expected) would
+        permanently disable the stop for a leg that was never actually reduced.
+        """
+        sid = leg.security_id
+        async with self._lock_for(sid):
+            net_qty = await self.ctx.orders.get_net_qty(sid)
+            broker_lots = abs(net_qty) // self._lot_size
+            n = min(close_lots, broker_lots)
+            if n <= 0:
+                return False
+            # Capture exit economics BEFORE mutating leg.lots.
+            exit_fields = self._leg_exit_fields(leg, self._ltp_cache.get(sid) or 0.0, reason, close_lots=n)
+            side = "SELL" if net_qty > 0 else "BUY"
+            await self._place(sid, leg.segment, side, n)
+            leg.lots -= n
+            self._emit_event(
+                event_type,
+                sid=sid,
+                remaining=leg.lots,
+                partial=True,
+                **extra,
+                **exit_fields,
             )
-            return
+            return True
 
-        await self.ctx.orders.cancel_open_entry_orders(leg.security_id)
-        net_qty = await self.ctx.orders.get_net_qty(leg.security_id)
-        if net_qty == 0:
-            self._hedge_legs = [l for l in self._hedge_legs if l is not leg]
-            return
-        sell_lots = abs(net_qty) // self._lot_size
-        if sell_lots > 0:
-            # Same direction-correctness guard as _close_short_leg: derive the
-            # side from the actual net_qty sign, not from "this is the hedge
-            # list" — protects against a misclassified rehydrated leg.
-            if net_qty < 0:
-                from pdp.events.models import EventType
+    async def _broker_positions(self) -> list[Any]:
+        """Broker's own view of open positions for this strategy — the source of
+        truth for square-off reconciliation. Tolerates a client without the
+        method (returns nothing) so unit fakes need not implement it."""
+        getter = getattr(self.ctx.orders, "get_positions", None)
+        if getter is None:
+            return []
+        return list(await getter())
 
-                self.ctx.emit_critical(
-                    EventType.POSITION_SIZE_CAPPED,
-                    leg.security_id,
-                    "Leg direction mismatch on close",
-                    f"Leg {leg.security_id} tracked as hedge but broker net_qty is {net_qty} "
-                    "(short) — closing with BUY instead of SELL to avoid growing the position",
-                    {"strategy_id": self.strategy_id, "reason": reason, "net_qty": net_qty},
-                )
-            side = "BUY" if net_qty < 0 else "SELL"
-            await self._place(leg.security_id, leg.segment, side, sell_lots)
-        exit_px = self._ltp_cache.get(leg.security_id) or 0.0
-        await self._unsubscribe_option(leg.security_id, leg.segment)
-        self._emit_event(
-            event_type, sid=leg.security_id, reason=reason, **self._leg_exit_fields(leg, exit_px, reason)
+    def _flag_divergence(self, sid: str, mem_lots: int, broker_lots: int) -> None:
+        """Record a memory-vs-broker lot mismatch for `sid` and emit
+        `LEG_STATE_DIVERGED` once per distinct (sid, mem, broker) shape per
+        session, so a persistent mismatch surfaces on the readiness endpoint
+        without alert-storming (the failure mode POSITION_RECONCILE_MISMATCH had
+        in paper)."""
+        self._divergences.add(sid)
+        shape = f"{sid}:{mem_lots}:{broker_lots}"
+        if shape in self._divergence_shapes:
+            return
+        self._divergence_shapes.add(shape)
+        from pdp.events.models import EventType
+
+        self.ctx.emit_critical(
+            EventType.LEG_STATE_DIVERGED,
+            sid,
+            "Leg state diverged from broker",
+            f"{sid}: in-memory {mem_lots} lots vs broker {broker_lots} lots",
+            {"strategy_id": self.strategy_id, "mem_lots": mem_lots, "broker_lots": broker_lots},
         )
-        self._hedge_legs = [l for l in self._hedge_legs if l is not leg]
+
+    async def _reconcile_divergences(self) -> None:
+        """Compare every tracked leg's lots against the broker's net_qty (and flag
+        any broker position with no tracked leg). Skipped when the order client
+        cannot report positions, so a fake without `get_positions` is not treated
+        as "everything diverged"."""
+        if getattr(self.ctx.orders, "get_positions", None) is None:
+            return
+        broker: dict[str, int] = {}
+        for pos in await self._broker_positions():
+            bsid = getattr(pos, "security_id", None)
+            if bsid is not None:
+                broker[bsid] = int(getattr(pos, "net_qty", 0) or 0)
+        for lg in self._legs.values():
+            broker_lots = abs(broker.get(lg.security_id, 0)) // self._lot_size
+            if lg.lots != broker_lots:
+                self._flag_divergence(lg.security_id, lg.lots, broker_lots)
+        for bsid, net in broker.items():
+            if net != 0 and bsid not in self._legs:
+                self._flag_divergence(bsid, 0, abs(net) // self._lot_size)
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
         matching = [h for h in self._hedge_legs if h.opt_type == short_leg.opt_type]
@@ -1446,6 +1822,10 @@ class DirectionalStrangle(Strategy):
 
     async def state(self) -> dict[str, Any]:
         """Return current execution state for the REST console API."""
+        # Reconcile against the broker on every poll so a memory/broker lot
+        # mismatch (or an orphan broker position) is detected and surfaced on the
+        # readiness endpoint rather than silently miscounted.
+        await self._reconcile_divergences()
         day_realized = await self._day_realized()
         day_unrealized = self._compute_unrealized()
         legs = []
@@ -1539,6 +1919,50 @@ class DirectionalStrangle(Strategy):
             # _current_bucket is intentionally NOT reset: open legs persist across
             # trading days, so carrying the bucket forward prevents a spurious
             # close/reopen on the first bar of the new session.
+
+    async def _maybe_resolve_lot_size(self, bar_day: date) -> None:
+        """Resolve `self._lot_size` from the instruments table once per IST trading day.
+
+        The instruments table (Dhan scrip master) is authoritative; YAML `lot_size` is
+        advisory-only and only compared for a mismatch warning. On failure (empty table),
+        `self._lot_size` keeps its last-known-good value so open legs still price/close
+        correctly — only new entries are blocked (`_lot_size_degraded`) until the next
+        bar's resolution succeeds.
+        """
+        if self._lot_size_day == bar_day or self.ctx.session_maker is None:
+            return
+
+        from pdp.strategy.strikes import lot_size_for_underlying
+
+        async with self.ctx.session_maker() as session:
+            resolved = await lot_size_for_underlying(session, self.underlying)
+
+        if resolved is None:
+            if not self._lot_size_degraded:
+                from pdp.events.models import EventType
+
+                self.ctx.emit_critical(
+                    EventType.INDICATOR_UNSEEDED,
+                    self.sid,
+                    "Lot size unresolved",
+                    f"{self.underlying}: no instruments-table row for lot size; new entries "
+                    f"blocked, using last-known-good {self._lot_size} for existing legs",
+                    {"strategy_id": self.strategy_id, "underlying": self.underlying},
+                )
+                self._lot_size_degraded = True
+            return
+
+        if self._lot_size_yaml is not None and self._lot_size_yaml != resolved:
+            self.ctx.log.warning(
+                "lot_size_yaml_mismatch",
+                underlying=self.underlying,
+                yaml_lot_size=self._lot_size_yaml,
+                resolved_lot_size=resolved,
+            )
+
+        self._lot_size = resolved
+        self._lot_size_day = bar_day
+        self._lot_size_degraded = False
 
     async def _day_realized(self) -> Decimal:
         total = Decimal("0")
@@ -1770,147 +2194,121 @@ class DirectionalStrangle(Strategy):
             self.ctx.log.warning("zero_avg_repair_failed", exc=str(exc))
 
     async def _rehydrate_legs(self) -> None:
-        """Rebuild open-leg lists from PG positions + last leg_open Mongo events.
+        """Rebuild the in-memory leg book from PostgreSQL on startup.
 
-        Called once on startup. Idempotent: if lists are already populated (hot
-        reload scenario), does nothing. Skips positions with net_qty == 0.
+        A leg's *kind* (which decides its closing direction) is read from the
+        durable ``strategy_legs`` table written on open — never inferred, because
+        the net_qty sign cannot tell a long hedge from a long momentum leg (the
+        exact bug that restored a long SENSEX hedge as a short and grew it
+        4→8→16 across restarts). A broker position with no durable leg row is an
+        orphan: its kind is inferred from the sign as a best effort and a single
+        ``LEG_TYPE_UNKNOWN`` is emitted so the gap is visible.
 
-        Reconstructs entry_price, lots, strike, opt_type, is_hedge, is_momentum,
-        and expiry from the durable store so the execution console survives restarts.
+        Rehydration is total-or-raise and asserts an empty book first: it runs
+        once, before any tick, and any failure aborts startup rather than serving
+        ticks against a corrupt book (the old path swallowed its own failure,
+        which is why "rehydration that never rehydrated" shipped).
         """
-        if self._short_legs or self._hedge_legs or self._momentum_legs:
-            # Already populated — skip (idempotent guard)
-            return
+        if self._legs:
+            raise RuntimeError("rehydrate_legs called with a non-empty leg book")
         if self.ctx.session_maker is None:
             return
-        try:
-            from decimal import Decimal as D
 
-            from sqlalchemy import select
+        from decimal import Decimal as D
 
-            from pdp.instruments.models import Instrument
-            from pdp.orders.models import Position
+        from sqlalchemy import select
 
-            async with self.ctx.session_maker() as session:
-                result = await session.scalars(
-                    select(Position).where(
-                        Position.strategy_id == self.strategy_id,
-                        Position.net_qty != 0,
-                    )
+        from pdp.instruments.models import Instrument
+        from pdp.orders.models import Position, StrategyLeg
+
+        async with self.ctx.session_maker() as session:
+            pos_result = await session.scalars(
+                select(Position).where(
+                    Position.strategy_id == self.strategy_id,
+                    Position.net_qty != 0,
                 )
-                open_positions = result.all()
+            )
+            open_positions = pos_result.all()
+        if not open_positions:
+            return
 
-            if not open_positions:
-                return
+        async with self.ctx.session_maker() as session:
+            leg_result = await session.scalars(
+                select(StrategyLeg).where(
+                    StrategyLeg.strategy_id == self.strategy_id,
+                    StrategyLeg.closed_at.is_(None),
+                )
+            )
+            leg_by_sid = {row.security_id: row for row in leg_result.all()}
 
-            # Build a set of sids we need to look up leg_open events for
-            open_sids = {p.security_id for p in open_positions}
+        orphan_sids = {p.security_id for p in open_positions if p.security_id not in leg_by_sid}
+        inst_by_sid: dict[str, Instrument] = {}
+        if orphan_sids:
+            async with self.ctx.session_maker() as session:
+                inst_result = await session.scalars(
+                    select(Instrument).where(Instrument.security_id.in_(orphan_sids))
+                )
+                inst_by_sid = {inst.security_id: inst for inst in inst_result.all()}
 
-            # Try to read leg_open events from Mongo for classification
-            leg_open_by_sid: dict[str, dict] = {}
-            try:
-                from pdp.mongo.collections import get_events_collection
-
-                if hasattr(self.ctx, "_mongo_db") and self.ctx._mongo_db is not None:  # type: ignore[attr-defined]
-                    col = get_events_collection(self.ctx._mongo_db)  # type: ignore[attr-defined]
-                    cursor = col.find(
-                        {
-                            "event_type": "leg_open",
-                            "strategy_id": self.strategy_id,
-                            "sid": {"$in": list(open_sids)},
-                        },
-                        sort=[("ts", -1)],
-                    )
-                    async for doc in cursor:
-                        sid = doc.get("sid", "")
-                        if sid and sid not in leg_open_by_sid:
-                            leg_open_by_sid[sid] = doc
-            except Exception as exc:
-                self.ctx.log.warning("rehydrate_mongo_read_failed", exc=str(exc))
-
-            # Instrument rows are the authoritative source for strike/opt_type/expiry
-            # (never TTL-purged, unlike Mongo leg_open events) — used as a fallback
-            # whenever the event lookup above came up empty for a sid.
-            inst_by_sid: dict[str, Instrument] = {}
-            missing_sids = open_sids - set(leg_open_by_sid)
-            if missing_sids:
-                async with self.ctx.session_maker() as session:
-                    inst_result = await session.scalars(
-                        select(Instrument).where(Instrument.security_id.in_(missing_sids))
-                    )
-                    for inst in inst_result.all():
-                        inst_by_sid[inst.security_id] = inst
-
-            # Reconstruct OpenLeg for each open PG position
-            rehydrated = 0
-            for pos in open_positions:
-                sid = pos.security_id
-                evt = leg_open_by_sid.get(sid, {})
+        rehydrated = 0
+        for pos in open_positions:
+            sid = pos.security_id
+            leg_row = leg_by_sid.get(sid)
+            if leg_row is not None:
+                kind = leg_row.leg_kind
+                opt_type = leg_row.opt_type
+                strike = float(leg_row.strike)
+                expiry = leg_row.expiry
+            else:
+                # Orphan: no durable leg row. Infer kind from the sign as a best
+                # effort (a long could be a hedge OR a momentum leg) and flag it.
+                kind = "short" if pos.net_qty < 0 else "hedge"
                 inst = inst_by_sid.get(sid)
+                opt_type = str((inst.option_type if inst else None) or "PE")
+                strike = float((inst.strike if inst else None) or 0.0)
+                expiry = inst.expiry if inst else None
+                from pdp.events.models import EventType
 
-                is_hedge = bool(evt.get("is_hedge", False))
-                is_momentum = bool(evt.get("is_momentum", False))
-                opt_type = str(evt.get("opt_type") or (inst.option_type if inst else None) or "PE")
-                strike = float(evt.get("strike") or (inst.strike if inst else None) or 0.0)
-                lots = abs(pos.net_qty) // self._lot_size or 1
-                entry_price = pos.avg_price if pos.avg_price and pos.avg_price > D("0") else D("0")
-                entry_time_raw = evt.get("entry_time")
-                try:
-                    entry_time = (
-                        datetime.fromisoformat(str(entry_time_raw)).astimezone(_IST)
-                        if entry_time_raw
-                        else None
-                    )
-                except (ValueError, TypeError):
-                    entry_time = None
-                expiry_raw = evt.get("expiry")
-                try:
-                    from datetime import date as date_type
+                self.ctx.emit_critical(
+                    EventType.LEG_TYPE_UNKNOWN,
+                    sid,
+                    "Rehydrated orphan leg",
+                    f"broker position {sid} (net_qty={pos.net_qty}) has no durable "
+                    f"strategy_leg row — classified {kind} by sign, may be wrong",
+                    {"strategy_id": self.strategy_id, "net_qty": pos.net_qty},
+                )
 
-                    expiry = date_type.fromisoformat(str(expiry_raw)) if expiry_raw else None
-                except (ValueError, TypeError):
-                    expiry = None
-                if expiry is None and inst is not None:
-                    expiry = inst.expiry
+            lots = abs(pos.net_qty) // self._lot_size or 1
+            entry_price = pos.avg_price if pos.avg_price and pos.avg_price > D("0") else D("0")
 
-                # Subscribe the market feed so on_tick gets LTPs for these legs
-                await self._subscribe_option(sid, pos.exchange_segment)
-
-                leg = OpenLeg(
+            # Subscribe the market feed so on_tick gets LTPs for these legs
+            await self._subscribe_option(sid, pos.exchange_segment)
+            self._add_leg(
+                OpenLeg(
                     security_id=sid,
                     segment=pos.exchange_segment,
                     opt_type=opt_type,
                     strike=strike,
                     lots=lots,
                     entry_price=entry_price,
-                    is_hedge=is_hedge,
-                    is_momentum=is_momentum,
-                    entry_time=entry_time,
-                    entry_reason=str(evt.get("entry_reason", "rehydrated")),
+                    kind=kind,
+                    entry_reason="rehydrated",
                     expiry=expiry,
                 )
-
-                if is_momentum:
-                    self._momentum_legs.append(leg)
-                elif is_hedge:
-                    self._hedge_legs.append(leg)
-                else:
-                    self._short_legs.append(leg)
-                # Baseline against the position's realized_pnl AT rehydrate time —
-                # without this, _day_realized() has no baseline for this sid and
-                # counts the leg's entire historical realized P&L as if it all
-                # happened today (phantom day P&L on every restart).
-                await self._record_day_baseline(sid)
-                rehydrated += 1
-
-            self.ctx.log.info(
-                "rehydrate_legs_done",
-                rehydrated=rehydrated,
-                short=len(self._short_legs),
-                hedge=len(self._hedge_legs),
-                momentum=len(self._momentum_legs),
-                strategy_id=self.strategy_id,
             )
-        except Exception as exc:
-            self.ctx.log.warning("rehydrate_legs_failed", exc=str(exc))
+            # Baseline against the position's realized_pnl AT rehydrate time —
+            # without this, _day_realized() has no baseline for this sid and
+            # counts the leg's entire historical realized P&L as if it all
+            # happened today (phantom day P&L on every restart).
+            await self._record_day_baseline(sid)
+            rehydrated += 1
+
+        self.ctx.log.info(
+            "rehydrate_legs_done",
+            rehydrated=rehydrated,
+            short=len(self._short_legs),
+            hedge=len(self._hedge_legs),
+            momentum=len(self._momentum_legs),
+            strategy_id=self.strategy_id,
+        )
 

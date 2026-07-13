@@ -29,7 +29,7 @@ watchlist:
     timeframes: [5m, 15m, 1h]
     indicators:
       - family: ema
-        periods: [9, 20, 50]
+        periods: [9, 20, 50, 100, 200]
       - family: vwap
       - family: pivots
       - family: period_levels

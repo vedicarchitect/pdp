@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+from pdp.market.bars import bar_is_complete
 from pdp.options.gap_backfill import holidays, trading_days
 from pdp.settings import get_settings
 
@@ -135,7 +136,12 @@ def _fetch_chunk(dhan: Any, sid: str, from_d: date, to_d: date) -> list[dict[str
                 "oi": 0,
             })
         docs.sort(key=lambda d: d["ts"])
-        return docs
+        now = datetime.now(UTC)
+        complete = [d for d in docs if bar_is_complete(d["ts"].replace(tzinfo=UTC), TIMEFRAME, now)]
+        dropped = len(docs) - len(complete)
+        if dropped:
+            log.info("fetch_incomplete_bar_dropped", count=dropped, window=f"{from_d}..{to_d}")
+        return complete
 
     log.error("fetch_giving_up", window=f"{from_d}..{to_d}")
     return []

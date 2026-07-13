@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from typing import Protocol
+from typing import Any, Protocol
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,11 +18,16 @@ log = structlog.get_logger()
 
 class StartupGroup(Protocol):
     name: str
+    # A group carrying live-trading responsibility. If it cannot start, the process must not
+    # serve traffic: a healthy-looking API with a dead broker sync or strategy host is how
+    # subsystem failures go unnoticed for weeks.
+    required: bool
     async def start(self, app: FastAPI) -> None: ...
     async def stop(self, app: FastAPI) -> None: ...
 
 class InfraGroup:
     name = "infra"
+    required = True
 
     async def start(self, app: FastAPI) -> None:
         settings: Settings = get_settings()
@@ -86,6 +91,7 @@ class InfraGroup:
 
 class WebGroup:
     name = "web"
+    required = True
 
     async def start(self, app: FastAPI) -> None:
         from pdp.alerts.ws import AlertsHub
@@ -131,6 +137,7 @@ class WebGroup:
 
 class JobRunnerGroup:
     name = "job_runner"
+    required = False
 
     async def start(self, app: FastAPI) -> None:
         settings = app.state.settings
@@ -170,6 +177,7 @@ class JobRunnerGroup:
 
 class FeedEngineGroup:
     name = "feed_engine"
+    required = True
 
     async def start(self, app: FastAPI) -> None:
         settings = app.state.settings
@@ -177,9 +185,6 @@ class FeedEngineGroup:
         redis = app.state.redis
         
         await redis.set("engine:status", b"warming")
-        
-        # Hubs are retrieved gracefully if available (in 'all' mode)
-        ws_hub = getattr(app.state, "ws_hub", None)
         
         from pdp.orders.ws import OrdersHub
         orders_hub = getattr(app.state, "orders_hub", None)
@@ -244,7 +249,12 @@ class FeedEngineGroup:
         from pdp.strategy.registry import load_all
         _all_configs = load_all(Path("strategies"))
         _watchlist_dicts = [
-            {"security_id": w.security_id, "exchange_segment": w.exchange_segment, "timeframes": w.timeframes}
+            {
+                "security_id": w.security_id,
+                "exchange_segment": w.exchange_segment,
+                "timeframes": w.timeframes,
+                "indicators": w.indicators,
+            }
             for cfg in _all_configs
             for w in cfg.watchlist
         ]
@@ -259,6 +269,12 @@ class FeedEngineGroup:
             from pdp.indicators.warmup import configure_matrix_suites
             _matrix_entries = await configure_matrix_suites(indicator_engine, get_session_maker())
             _watchlist_dicts.extend(_matrix_entries)
+            # Publish the static index→futures-contract map so pdp-api (no in-process engine)
+            # can resolve the VWAP/VWMA source sid for the indicator matrix.
+            import json as _json
+            await redis.set(
+                "matrix:futures_sids", _json.dumps(indicator_engine.matrix_futures_sids), ex=86400
+            )
         except Exception as exc:
             log.warning("matrix_suites_configure_failed", exc=str(exc))
 
@@ -267,6 +283,29 @@ class FeedEngineGroup:
                 await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
             except Exception as exc:
                 log.warning("indicator_warmup_failed", exc=str(exc))
+
+        # One summary line per strategy naming any (sid, tf, family, period) still
+        # unseeded after warmup, so a session starting with e.g. EMA(200) unseeded
+        # on 1H is visible in the first hundred lines of the log, not just a `--`
+        # discovered later in the console.
+        for _cfg in _all_configs:
+            _unseeded: list[dict[str, Any]] = []
+            for _w in _cfg.watchlist:
+                for _tf in _w.timeframes:
+                    for (_family, _period), _seeded in indicator_engine.seeding_summary(
+                        _w.security_id, _tf
+                    ).items():
+                        if not _seeded:
+                            _unseeded.append(
+                                {"security_id": _w.security_id, "timeframe": _tf,
+                                 "family": _family, "period": _period}
+                            )
+            log.info(
+                "indicator_seeding_summary",
+                strategy_id=_cfg.id,
+                unseeded_count=len(_unseeded),
+                unseeded=_unseeded,
+            )
 
         try:
             from pdp.indicators.levels_store import compute_session_levels
@@ -310,10 +349,18 @@ class FeedEngineGroup:
             alert_evaluator.register_notification_callback(on_alert_notification)
             await alert_evaluator.load_alerts()
 
-            bar_aggregator = BarAggregator()
+            from pdp.market.session_scheduler import BarSessionScheduler
+            from pdp.options.gap_backfill import holidays as _load_holidays
+
+            _holiday_set = _load_holidays(settings.NSE_HOLIDAYS_JSON)
+            bar_aggregator = BarAggregator(holiday_set=frozenset(_holiday_set))
             bar_writer = BarWriter(mongo_db["market_bars"])
             await bar_writer.start()
             app.state.bar_writer = bar_writer
+
+            bar_session_scheduler = BarSessionScheduler(bar_aggregator, _holiday_set)
+            await bar_session_scheduler.start()
+            app.state.bar_session_scheduler = bar_session_scheduler
 
             adapter = DhanTickerAdapter(
                 settings.DHAN_CLIENT_ID,
@@ -484,7 +531,9 @@ class FeedEngineGroup:
                 await tick_router_task
             except asyncio.CancelledError:
                 pass
-                
+
+        if getattr(app.state, "bar_session_scheduler", None):
+            await app.state.bar_session_scheduler.stop()
         if getattr(app.state, "bar_writer", None):
             await app.state.bar_writer.stop()
         if getattr(app.state, "dhan_broker", None):
@@ -495,6 +544,7 @@ class FeedEngineGroup:
 
 class OpsGroup:
     name = "ops"
+    required = True  # carries broker sync; the intel poller inside is fault-isolated separately
 
     async def start(self, app: FastAPI) -> None:
         settings = app.state.settings
@@ -504,61 +554,26 @@ class OpsGroup:
 
         intel_poller = None
         if settings.INTEL_ENABLED:
-            import json as _json
-            from pdp.intel.poller import IntelPoller
-            from pdp.intel.sources.global_market import StubGlobalMarketSource, YfinanceGlobalMarketSource
-            from pdp.intel.sources.news import FeedparserNewsSource, StubNewsSource
-            from pdp.intel.sources.sentiment import BlendedSentimentSource, StubSentimentSource
-            from pdp.options.fii_dii import NseFIIDIISource
-
             try:
-                import yfinance as _yf
-                global_market_source = YfinanceGlobalMarketSource()
-            except ImportError:
-                global_market_source = StubGlobalMarketSource()
-
-            try:
-                import feedparser as _fp
-                news_source = FeedparserNewsSource()
-            except ImportError:
-                news_source = StubNewsSource()
-
-            try:
-                import vaderSentiment as _vs
-                sentiment_source = BlendedSentimentSource()
-            except ImportError:
-                sentiment_source = StubSentimentSource()
-
-            try:
-                import nsepython as _nse
-                app.state.fii_dii_source = NseFIIDIISource()
-            except ImportError:
-                pass
-
-            intel_poller = IntelPoller(
-                redis=app.state.redis,
-                global_market_source=global_market_source,
-                news_source=news_source,
-                sentiment_source=sentiment_source,
-                fii_dii_source=app.state.fii_dii_source,
-                news_feed_urls=_json.loads(settings.INTEL_NEWS_FEED_URLS),
-                vix_security_id=settings.VIX_SECURITY_ID,
-                global_indices_interval=settings.INTEL_GLOBAL_INDICES_POLL_SECONDS,
-                news_interval=settings.INTEL_NEWS_POLL_SECONDS,
-                fii_dii_interval=settings.INTEL_FII_DII_POLL_SECONDS,
-                mongo_db=app.state.mongo_db,
-            )
-            intel_poller.start()
+                intel_poller = self._build_intel_poller(app, settings)
+                intel_poller.start()
+            except Exception as exc:
+                # Dashboard intel is not live-trading critical; never let it block startup.
+                log.error("intel_poller_start_failed", exc=str(exc))
+                intel_poller = None
         app.state.intel_poller = intel_poller
 
         options_poller = None
         if settings.OPTIONS_POLLER_ENABLED and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
             from pdp.options.poller import OptionsChainPoller
+            from pdp.strategy.registry import strategy_underlyings
             options_hub = getattr(app.state, "options_hub", None)
+            underlyings = sorted(strategy_underlyings(Path("strategies")))
             options_poller = OptionsChainPoller(
                 collection=app.state.mongo_db["option_chains"],
                 hub=options_hub,
                 settings=settings,
+                underlyings=underlyings,
             )
             app.state.options_poller = options_poller
             await options_poller.start()
@@ -574,6 +589,7 @@ class OpsGroup:
                 snapshots_col=app.state.mongo_db["broker_snapshots"],
                 client=BrokerAccountClient(settings),
                 event_service=getattr(app.state, "event_service", None),
+                live_mode=settings.LIVE and settings.BROKER == "dhan",
             )
             if getattr(app.state, "dhan_adapter", None) is not None:
                 broker_sync_service.set_market_adapter(app.state.dhan_adapter)
@@ -584,7 +600,7 @@ class OpsGroup:
                 broker_sync_service, eod_time=settings.BROKER_SYNC_EOD_TIME
             )
             await broker_sync_scheduler.start()
-            
+
             from pdp.broker_sync.intraday_poller import BrokerIntradayPoller
             intraday_poller = BrokerIntradayPoller(broker_sync_service, settings)
             await intraday_poller.start()
@@ -598,6 +614,52 @@ class OpsGroup:
             scrip_refresh_scheduler = ScripRefreshScheduler(get_session_maker(), settings)
             await scrip_refresh_scheduler.start()
         app.state.scrip_refresh_scheduler = scrip_refresh_scheduler
+
+    def _build_intel_poller(self, app: FastAPI, settings: Settings) -> Any:
+        import json as _json
+        from pdp.intel.poller import IntelPoller
+        from pdp.intel.sources.global_market import StubGlobalMarketSource, YfinanceGlobalMarketSource
+        from pdp.intel.sources.news import FeedparserNewsSource, StubNewsSource
+        from pdp.intel.sources.sentiment import BlendedSentimentSource, StubSentimentSource
+        from pdp.options.fii_dii import NseFIIDIISource
+
+        try:
+            import yfinance as _yf
+            global_market_source = YfinanceGlobalMarketSource()
+        except ImportError:
+            global_market_source = StubGlobalMarketSource()
+
+        try:
+            import feedparser as _fp
+            news_source = FeedparserNewsSource()
+        except ImportError:
+            news_source = StubNewsSource()
+
+        try:
+            import vaderSentiment as _vs
+            sentiment_source = BlendedSentimentSource()
+        except ImportError:
+            sentiment_source = StubSentimentSource()
+
+        try:
+            import nsepython as _nse
+            app.state.fii_dii_source = NseFIIDIISource()
+        except ImportError:
+            pass
+
+        return IntelPoller(
+            redis=app.state.redis,
+            global_market_source=global_market_source,
+            news_source=news_source,
+            sentiment_source=sentiment_source,
+            fii_dii_source=app.state.fii_dii_source,
+            news_feed_urls=_json.loads(settings.INTEL_NEWS_FEED_URLS),
+            vix_security_id=settings.VIX_SECURITY_ID,
+            global_indices_interval=settings.INTEL_GLOBAL_INDICES_POLL_SECONDS,
+            news_interval=settings.INTEL_NEWS_POLL_SECONDS,
+            fii_dii_interval=settings.INTEL_FII_DII_POLL_SECONDS,
+            mongo_db=app.state.mongo_db,
+        )
 
     async def stop(self, app: FastAPI) -> None:
         if getattr(app.state, "intel_poller", None):

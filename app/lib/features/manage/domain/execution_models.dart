@@ -271,6 +271,65 @@ class UnderlyingGroup {
   }
 }
 
+// ─── Readiness ────────────────────────────────────────────────────────────────
+
+/// One readiness component (e.g. "Indicators", "Broker Sync") and its state.
+class ReadinessComponentRow {
+  final String name;
+  final String state; // "ok" | "degraded" | "blocked"
+  final String? reason;
+
+  const ReadinessComponentRow({required this.name, required this.state, this.reason});
+
+  factory ReadinessComponentRow.fromJson(Map<String, dynamic> json) {
+    return ReadinessComponentRow(
+      name: json['name'] as String? ?? '',
+      state: json['state'] as String? ?? 'ok',
+      reason: json['reason'] as String?,
+    );
+  }
+}
+
+/// Composite readiness for one underlying's strategy instance.
+class StrategyReadinessRow {
+  final String state; // "ok" | "degraded" | "blocked"
+  final List<ReadinessComponentRow> components;
+
+  const StrategyReadinessRow({required this.state, required this.components});
+
+  factory StrategyReadinessRow.fromJson(Map<String, dynamic> json) {
+    final compsRaw = json['components'] as List<dynamic>? ?? [];
+    return StrategyReadinessRow(
+      state: json['state'] as String? ?? 'ok',
+      components: compsRaw
+          .map((c) => ReadinessComponentRow.fromJson(c as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+/// Worst-case readiness across every running strangle strategy, plus the
+/// per-underlying breakdown so a blocked BANKNIFTY doesn't hide behind an ok NIFTY.
+class MonitorReadiness {
+  final String state; // "ok" | "degraded" | "blocked"
+  final Map<String, StrategyReadinessRow> byUnderlying;
+
+  const MonitorReadiness({required this.state, required this.byUnderlying});
+
+  static const ok = MonitorReadiness(state: 'ok', byUnderlying: {});
+
+  factory MonitorReadiness.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return ok;
+    final byRaw = json['by_underlying'] as Map<String, dynamic>? ?? {};
+    return MonitorReadiness(
+      state: json['state'] as String? ?? 'ok',
+      byUnderlying: byRaw.map(
+        (k, v) => MapEntry(k, StrategyReadinessRow.fromJson(v as Map<String, dynamic>)),
+      ),
+    );
+  }
+}
+
 // ─── Monitor snapshot ─────────────────────────────────────────────────────────
 
 class MonitorSnapshot {
@@ -287,6 +346,7 @@ class MonitorSnapshot {
   final int nOpenMomentum;
   final List<Map<String, dynamic>> recentEvents;
   final Map<String, SidIndicators> indicators;
+  final MonitorReadiness readiness;
 
   const MonitorSnapshot({
     required this.indices,
@@ -302,6 +362,7 @@ class MonitorSnapshot {
     required this.nOpenMomentum,
     required this.recentEvents,
     required this.indicators,
+    this.readiness = MonitorReadiness.ok,
   });
 
   List<LegRow> get legs => groups.expand((g) => g.legs).toList();
@@ -350,6 +411,7 @@ class MonitorSnapshot {
       nOpenMomentum: (status['n_open_momentum'] as num?)?.toInt() ?? 0,
       recentEvents: recentEvents,
       indicators: indicators,
+      readiness: MonitorReadiness.fromJson(status['readiness'] as Map<String, dynamic>?),
     );
   }
 }

@@ -164,6 +164,35 @@ class StrategyHost:
             )
         return result
 
+    def _check_bias_satisfiability(self, cfg: StrategyConfig, instance: Strategy) -> None:
+        """Bias-weighted strategies only: verify every non-zero weight has a data source.
+
+        Gated on the instance type rather than a generic ``w_*`` param sniff, so a
+        strategy that happens to define an unrelated ``w_*`` param is never
+        misidentified as bias-driven. Raises ``BiasInputUnsatisfiable`` -- this
+        propagates out of ``start()`` uncaught, aborting strategy load (and, for a
+        ``required=True`` group, process startup) rather than silently running
+        with a permanently-abstaining input. See bias-input-completeness.
+        """
+        from pdp.strategies.directional_strangle import DirectionalStrangle, weights_from_params
+
+        if not isinstance(instance, DirectionalStrangle):
+            return
+
+        from pdp.signals.bias import check_bias_satisfiability
+        from pdp.strategy.registry import strategy_underlyings
+
+        weights = weights_from_params(cfg.params)
+        underlying = cfg.params.get("underlying", "NIFTY")
+        options_underlyings = strategy_underlyings(self._strategies_dir)
+        satisfied = check_bias_satisfiability(
+            weights,
+            [w.model_dump() for w in cfg.watchlist],
+            underlying=underlying,
+            options_underlyings=options_underlyings,
+        )
+        log.info("bias_inputs_satisfied", strategy_id=cfg.id, inputs=satisfied)
+
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
@@ -183,6 +212,8 @@ class StrategyHost:
         instance.params = dict(cfg.params)
         instance._mode = "live" if get_settings().LIVE else "paper"
         instance._slog = StrategyDailyLog(cfg.id)
+
+        self._check_bias_satisfiability(cfg, instance)
 
         order_client = StrategyOrderClient(
             strategy_id=cfg.id,
@@ -221,6 +252,12 @@ class StrategyHost:
             for w in cfg.watchlist:
                 sid = w.security_id
                 for tf in w.timeframes:
+                    if tf == "1w":
+                        # Weekly pivots seed from the single most-recently-completed
+                        # ISO week (warmup.py's seed_prior_session_pivots), not from a
+                        # 200-bar convergence count -- 200 weekly bars is ~4 years, which
+                        # BANKNIFTY/SENSEX don't have yet. See bias-input-completeness.
+                        continue
                     if not self._indicator_engine.is_warm(sid, tf, min_bars=200):
                         from pdp.events.models import EventType
 
