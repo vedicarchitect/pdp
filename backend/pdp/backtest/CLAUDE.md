@@ -66,6 +66,43 @@ reentry`. Operate the machinery via skills, not raw API calls: `/backtest:run`, 
 Spec: `openspec/specs/backtest-warehouse/spec.md` + `backtest-sweeps/spec.md` + `backtest-decision-trace/spec.md`
 + `backtest-paper-comparison/spec.md`.
 
+## Known `option_bars` expiry-cadence gaps (as of 2026-07-13)
+
+`day_loader.py::load_window` resolves each trade day's expiry via `nearest_real_expiry()` — the
+first *distinct expiry with any ingested rows* on or after that day. When a real weekly/monthly
+expiry was simply never ingested, every day in that stretch silently forward-fills to the far-side
+expiry instead. `WindowData.cadence_gap_days` (populated from
+`pdp.instruments.expiry_calendar.expiry_cadence_gaps`) flags exactly which trade days this
+happened to, and `strangle_run.py`'s per-chunk log line reports the count separately from
+`valid`/`skipped` — see `option-bars-expiry-gap-backfill`.
+
+Confirmed gaps, NIFTY (`underlying="NIFTY"`):
+- **763-day blackout, 2020-12-03 → 2023-01-05** — zero ingested expiry data; any backtest window
+  spanning this range silently trades (or phantom-skips) against a badly mismatched far-side
+  contract for every day inside it. Backfillability from Dhan's historical option-chain API is
+  unconfirmed (blocked on live Dhan creds as of 2026-07-13 — see the change's README).
+- **19-25 smaller 12-21 day gaps, 2023-2026** (19 confirmed via `expiry_cadence_gaps()` in the
+  2023-01..2026-05 window alone), mostly around monthly-expiry transition weeks — real, listed
+  contracts that were simply never ingested, not weeks with no contract. 4 spot-checked against
+  NSE's real calendar (2023-02-16, 2023-03-23, the holiday-shifted 2023-04-19, 2024-04-18), all
+  confirmed missing-ingestion. The existing per-day contract-completeness audit
+  (`audit_options_coverage.py`'s `days_missing()`) reports **zero** gap days over this same
+  window — it cannot see this bug, since the days inside a cadence gap still have a full option
+  chain, just against the wrong far-side expiry.
+
+BANKNIFTY / SENSEX (audited 2026-07-13): **both clean** — 0 cadence gaps each (BANKNIFTY: 261
+stored expiries 2021-08-04..2026-07-29; SENSEX: 167 stored expiries 2023-05-15..2026-07-13; both
+uninterrupted ~7-day cadence throughout). Only NIFTY has this bug.
+
+**Separate finding (out of this change's scope)**: BANKNIFTY's real-world forward listing went
+monthly-only (regime change), but its `option_bars` historical distinct-expiry set stays
+weekly-cadence straight through 2026-07-29 — `pdp.options.gap_backfill.fill_day()` resolves every
+backfilled day against the hardcoded `"WEEK"` calendar flag regardless of the underlying's current
+real regime, so that's what's actually stored. `expiry_cadence_gaps()`'s BANKNIFTY threshold is
+set to match what's actually persisted (weekly), not the real-world regime, since the detector
+reads `real_expiries_from_option_bars` (the stored data). Whether BANKNIFTY's `option_bars`
+ingestion should itself resolve against the real (monthly) regime is unresolved.
+
 ## Common Tasks
 
 **Add a commission field:** Edit `BacktestCommissionSettings` in `settings.py` + update `commissions.py`.

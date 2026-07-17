@@ -290,6 +290,31 @@ tasks:
       - uv run python scripts/backfill_levels.py --symbol SENSEX {{.CLI_ARGS}}
 
 
+  # ── Expiry calendar (labelling source for the option backfill) ───────────────
+  #
+  # The DB-backed `expiry_calendar` Mongo collection is what `backfill:options:*` resolves each
+  # fetched option series' expiry_date from (Dhan's expired-options API returns no expiry date).
+  # Keep it seeded before backfilling gaps. See docs/RUNBOOK.md §"Expiry calendar & option-bars
+  # gap backfill". One doc per (underlying, flag, expiry_date) with weekday + lot_size.
+
+  expiry:seed:archive:
+    desc: "One-time: seed expiry_calendar from NSE+BSE bhavcopy archives (authoritative dates + weekday + lot; fills genuine history holes). auto routes NIFTY/BANKNIFTY->NSE, SENSEX->BSE. Args: -- [--symbols NIFTY BANKNIFTY SENSEX] --from YYYY-MM-DD --to YYYY-MM-DD [--exchange auto|nse|bse] [--dry-run]"
+    dir: backend
+    cmds:
+      - uv run python scripts/seed_expiry_from_bhavcopy.py {{.CLI_ARGS}}
+
+  expiry:seed:observed:
+    desc: "Seed expiry_calendar from expiries already in option_bars (free, but cannot add missing dates). Args: -- --symbol NIFTY --from-option-bars"
+    dir: backend
+    cmds:
+      - uv run python scripts/seed_expiry_calendar.py {{.CLI_ARGS}}
+
+  expiry:gaps:
+    desc: "Report expiry-cadence gaps in option_bars + how expiry_calendar covers them (what NSE seeding must fill). Args: -- [--symbol NIFTY]"
+    dir: backend
+    cmds:
+      - uv run python scripts/report_expiry_gaps.py {{.CLI_ARGS}}
+
   # ── Data validation & audit ──────────────────────────────────────────────────
 
   audit:coverage:

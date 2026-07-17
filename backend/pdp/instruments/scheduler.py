@@ -9,13 +9,14 @@ Never blocks startup; failures are logged and retried the next day.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
     from pdp.settings import Settings
 
 log = structlog.get_logger()
@@ -69,7 +70,6 @@ class ScripRefreshScheduler:
                 pass
 
     async def _run(self, date_str: str) -> None:
-        from datetime import date
         from pathlib import Path
 
         from pdp.instruments.loader import download_dhan_master, parse_dhan_csv, upsert_instruments
@@ -96,7 +96,67 @@ class ScripRefreshScheduler:
                 underlyings=underlyings,
             )
             log.info("scrip_refresh_snapshot_written", date=date_str, rows=snap_count)
+            try:
+                await self._sync_expiry_calendar(date.fromisoformat(date_str))
+            except Exception as exc:  # never let calendar upkeep fail the refresh
+                log.warning("expiry_calendar_sync_failed", date=date_str, exc=str(exc))
         except Exception as exc:
             # Log and retain last-good; retry next day
             log.warning("scrip_refresh_failed", date=date_str, exc=str(exc))
             self._last_run_date = None  # allow retry
+
+    async def _sync_expiry_calendar(self, today: date) -> None:
+        """Upsert upcoming real expiries into the DB `expiry_calendar` so it self-maintains.
+
+        Keeps the persistent calendar current with what the scrip master now lists (source
+        `scripmaster`), classifying each month's last expiry as MONTH. Idempotent — only genuinely
+        new dates are inserted. Runs the blocking pymongo upsert in a thread.
+        """
+        from sqlalchemy import select
+
+        from pdp.instruments.expiry_calendar import (
+            classify_month_expiries,
+            upsert_confirmed_expiries,
+        )
+        from pdp.instruments.models import Instrument
+
+        underlyings = ("NIFTY", "BANKNIFTY", "SENSEX")
+        async with self._session_maker() as session:
+            per_underlying: dict[str, list[date]] = {}
+            for underlying in underlyings:
+                rows = await session.execute(
+                    select(Instrument.expiry)
+                    .where(
+                        Instrument.underlying == underlying,
+                        Instrument.option_type.in_(["CE", "PE"]),
+                        Instrument.expiry >= today,
+                    )
+                    .distinct()
+                    .order_by(Instrument.expiry)
+                )
+                per_underlying[underlying] = [e for (e,) in rows.all() if e is not None]
+
+        def _upsert() -> None:
+            from pymongo import MongoClient
+
+            client = MongoClient(
+                self._settings.MONGO_URI,
+                serverSelectionTimeoutMS=self._settings.MONGO_CONNECT_TIMEOUT_MS,
+                maxPoolSize=1,
+            )
+            try:
+                mdb = client[self._settings.MONGO_DB_NAME]
+                for underlying, exps in per_underlying.items():
+                    if not exps:
+                        continue
+                    week_list, month_list = classify_month_expiries(exps)
+                    nw = upsert_confirmed_expiries(mdb, underlying, "WEEK", week_list,
+                                                   source="scripmaster")
+                    nm = upsert_confirmed_expiries(mdb, underlying, "MONTH", month_list,
+                                                   source="scripmaster")
+                    log.info("expiry_calendar_synced", underlying=underlying,
+                             upcoming=len(exps), new_week=nw, new_month=nm)
+            finally:
+                client.close()
+
+        await asyncio.to_thread(_upsert)

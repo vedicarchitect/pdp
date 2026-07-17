@@ -247,7 +247,7 @@ def auto_heal(mdb, cal, dhan, days, band, no_heal: bool) -> None:
     try:
         from pdp.options.gap_backfill import backfill_gaps
         summary = backfill_gaps(dhan=dhan, col=mdb["option_bars"], cal=cal, days=days,
-                                codes=[1, 2], band=band, only_missing=True)
+                                ladder=[("WEEK", 1), ("WEEK", 2)], band=band, only_missing=True)
         if summary.get("gaps"):
             print(f"  [auto-heal] filled {summary['days_filled']}/{summary['gaps']} day(s), "
                   f"{summary['total_inserted']:,} bars")
