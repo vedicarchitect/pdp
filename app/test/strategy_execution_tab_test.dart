@@ -15,12 +15,20 @@ void main() {
   MonitorSnapshot snapshot({
     bool withLegs = true,
     MonitorReadiness readiness = MonitorReadiness.ok,
+    Map<String, SidIndicators> indicators = const {},
+    AtmOptionRow? atmCe,
+    AtmOptionRow? atmPe,
+    List<Map<String, dynamic>> recentEvents = const [],
+    DateTime? asOf,
+    List<IndexPrice>? indices,
   }) =>
       MonitorSnapshot(
-        indices: const [
-          IndexPrice(name: 'NIFTY', spot: 24150.5, future: 24160.0),
-          IndexPrice(name: 'BANKNIFTY', spot: 52100.0),
-        ],
+        asOf: asOf,
+        indices: indices ??
+            const [
+              IndexPrice(name: 'NIFTY', spot: 24150.5, future: 24160.0),
+              IndexPrice(name: 'BANKNIFTY', spot: 52100.0),
+            ],
         groups: [
           if (withLegs)
             const UnderlyingGroup(
@@ -62,9 +70,11 @@ void main() {
         nOpenShorts: 2,
         nOpenHedges: 0,
         nOpenMomentum: 0,
-        recentEvents: const [],
-        indicators: const {},
+        recentEvents: recentEvents,
+        indicators: indicators,
         readiness: readiness,
+        atmCe: atmCe,
+        atmPe: atmPe,
       );
 
   const trades = StrangleTrades(date: '2026-07-10', byIndex: {});
@@ -151,5 +161,192 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('BLOCKED'), findsNothing);
     expect(find.text('DEGRADED'), findsNothing);
+  });
+
+  const nifty5mCam = {
+    '13': SidIndicators(
+      sid: '13',
+      tf: {'5m': IndicatorCell(ema9: 24100, ema20: 24120)},
+      camarillaDaily: CamarillaLevels(r4: 24266.36, s4: 24147.45),
+    ),
+  };
+
+  testWidgets(
+      'maximized window shows every matrix column incl. Camarilla, not clipped by a fixed width',
+      (tester) async {
+    // Regression for indicator-matrix-kite-parity: a hardcoded 440px side panel
+    // clipped CamR4/CamS4 off-screen when the window was maximized. The panel
+    // now scales with the available width, so on a wide/maximized window the
+    // DataTable's own horizontal scroll isn't needed to reach the last columns.
+    await pumpAt(
+      tester,
+      const Size(1920, 1080),
+      snap: snapshot(indicators: nifty5mCam),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('CamR4'), findsOneWidget);
+    expect(find.text('CamS4'), findsOneWidget);
+    // camForTf maps both 5m and 15m to the same daily doc, so the value
+    // legitimately repeats across those two rows — assert presence, not count.
+    expect(find.text('24266'), findsWidgets);
+    expect(find.text('24147'), findsWidgets);
+  });
+
+  testWidgets('narrow window still renders the indicator panel without exceptions',
+      (tester) async {
+    await pumpAt(
+      tester,
+      const Size(500, 900),
+      snap: snapshot(indicators: nifty5mCam),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('CamR4'), findsOneWidget);
+  });
+
+  testWidgets('NIFTY ATM CE/PE rows render when present', (tester) async {
+    const atmCe = AtmOptionRow(
+      label: 'NIFTY 24050 CE',
+      strike: 24050,
+      expiry: '2026-07-17',
+      securityId: '99999',
+      tf: {'5m': IndicatorCell(ema9: 200)},
+    );
+    const atmPe = AtmOptionRow(
+      label: 'NIFTY 24050 PE',
+      strike: 24050,
+      expiry: '2026-07-17',
+      securityId: '88888',
+      tf: {'5m': IndicatorCell(ema9: 180)},
+    );
+
+    await pumpAt(
+      tester,
+      const Size(1400, 900),
+      snap: snapshot(atmCe: atmCe, atmPe: atmPe),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('NIFTY 24050 CE'), findsOneWidget);
+    expect(find.text('NIFTY 24050 PE'), findsOneWidget);
+  });
+
+  group('recent activity strip', () {
+    testWidgets('hidden when there are no events', (tester) async {
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot());
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Recent activity'), findsNothing);
+    });
+
+    testWidgets('entry_aborted renders with reason and a warning treatment',
+        (tester) async {
+      final events = [
+        {
+          'event_type': 'entry_aborted',
+          'underlying': 'NIFTY',
+          'reason': 'fill_unresolved',
+          'ist_time': '2026-07-17T10:05:00+05:30',
+        },
+      ];
+
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot(recentEvents: events));
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Recent activity'), findsOneWidget);
+      expect(find.textContaining('entry aborted'), findsOneWidget);
+      expect(find.textContaining('fill_unresolved'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    });
+
+    testWidgets('non-aborted events render without the warning icon',
+        (tester) async {
+      final events = [
+        {
+          'event_type': 'square_off',
+          'underlying': 'BANKNIFTY',
+          'reason': 'square_off',
+          'ist_time': '2026-07-17T15:30:00+05:30',
+        },
+      ];
+
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot(recentEvents: events));
+
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('square off'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber_rounded), findsNothing);
+    });
+
+    testWidgets('shows at most 5 of many events', (tester) async {
+      final events = List.generate(
+        8,
+        (i) => {
+          'event_type': 'leg_status',
+          'underlying': 'NIFTY',
+          'ist_time': '2026-07-17T10:0$i:00+05:30',
+        },
+      );
+
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot(recentEvents: events));
+
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('leg status'), findsNWidgets(5));
+    });
+  });
+
+  group('freshness badge', () {
+    testWidgets('no server timestamp and no live tick renders "feed stale"',
+        (tester) async {
+      await pumpAt(
+        tester,
+        const Size(1400, 900),
+        snap: snapshot(
+          indices: const [
+            IndexPrice(name: 'NIFTY', spot: 24150.5),
+            IndexPrice(name: 'BANKNIFTY', spot: 52100.0),
+          ],
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('feed stale'), findsOneWidget);
+      expect(find.byIcon(Icons.wifi_off), findsOneWidget);
+    });
+
+    testWidgets('a fresh as_of and a recent tick render as live', (tester) async {
+      await pumpAt(
+        tester,
+        const Size(1400, 900),
+        snap: snapshot(
+          asOf: DateTime.now(),
+          indices: const [
+            IndexPrice(name: 'NIFTY', spot: 24150.5, spotAgeS: 1.0),
+            IndexPrice(name: 'BANKNIFTY', spot: 52100.0, spotAgeS: 1.5),
+          ],
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('s ago'), findsOneWidget);
+      expect(find.byIcon(Icons.wifi), findsOneWidget);
+    });
+
+    testWidgets('a stale as_of renders "feed stale" even if a tick exists',
+        (tester) async {
+      await pumpAt(
+        tester,
+        const Size(1400, 900),
+        snap: snapshot(
+          asOf: DateTime.now().subtract(const Duration(seconds: 30)),
+          indices: const [
+            IndexPrice(name: 'NIFTY', spot: 24150.5, spotAgeS: 1.0),
+          ],
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byIcon(Icons.wifi_off), findsOneWidget);
+    });
   });
 }

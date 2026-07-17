@@ -282,6 +282,40 @@ class BarBuilder:
         )
 
 
+def rollup_1m_bars(bars_1m: list[BarClosed], tf_minutes: int, tf_label: str) -> list[BarClosed]:
+    """Roll up chronologically-ordered 1-minute ``BarClosed`` bars into ``tf_minutes``
+    buckets, anchored via ``_bar_boundary`` — the same session-anchored bucket function
+    the live ``BarAggregator`` uses. Shared by ``scripts/oneoff/rebuild_market_bars.py``
+    (rebuilding stored index bars) and the on-demand option-strike indicator suite
+    (``indicator-matrix-kite-parity``'s NIFTY ATM CE/PE rows, which read 1m ``option_bars``
+    that were never fed through the live ``BarAggregator``) — one rollup implementation
+    for both callers.
+    """
+    buckets: dict[datetime, list[BarClosed]] = {}
+    for bar in bars_1m:
+        bar_time = bar.bar_time if bar.bar_time.tzinfo else bar.bar_time.replace(tzinfo=UTC)
+        boundary = _bar_boundary(bar_time, tf_minutes)
+        buckets.setdefault(boundary, []).append(bar)
+
+    out: list[BarClosed] = []
+    for boundary in sorted(buckets):
+        group = sorted(buckets[boundary], key=lambda b: b.bar_time)
+        out.append(
+            BarClosed(
+                security_id=group[0].security_id,
+                timeframe=tf_label,
+                bar_time=boundary,
+                open=group[0].open,
+                high=max(b.high for b in group),
+                low=min(b.low for b in group),
+                close=group[-1].close,
+                volume=sum(b.volume for b in group),
+                oi=group[-1].oi,
+            )
+        )
+    return out
+
+
 class BarAggregator:
     """
     Holds one BarBuilder per (security_id, timeframe).

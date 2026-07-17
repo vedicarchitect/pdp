@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from pdp.indicators.pivots import _compute_pivots
+from pdp.market.bars import _session_open_utc
 
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 _SCHEMA_VERSION = 1
+
+# 15:30 IST is 6h15m after 09:15 IST session open.
+_SESSION_LENGTH = timedelta(hours=6, minutes=15)
 
 _UNDERLYING_MAP: dict[str, str] = {
     "13": "NIFTY",
@@ -370,54 +374,88 @@ async def _has_period_doc(
     return True
 
 
+async def _session_window_hlc(
+    db: Any,
+    security_id: str,
+    day: date,
+) -> tuple[float | None, float | None, float | None]:
+    """Aggregate one trading day's session-anchored HLC (``[09:15,15:30)`` IST) from 1m bars.
+
+    Falls back to a stored ``1D`` bar for that day only when the day has no 1-minute bars at
+    all. Never mixes ``1D`` and ``1m`` together in one aggregate — that mixing is what let an
+    out-of-session pre-open print (outside the 1m series' own session window, but still inside
+    the wide calendar-day pad the old per-period fetchers used) inflate a period's high.
+    """
+    col = db["market_bars"]
+    window_start = _session_open_utc(datetime(day.year, day.month, day.day, tzinfo=UTC))
+    window_end = window_start + _SESSION_LENGTH
+    pipeline = [
+        {"$match": {
+            "metadata.security_id": security_id,
+            "metadata.timeframe": "1m",
+            "ts": {"$gte": window_start, "$lt": window_end},
+        }},
+        {"$group": {
+            "_id": None,
+            "h": {"$max": "$high"},
+            "l": {"$min": "$low"},
+            "c": {"$last": "$close"},
+        }},
+    ]
+    async for agg in col.aggregate(pipeline):
+        return float(agg["h"]), float(agg["l"]), float(agg["c"])
+
+    # No 1m bars for this day at all — fall back to the stored 1D bar.
+    doc = await col.find_one(
+        {
+            "metadata.security_id": security_id,
+            "metadata.timeframe": "1D",
+            "ts": {"$gte": window_start - timedelta(hours=1), "$lt": window_end + timedelta(hours=1)},
+        },
+        sort=[("ts", -1)],
+    )
+    if doc is None:
+        return None, None, None
+    return float(doc["high"]), float(doc["low"]), float(doc["close"])
+
+
+async def _session_anchored_hlc(
+    db: Any,
+    security_id: str,
+    start: date,
+    end: date,
+) -> tuple[float | None, float | None, float | None]:
+    """Aggregate session-anchored HLC across every calendar day in ``[start, end]``.
+
+    Each day's high/low/close is computed independently via ``_session_window_hlc`` (1m-only,
+    ``[09:15,15:30)`` IST), then combined: overall high = max of daily highs, overall low = min
+    of daily lows, close = the last day's close. Days with no data (weekends, holidays, or a
+    genuine coverage gap) are silently skipped rather than treated as zero-range.
+    """
+    h: float | None = None
+    lo: float | None = None
+    c: float | None = None
+    c_day: date | None = None
+    d = start
+    while d <= end:
+        day_h, day_l, day_c = await _session_window_hlc(db, security_id, d)
+        if day_h is not None:
+            h = day_h if h is None else max(h, day_h)
+            lo = day_l if lo is None else min(lo, day_l)  # type: ignore[arg-type]
+            if c_day is None or d > c_day:
+                c = day_c
+                c_day = d
+        d += timedelta(days=1)
+    return h, lo, c
+
+
 async def _fetch_1d_hlc(
     db: Any,
     security_id: str,
     day: date,
 ) -> tuple[float | None, float | None, float | None]:
-    """Fetch the 1D bar HLC for a security on a given day from market_bars."""
-    # 1D bars are stored with bar_time = IST midnight in UTC (18:30 of prior UTC day)
-    # Widen the window by ±1 day to be safe across timezone edges.
-
-    day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=UTC) - timedelta(hours=6)
-    day_end = day_start + timedelta(hours=30)
-    col = db["market_bars"]
-    doc = await col.find_one(
-        {
-            "metadata.security_id": security_id,
-            "metadata.timeframe": "1D",
-            "ts": {"$gte": day_start, "$lt": day_end},
-        },
-        sort=[("ts", -1)],
-    )
-    if doc is None:
-        # Fallback: aggregate from 1m bars for that day
-        doc = await col.find_one(
-            {
-                "metadata.security_id": security_id,
-                "metadata.timeframe": "1m",
-                "ts": {"$gte": day_start, "$lt": day_end},
-            },
-            sort=[("ts", 1)],
-        )
-        if doc:
-            pipeline = [
-                {"$match": {
-                    "metadata.security_id": security_id,
-                    "metadata.timeframe": "1m",
-                    "ts": {"$gte": day_start, "$lt": day_end},
-                }},
-                {"$group": {
-                    "_id": None,
-                    "h": {"$max": "$high"},
-                    "l": {"$min": "$low"},
-                    "c": {"$last": "$close"},
-                }},
-            ]
-            async for agg in col.aggregate(pipeline):
-                return float(agg["h"]), float(agg["l"]), float(agg["c"])
-        return None, None, None
-    return float(doc["high"]), float(doc["low"]), float(doc["close"])
+    """Fetch a single trading day's session-anchored HLC from market_bars."""
+    return await _session_window_hlc(db, security_id, day)
 
 
 async def _fetch_week_hlc(
@@ -426,27 +464,8 @@ async def _fetch_week_hlc(
     week_start: date,
     week_end: date,
 ) -> tuple[float | None, float | None, float | None]:
-    """Fetch aggregated HLC for a security across a full ISO week from market_bars."""
-
-    ws = datetime(week_start.year, week_start.month, week_start.day, tzinfo=UTC) - timedelta(hours=6)
-    we = datetime(week_end.year, week_end.month, week_end.day, tzinfo=UTC) + timedelta(hours=24)
-    col = db["market_bars"]
-    pipeline = [
-        {"$match": {
-            "metadata.security_id": security_id,
-            "metadata.timeframe": {"$in": ["1D", "1m"]},
-            "ts": {"$gte": ws, "$lt": we},
-        }},
-        {"$group": {
-            "_id": None,
-            "h": {"$max": "$high"},
-            "l": {"$min": "$low"},
-            "c": {"$last": "$close"},
-        }},
-    ]
-    async for agg in col.aggregate(pipeline):
-        return float(agg["h"]), float(agg["l"]), float(agg["c"])
-    return None, None, None
+    """Fetch session-anchored aggregated HLC for a security across a full ISO week."""
+    return await _session_anchored_hlc(db, security_id, week_start, week_end)
 
 
 async def _fetch_month_hlc(
@@ -455,24 +474,5 @@ async def _fetch_month_hlc(
     month_start: date,
     month_end: date,
 ) -> tuple[float | None, float | None, float | None]:
-    """Fetch aggregated HLC for a security across a full calendar month from market_bars."""
-
-    ms = datetime(month_start.year, month_start.month, month_start.day, tzinfo=UTC) - timedelta(hours=6)
-    me = datetime(month_end.year, month_end.month, month_end.day, tzinfo=UTC) + timedelta(hours=24)
-    col = db["market_bars"]
-    pipeline = [
-        {"$match": {
-            "metadata.security_id": security_id,
-            "metadata.timeframe": {"$in": ["1D", "1m"]},
-            "ts": {"$gte": ms, "$lt": me},
-        }},
-        {"$group": {
-            "_id": None,
-            "h": {"$max": "$high"},
-            "l": {"$min": "$low"},
-            "c": {"$last": "$close"},
-        }},
-    ]
-    async for agg in col.aggregate(pipeline):
-        return float(agg["h"]), float(agg["l"]), float(agg["c"])
-    return None, None, None
+    """Fetch session-anchored aggregated HLC for a security across a full calendar month."""
+    return await _session_anchored_hlc(db, security_id, month_start, month_end)

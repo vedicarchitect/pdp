@@ -475,7 +475,7 @@ def main() -> int:
             from pdp.options.gap_backfill import backfill_gaps  # noqa: PLC0415
             backfill_gaps(
                 dhan=dhan, col=mdb["option_bars"], cal=cal, days=days,
-                codes=[1, 2], band=s.WAREHOUSE_STRIKE_BAND, only_missing=True,
+                ladder=[("WEEK", 1), ("WEEK", 2)], band=s.WAREHOUSE_STRIKE_BAND, only_missing=True,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  [auto-heal] skipped: {exc}")

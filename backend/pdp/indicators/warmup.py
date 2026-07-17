@@ -118,6 +118,63 @@ _TF_TO_DHAN_INTERVAL: dict[str, int] = {
     "1h": 60,
 }
 
+# Timeframes derivable from the 1m series already in `market_bars`. These are exactly the
+# windows that trip Dhan's 90-day intraday cap (30m EMA200 ≈ 108 calendar days, 1H ≈ 200):
+# warmup derives them from 1m via the shared session-anchored bucket function instead of a
+# live intraday API call. 5m is intentionally excluded so it keeps its existing (small,
+# never-over-90-day at the 200-floor) direct path. See `indicator-warmup-derive-from-1m`.
+_DERIVABLE_TF_MINUTES: dict[str, int] = {"15m": 15, "30m": 30, "1H": 60, "1h": 60}
+
+# Dhan serves at most 90 calendar days of intraday candles per request.
+_DHAN_INTRADAY_MAX_DAYS = 90
+
+
+def _ninety_day_chunks(
+    from_d: date, to_d: date, max_days: int = _DHAN_INTRADAY_MAX_DAYS
+) -> list[tuple[date, date]]:
+    """Split ``[from_d, to_d]`` into ≤ ``max_days``-calendar-day inclusive windows.
+
+    Mirrors ``scripts/backfill_spot.py``'s chunker so a warmup window wider than Dhan's
+    90-day intraday cap is fetched in pieces instead of failing whole with DH-905.
+    """
+    out: list[tuple[date, date]] = []
+    start = from_d
+    while start <= to_d:
+        end = min(start + timedelta(days=max_days - 1), to_d)
+        out.append((start, end))
+        start = end + timedelta(days=1)
+    return out
+
+
+def _derive_bars_from_1m(bars_1m: list[BarClosed], tf_minutes: int, timeframe: str) -> list[BarClosed]:
+    """Roll up 1m ``BarClosed`` into ``timeframe`` buckets via the session-anchored
+    ``_bar_boundary`` — the same bucket function the live ``BarAggregator`` uses, so a
+    warmup-derived bar is bit-identical to one the live feed would have rolled."""
+    from pdp.market.bars import _bar_boundary
+
+    buckets: dict[datetime, list[BarClosed]] = {}
+    for b in bars_1m:
+        boundary = _bar_boundary(b.bar_time, tf_minutes)
+        buckets.setdefault(boundary, []).append(b)
+
+    out: list[BarClosed] = []
+    for boundary in sorted(buckets):
+        group = sorted(buckets[boundary], key=lambda b: b.bar_time)
+        out.append(
+            BarClosed(
+                security_id=group[0].security_id,
+                timeframe=timeframe,
+                bar_time=boundary,
+                open=group[0].open,
+                high=max(b.high for b in group),
+                low=min(b.low for b in group),
+                close=group[-1].close,
+                volume=sum(b.volume for b in group),
+                oi=group[-1].oi,
+            )
+        )
+    return out
+
 # Segment string → Dhan instrument type string for the REST API
 _SEGMENT_TO_INSTRUMENT: dict[str, str] = {
     "IDX_I": "INDEX",
@@ -205,6 +262,31 @@ async def _warm_one(
 
     # target_bars is the depth required by the configured indicator families
     # (derive_bars x max period, floor 200) — see required_bars().
+    #
+    # Preferred top-up: derive a derivable higher timeframe (15m/30m/1H) from the 1m
+    # series already in Mongo — no live API, and it never trips Dhan's 90-day intraday
+    # cap. Only when 1m coverage is itself insufficient do we fall back to a chunked
+    # Dhan intraday fetch. See `indicator-warmup-derive-from-1m`.
+    if len(bars) < target_bars and timeframe in _DERIVABLE_TF_MINUTES:
+        bars_1m = await _fetch_from_mongo(col, security_id, "1m", since)
+        if bars_1m:
+            now = datetime.now(UTC)
+            derived = [
+                b
+                for b in _derive_bars_from_1m(bars_1m, _DERIVABLE_TF_MINUTES[timeframe], timeframe)
+                if bar_is_complete(b.bar_time, timeframe, now)
+            ]
+            if len(derived) > len(bars):
+                await _replace_derived_bars(col, security_id, timeframe, since, derived)
+                log.info(
+                    "indicator_warmup_derived_from_1m",
+                    security_id=security_id,
+                    timeframe=timeframe,
+                    derived=len(derived),
+                    from_1m=len(bars_1m),
+                )
+                bars = derived
+
     if len(bars) < target_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
         log.info(
             "indicator_warmup_fetching_from_api",
@@ -460,64 +542,79 @@ def _fetch_from_dhan(
 
     ctx = DhanContext(settings.DHAN_CLIENT_ID, settings.DHAN_ACCESS_TOKEN)
     client = DhanClient(ctx)
-    if is_daily:
-        # Intraday endpoint does not serve daily candles — use the daily-candles API.
-        resp = client.historical_daily_data(
-            security_id=security_id,
-            exchange_segment=segment,
-            instrument_type=instrument,
-            from_date=from_date,
-            to_date=to_date,
-        )
-    else:
-        resp = client.intraday_minute_data(
-            security_id=security_id,
-            exchange_segment=segment,
-            instrument_type=instrument,
-            from_date=from_date,
-            to_date=to_date,
-            interval=interval,
-        )
 
-    if not isinstance(resp, dict) or resp.get("status") == "failure":
-        log.warning("indicator_warmup_api_error", resp=str(resp)[:200])
-        return []
-
-    data = resp.get("data", resp)
-    opens = data.get("open", [])
-    highs = data.get("high", [])
-    lows = data.get("low", [])
-    closes = data.get("close", [])
-    volumes = data.get("volume", [])
-    timestamps = data.get("start_Time", data.get("timestamp", []))
+    def _parse(resp: object) -> list[BarClosed]:
+        if not isinstance(resp, dict) or resp.get("status") == "failure":
+            log.warning("indicator_warmup_api_error", resp=str(resp)[:200])
+            return []
+        data = resp.get("data", resp)
+        opens = data.get("open", [])
+        highs = data.get("high", [])
+        lows = data.get("low", [])
+        closes = data.get("close", [])
+        volumes = data.get("volume", [])
+        timestamps = data.get("start_Time", data.get("timestamp", []))
+        out: list[BarClosed] = []
+        for i in range(len(closes)):
+            try:
+                ts_raw = timestamps[i] if i < len(timestamps) else None
+                if ts_raw is None:
+                    continue
+                if isinstance(ts_raw, (int, float)):
+                    bar_time = datetime.fromtimestamp(ts_raw, tz=UTC)
+                else:
+                    bar_time = datetime.fromisoformat(str(ts_raw))
+                    if bar_time.tzinfo is None:
+                        bar_time = bar_time.replace(tzinfo=UTC)
+                out.append(
+                    BarClosed(
+                        security_id=security_id,
+                        timeframe=timeframe,
+                        bar_time=bar_time,
+                        open=Decimal(str(opens[i])) if i < len(opens) else Decimal(str(closes[i])),
+                        high=Decimal(str(highs[i])) if i < len(highs) else Decimal(str(closes[i])),
+                        low=Decimal(str(lows[i])) if i < len(lows) else Decimal(str(closes[i])),
+                        close=Decimal(str(closes[i])),
+                        volume=int(volumes[i]) if i < len(volumes) else 0,
+                        oi=0,
+                    )
+                )
+            except Exception:  # noqa: S112
+                continue
+        return out
 
     bars: list[BarClosed] = []
-    for i in range(len(closes)):
-        try:
-            ts_raw = timestamps[i] if i < len(timestamps) else None
-            if ts_raw is None:
-                continue
-            if isinstance(ts_raw, (int, float)):
-                bar_time = datetime.fromtimestamp(ts_raw, tz=UTC)
-            else:
-                bar_time = datetime.fromisoformat(str(ts_raw))
-                if bar_time.tzinfo is None:
-                    bar_time = bar_time.replace(tzinfo=UTC)
-            bars.append(
-                BarClosed(
+    if is_daily:
+        # Intraday endpoint does not serve daily candles — use the daily-candles API
+        # (not subject to the 90-day intraday cap, so no chunking needed).
+        bars.extend(
+            _parse(
+                client.historical_daily_data(
                     security_id=security_id,
-                    timeframe=timeframe,
-                    bar_time=bar_time,
-                    open=Decimal(str(opens[i])) if i < len(opens) else Decimal(str(closes[i])),
-                    high=Decimal(str(highs[i])) if i < len(highs) else Decimal(str(closes[i])),
-                    low=Decimal(str(lows[i])) if i < len(lows) else Decimal(str(closes[i])),
-                    close=Decimal(str(closes[i])),
-                    volume=int(volumes[i]) if i < len(volumes) else 0,
-                    oi=0,
+                    exchange_segment=segment,
+                    instrument_type=instrument,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
             )
-        except Exception:  # noqa: S112
-            continue
+        )
+    else:
+        # Chunk the intraday window into ≤ 90-calendar-day pieces so a warmup lookback
+        # wider than Dhan's cap (30m EMA200 ≈ 108 days, 1H ≈ 200) no longer fails whole
+        # with DH-905. A single failed chunk is logged and skipped, not fatal.
+        for c_from, c_to in _ninety_day_chunks(from_d, today_ist):
+            bars.extend(
+                _parse(
+                    client.intraday_minute_data(
+                        security_id=security_id,
+                        exchange_segment=segment,
+                        instrument_type=instrument,
+                        from_date=c_from.strftime("%Y-%m-%d"),
+                        to_date=c_to.strftime("%Y-%m-%d"),
+                        interval=interval,
+                    )
+                )
+            )
 
     bars.sort(key=lambda b: b.bar_time)
 
@@ -632,6 +729,28 @@ async def configure_matrix_suites(
     engine.matrix_futures_sids = fut_map  # type: ignore[attr-defined]
     log.info("matrix_suites_configured", spot=list(_MATRIX_INDEX_SIDS.values()), futures=fut_map)
     return entries
+
+
+async def _replace_derived_bars(
+    col, security_id: str, timeframe: str, since: datetime, bars: list[BarClosed]
+) -> None:
+    """Delete-then-insert the ``[since, ∞)`` window for ``(security_id, timeframe)`` and
+    write the 1m-derived bars. MongoDB time-series collections reject upsert/non-multi
+    update (error 72), so idempotency is delete-the-window-then-insert — matching
+    ``scripts/backfill_spot.py``'s ``_write_day``."""
+    if not bars:
+        return
+    try:
+        await col.delete_many(
+            {
+                "metadata.security_id": security_id,
+                "metadata.timeframe": timeframe,
+                "ts": {"$gte": since},
+            }
+        )
+        await _persist_bars(col, bars)
+    except Exception as exc:
+        log.warning("indicator_warmup_derive_persist_error", security_id=security_id, exc=str(exc))
 
 
 async def _persist_bars(col, bars: list[BarClosed]) -> None:

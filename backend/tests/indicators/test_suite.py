@@ -489,6 +489,66 @@ class TestConfigDrivenSelection:
         assert "rsi" in eng._suite_trackers[key]
 
 
+# ── SuperTrend matrix variants (indicator-matrix-kite-parity) ────────────────
+
+class TestSuperTrendVariants:
+    """The Execution Console matrix overlays 3 SuperTrend variants (10,2)/(10,3)/(3,1),
+    distinct from the single engine-wide ST used for strategy signals."""
+
+    def _engine_with_suite(self):
+        from pdp.indicators.engine import IndicatorEngine
+
+        eng = IndicatorEngine(st_period=10, st_multiplier=2.0)
+        eng.configure_suite("13", "5m", [{"family": "ema"}])
+        return eng
+
+    def test_three_variants_computed_for_configured_pair(self):
+        eng = self._engine_with_suite()
+        for i in range(20):
+            bar = _make_bar_closed(24000 + i, security_id="13", timeframe="5m")
+            eng.on_bar(bar)
+        variants = eng.get_supertrend_variants("13", "5m")
+        assert set(variants) == {"st_10_2", "st_10_3", "st_3_1"}
+        for state in variants.values():
+            assert state.direction in (1, -1)
+            assert state.value is not None
+
+    def test_variants_independent_from_each_other(self):
+        """Different (period, multiplier) combos must diverge in value, not alias the
+        same tracker — a bug where all three shared one instance would make them equal."""
+        eng = self._engine_with_suite()
+        for i in range(30):
+            # Oscillate so ATR/bands actually differ across periods/multipliers.
+            close = 24000 + (i % 5) * 20 - (i % 3) * 15
+            bar = _make_bar_closed(close, security_id="13", timeframe="5m", high=close + 8, low=close - 8)
+            eng.on_bar(bar)
+        variants = eng.get_supertrend_variants("13", "5m")
+        values = {label: float(s.value) for label, s in variants.items()}
+        assert len(set(values.values())) > 1  # not all identical
+
+    def test_variants_empty_for_pair_without_configured_suite(self):
+        from pdp.indicators.engine import IndicatorEngine
+
+        eng = IndicatorEngine(st_period=10, st_multiplier=2.0)
+        bar = _make_bar_closed(24000.0, security_id="13", timeframe="5m")
+        eng.on_bar(bar)
+        assert eng.get_supertrend_variants("13", "5m") == {}
+
+    def test_engine_wide_st_unaffected_by_variants(self):
+        """get()/the strategy-facing accessor keeps using st_period/st_multiplier,
+        not one of the matrix variants — strategies must never see a value swapped in
+        by this change."""
+        eng = self._engine_with_suite()
+        for i in range(20):
+            bar = _make_bar_closed(24000 + i, security_id="13", timeframe="5m")
+            eng.on_bar(bar)
+        engine_wide = eng.get("13", "5m")
+        variants = eng.get_supertrend_variants("13", "5m")
+        assert engine_wide is not None
+        # engine-wide uses (10, 2) per this test's constructor args, matching st_10_2
+        assert float(engine_wide.value) == float(variants["st_10_2"].value)
+
+
 # ── 6.3 Parity test ──────────────────────────────────────────────────────────
 
 class TestBacktestParity:

@@ -11,11 +11,19 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import structlog
+
 from pdp.backtest.chain_loader import load_expiry_chain
 from pdp.backtest.completeness import spot_completeness
 from pdp.backtest.resample import resample_ohlcv
 from pdp.backtest.sim import DayData
-from pdp.instruments.expiry_calendar import nearest_real_expiry, real_expiries_from_option_bars
+from pdp.instruments.expiry_calendar import (
+    expiry_cadence_gaps,
+    nearest_real_expiry,
+    real_expiries_from_option_bars,
+)
+
+log = structlog.get_logger()
 
 _IST = timedelta(hours=5, minutes=30)
 NIFTY_SID = "13"
@@ -50,6 +58,10 @@ class WindowData:
     expiry_by_day: dict[date, date]
     valid_days: list[date] = field(default_factory=list)
     skipped: dict[date, str] = field(default_factory=dict)
+    # Trade days whose expiry was resolved across a detected expiry-cadence gap (a missing,
+    # never-ingested expiry) rather than to a genuinely nearby real one — see
+    # ``pdp.instruments.expiry_calendar.expiry_cadence_gaps``.
+    cadence_gap_days: set[date] = field(default_factory=set)
 
 
 def load_window(
@@ -80,17 +92,34 @@ def load_window(
     # traded (they fall out as no-chain skips); the legacy JSON-calendar fallback is used ONLY
     # when option_bars has no chain at all for the underlying (pre-ingest / legacy callers).
     real_expiries = real_expiries_from_option_bars(mdb, underlying)
+    cadence_gaps = expiry_cadence_gaps(underlying, real_expiries) if real_expiries else []
     expiry_by_day: dict[date, date] = {}
+    cadence_gap_days: set[date] = set()
     for d in days:
         if real_expiries:
             real = nearest_real_expiry(real_expiries, d)
             if real is not None:
                 expiry_by_day[d] = real
+                # Flag trade days whose resolved expiry sits on the far side of a detected
+                # cadence gap — nearest_real_expiry() forward-filled across a missing,
+                # never-ingested expiry rather than resolving to a genuinely nearby one.
+                for _u, gap_start, gap_end, _gap_days in cadence_gaps:
+                    if real == gap_end and gap_start < d < gap_end:
+                        cadence_gap_days.add(d)
+                        break
             # else: no real expiry on/after this day → leave unmapped (day skipped, not faked)
         else:
             e = _resolve_expiry(cal, d)
             if e is not None:
                 expiry_by_day[d] = e
+
+    if cadence_gap_days:
+        log.warning(
+            "expiry_cadence_gap_trade_days",
+            underlying=underlying,
+            count=len(cadence_gap_days),
+            gaps=[(str(gs), str(ge), gd) for _u, gs, ge, gd in cadence_gaps],
+        )
     by_exp: dict[date, list[date]] = {}
     for d, e in expiry_by_day.items():
         by_exp.setdefault(e, []).append(d)
@@ -115,6 +144,7 @@ def load_window(
     return WindowData(
         spot_1m_by_day=spot_by_day, chain_1m=chain_1m,
         expiry_by_day=expiry_by_day, valid_days=valid, skipped=skipped,
+        cadence_gap_days=cadence_gap_days,
     )
 
 

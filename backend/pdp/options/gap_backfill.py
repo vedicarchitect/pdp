@@ -17,12 +17,13 @@ The rolling-option API is ATM-relative, so each bar's actual strike is derived f
 
 Performance design
 ------------------
-Each trade-day requires 1 spot call + (codes × labels × 2 sides) option calls.  With the defaults
-(2 codes, band=5) that is 45 API calls per day.  A global token-bucket rate limiter caps throughput
-at ``_API_RATE`` req/sec (4.0, comfortably under Dhan's published 5/sec limit).  Within each day
-the 44 option calls are dispatched concurrently via ``ThreadPoolExecutor(max_workers=_MAX_WORKERS)``
-so the wall-clock time per day drops from ~47 s (sequential) to ~12 s (~4x faster).  All docs are
-collected in memory and written in a single ``bulk_write`` per day to minimise MongoDB round trips.
+Each trade-day requires 1 spot call + (ladder * labels * 2 sides) option calls, where ``ladder`` is
+the list of ``(expiry_flag, expiry_code)`` pairs fetched (see :data:`DEFAULT_LADDER`). The live
+self-heal loop uses the lighter :data:`SELF_HEAL_LADDER` (2 entries, ~45 calls/day at band=5); the
+one-shot CLI's full ladder (5 entries) is ~2.5x that. A global token-bucket rate limiter caps
+throughput at ``_API_RATE`` req/sec (under Dhan's published 5/sec limit). Option calls for a day are
+dispatched concurrently via ``ThreadPoolExecutor(max_workers=_MAX_WORKERS)``. All docs are collected
+in memory and written in a single ``bulk_write`` per day to minimise MongoDB round trips.
 """
 
 from __future__ import annotations
@@ -53,6 +54,33 @@ _API_RATE = 3.0  # max requests per second (Dhan limit is 5; we stay under)
 _MAX_WORKERS = 1  # concurrent option-fetch threads per day
 _RETRY_ATTEMPTS = 1  # retries on DH-904 / transient errors
 _RETRY_BASE_SLEEP = 2.0  # seconds; doubles each retry (2→4→8→16)
+
+# ── Expiry ladder ────────────────────────────────────────────────────────────
+#
+# Dhan's ``expired_options_data`` is ATM-relative and addresses an expiry by
+# ``(expiry_flag, expiry_code)`` — flag ∈ {WEEK, MONTH}, code documented as 0-3 only. There is no
+# way to ask for "the 9th weekly", so full "weekly → next-month monthly" coverage is expressed as a
+# *ladder* of (flag, code) pairs: the near weeklies plus the current/next monthly. Each pair is
+# resolved to a real expiry date via the calendar (or an explicit override) before fetching; the
+# response carries no expiry date, so this labelling is the caller's responsibility.
+#
+# ``DEFAULT_LADDER`` is what the one-shot CLI backfill uses (full ladder). The live warehouse
+# self-heal loop keeps the lighter ``SELF_HEAL_LADDER`` (unchanged WEEK 1-2 behaviour) so the hot
+# 4-hourly cycle is not made 2.5x heavier and so it never depends on a MONTH list the JSON cache may
+# lack.
+DEFAULT_LADDER: list[tuple[str, int]] = [
+    ("WEEK", 1),
+    ("WEEK", 2),
+    ("WEEK", 3),
+    ("MONTH", 1),
+    ("MONTH", 2),
+]
+SELF_HEAL_LADDER: list[tuple[str, int]] = [("WEEK", 1), ("WEEK", 2)]
+
+
+def build_ladder(week_codes: list[int], month_codes: list[int]) -> list[tuple[str, int]]:
+    """Compose a ladder from separate WEEK / MONTH code lists (CLI convenience)."""
+    return [("WEEK", c) for c in week_codes] + [("MONTH", c) for c in month_codes]
 
 
 # ── Global token-bucket rate limiter ─────────────────────────────────────────
@@ -195,6 +223,7 @@ def bars_to_docs(
     *,
     underlying: str = "NIFTY",
     strike_step: int = 50,
+    expiry_flag: str = "WEEK",
 ) -> list[dict]:
     """Convert one rolling-option side payload into fixed-strike option_bars docs."""
     o, h, lo, c = data["open"], data["high"], data["low"], data["close"]
@@ -229,7 +258,7 @@ def bars_to_docs(
                 volume=vol[i] if i < len(vol) else 0,
                 oi=oi[i] if i < len(oi) else 0,
                 iv=iv[i] if i < len(iv) else 0.0,
-                expiry_flag="WEEK",
+                expiry_flag=expiry_flag,
                 strike_label=label,
                 trading_symbol=symbol_for(underlying, exp, float(strike), ot),
                 source="dhan_api",
@@ -241,22 +270,35 @@ def bars_to_docs(
 def fill_day(
     dhan: Any,
     col: Any,
-    cal: NiftyExpiryCalendar,
+    cal: NiftyExpiryCalendar | None,
     ds: str,
-    codes: list[int],
+    ladder: list[tuple[str, int]],
     label_offsets: list[tuple[str, int]],
     *,
     underlying: str = "NIFTY",
     underlying_sid: int = 13,
     strike_step: int = 50,
     exchange_segment: str = "NSE_FNO",
+    expiry_override: date | None = None,
 ) -> int:
     """Backfill one trade day's band from Dhan; returns the number of new bars inserted.
 
-    Spot data is fetched sequentially first (needed to derive strikes).  The 44 option-series
-    calls are then dispatched concurrently up to ``_MAX_WORKERS`` threads, all sharing a global
+    ``ladder`` is a list of ``(expiry_flag, expiry_code)`` pairs (e.g. :data:`DEFAULT_LADDER`);
+    each is resolved to a real expiry via ``cal.resolve_expiry(day, flag, code)`` and fetched with
+    that flag, so a single day can span the near weeklies *and* the current/next monthly.
+
+    Spot data is fetched sequentially first (needed to derive strikes).  The option-series calls
+    are then dispatched concurrently up to ``_MAX_WORKERS`` threads, all sharing a global
     token-bucket rate limiter.  All resulting docs are collected and written in a single
     ``bulk_write`` to minimise MongoDB round-trips.
+
+    ``expiry_override``, when given, labels *every* ladder entry with that one target expiry
+    instead of ``cal.resolve_expiry()`` (``cal`` may then be ``None``). Because every fetched
+    series is then labelled the same, callers must pass a **single-entry** ladder with the
+    ``(flag, code)`` that actually resolves to that expiry on ``ds`` (see
+    :func:`backfill_missing_expiry`) — a multi-entry ladder under an override would mislabel the
+    other contracts. This exists to reach a genuinely-missing expiry the calendar cannot yet
+    resolve; see `pdp.instruments.expiry_calendar`'s "DB-backed confirmed-expiry store" section.
     """
     spot = spot_by_minute(dhan, ds, underlying_sid=underlying_sid)
     if not spot:
@@ -293,27 +335,31 @@ def fill_day(
                 )
                 return 0
 
-    # Resolve expiries once per code (avoids repeated calendar lookups in threads).
-    expiries: dict[int, date | None] = {}
-    for code in codes:
-        expiries[code] = cal.resolve_expiry(date.fromisoformat(ds), "WEEK", code)
+    # Resolve expiries once per (flag, code) (avoids repeated calendar lookups in threads).
+    expiries: dict[tuple[str, int], date | None] = {}
+    for flag, code in ladder:
+        if expiry_override is not None:
+            expiries[(flag, code)] = expiry_override
+        else:
+            assert cal is not None, "cal is required when expiry_override is not given"
+            expiries[(flag, code)] = cal.resolve_expiry(date.fromisoformat(ds), flag, code)
 
-    # Build the full task list: (code, exp, label, offset, opt_type)
-    tasks: list[tuple[int, date, str, int, str]] = []
-    for code in codes:
-        exp = expiries.get(code)
+    # Build the full task list: (flag, code, exp, label, offset, opt_type)
+    tasks: list[tuple[str, int, date, str, int, str]] = []
+    for flag, code in ladder:
+        exp = expiries.get((flag, code))
         if exp is None:
-            log.warning("gap_fill_no_expiry", day=ds, code=code, underlying=underlying)
+            log.warning("gap_fill_no_expiry", day=ds, flag=flag, code=code, underlying=underlying)
             continue
         for label, offset in label_offsets:
             for ot in ("CE", "PE"):
-                tasks.append((code, exp, label, offset, ot))
+                tasks.append((flag, code, exp, label, offset, ot))
 
     if not tasks:
         return 0
 
-    def _fetch_one(task: tuple[int, date, str, int, str]) -> list[dict]:
-        code, exp, label, offset, ot = task
+    def _fetch_one(task: tuple[str, int, date, str, int, str]) -> list[dict]:
+        flag, code, exp, label, offset, ot = task
         drv = "CALL" if ot == "CE" else "PUT"
         for attempt in range(_RETRY_ATTEMPTS):
             _rate_limiter.acquire()
@@ -322,7 +368,7 @@ def fill_day(
                     security_id=underlying_sid,
                     exchange_segment=exchange_segment,
                     instrument_type="OPTIDX",
-                    expiry_flag="WEEK",
+                    expiry_flag=flag,
                     expiry_code=code,
                     strike=label,
                     drv_option_type=drv,
@@ -333,7 +379,8 @@ def fill_day(
                 )
             except Exception as exc:
                 log.warning(
-                    "gap_fill_api_error", day=ds, code=code, label=label, ot=ot, attempt=attempt, exc=str(exc)
+                    "gap_fill_api_error", day=ds, flag=flag, code=code, label=label, ot=ot,
+                    attempt=attempt, exc=str(exc),
                 )
                 if attempt < _RETRY_ATTEMPTS - 1:
                     time.sleep(_RETRY_BASE_SLEEP * (2**attempt))
@@ -345,6 +392,7 @@ def fill_day(
                 log.warning(
                     "gap_fill_rate_limited",
                     day=ds,
+                    flag=flag,
                     code=code,
                     label=label,
                     ot=ot,
@@ -357,7 +405,8 @@ def fill_day(
             if not data:
                 return []
             return bars_to_docs(
-                data, spot, exp, ot, label, offset, underlying=underlying, strike_step=strike_step
+                data, spot, exp, ot, label, offset, underlying=underlying,
+                strike_step=strike_step, expiry_flag=flag,
             )
         return []
 
@@ -423,9 +472,9 @@ def collapse_date_ranges(days: list[date]) -> list[str]:
     return out
 
 
-def expected_contracts(codes: list[int], band: int) -> int:
+def expected_contracts(ladder: list[tuple[str, int]], band: int) -> int:
     """Distinct (expiry, strike, side) contracts a fully-covered day should hold."""
-    return len(codes) * (2 * band + 1) * 2
+    return len(ladder) * (2 * band + 1) * 2
 
 
 def _ist_day_window(d: date) -> tuple[datetime, datetime]:
@@ -437,7 +486,7 @@ def _ist_day_window(d: date) -> tuple[datetime, datetime]:
 def days_missing(
     col: Any,
     days: list[date],
-    codes: list[int],
+    ladder: list[tuple[str, int]],
     band: int,
     *,
     min_fraction: float = 0.5,
@@ -446,13 +495,13 @@ def days_missing(
     """Trade-days whose option_bars coverage is below ``min_fraction`` of the expected band.
 
     A single aggregation counts distinct contracts per IST-day across the window; any day with
-    fewer than ``min_fraction × expected_contracts`` distinct contracts (including days entirely
+    fewer than ``min_fraction * expected_contracts`` distinct contracts (including days entirely
     absent) is reported as a gap. The fraction tolerates band-edge strikes that simply did not
     trade while still catching fully-missing or severely-incomplete days.
     """
     if not days:
         return []
-    threshold = expected_contracts(codes, band) * min_fraction
+    threshold = expected_contracts(ladder, band) * min_fraction
     win_lo, _ = _ist_day_window(min(days))
     _, win_hi = _ist_day_window(max(days))
     pipeline = [
@@ -483,7 +532,7 @@ def backfill_gaps(
     col: Any,
     cal: NiftyExpiryCalendar,
     days: list[date],
-    codes: list[int],
+    ladder: list[tuple[str, int]],
     band: int,
     min_fraction: float = 0.5,
     only_missing: bool = True,
@@ -494,11 +543,14 @@ def backfill_gaps(
 ) -> dict[str, Any]:
     """Detect gaps over ``days`` and backfill them. Returns a summary dict.
 
-    With ``only_missing`` (default) just the under-covered days are fetched; set it False to
-    re-fetch every day in the window (still idempotent via first-write-wins).
+    ``ladder`` is the list of ``(expiry_flag, expiry_code)`` pairs to fetch per day (see
+    :data:`DEFAULT_LADDER`). With ``only_missing`` (default) just the under-covered days are
+    fetched; set it False to re-fetch every day in the window (still idempotent via
+    first-write-wins) — required after seeding a previously-missing expiry into the calendar,
+    since those days already look "full" against the wrong expiry.
     """
     targets = (
-        days_missing(col, days, codes, band, min_fraction=min_fraction, underlying=underlying)
+        days_missing(col, days, ladder, band, min_fraction=min_fraction, underlying=underlying)
         if only_missing
         else days
     )
@@ -510,7 +562,7 @@ def backfill_gaps(
             col,
             cal,
             d.isoformat(),
-            codes,
+            ladder,
             label_offsets,
             underlying=underlying,
             underlying_sid=underlying_sid,
@@ -538,12 +590,81 @@ def backfill_gaps(
     }
 
 
+def backfill_missing_expiry(
+    *,
+    dhan: Any,
+    col: Any,
+    target_expiry: date,
+    days: list[date],
+    band: int,
+    flag: str = "WEEK",
+    code: int = 1,
+    underlying: str = "NIFTY",
+    underlying_sid: int = 13,
+    strike_step: int = 50,
+    exchange_segment: str = "NSE_FNO",
+) -> dict[str, Any]:
+    """Backfill ``days`` against a single known-but-uningested ``target_expiry``.
+
+    Escape hatch for when the calendar cannot resolve an expiry at all. It bypasses calendar
+    resolution and labels **every** fetched series as ``target_expiry`` — so it fetches exactly
+    one ``(flag, code)`` per day (default WEEK code 1) and the caller must only pass ``days`` on
+    which ``target_expiry`` genuinely is that ``(flag, code)`` (i.e. the expiry's own final week
+    for WEEK/1). For a wider window prefer seeding ``target_expiry`` into the calendar and
+    re-running :func:`backfill_gaps` with ``only_missing=False``, which labels each day correctly.
+
+    Every day in ``days`` is unconditionally fetched (no ``only_missing`` gate — a day "fully
+    covered" against the wrong expiry must still be re-fetched against the right one).
+    """
+    label_offsets = labels(band)
+    ladder = [(flag, code)]
+    total, filled = 0, 0
+    for d in days:
+        n = fill_day(
+            dhan,
+            col,
+            None,
+            d.isoformat(),
+            ladder,
+            label_offsets,
+            underlying=underlying,
+            underlying_sid=underlying_sid,
+            strike_step=strike_step,
+            exchange_segment=exchange_segment,
+            expiry_override=target_expiry,
+        )
+        total += n
+        if n:
+            filled += 1
+        log.info(
+            "gap_fill_known_expiry_day_done",
+            day=d.isoformat(),
+            target_expiry=str(target_expiry),
+            inserted=n,
+            underlying=underlying,
+        )
+    log.info(
+        "gap_fill_known_expiry_done",
+        target_expiry=str(target_expiry),
+        scanned=len(days),
+        days_filled=filled,
+        total_inserted=total,
+        underlying=underlying,
+    )
+    return {
+        "target_expiry": str(target_expiry),
+        "scanned": len(days),
+        "days_filled": filled,
+        "total_inserted": total,
+    }
+
+
 def run_gap_backfill(
     *,
     settings: Any,
     cal: NiftyExpiryCalendar,
     lookback_days: int,
-    codes: list[int] | None = None,
+    ladder: list[tuple[str, int]] | None = None,
     band: int | None = None,
     end: date | None = None,
     underlying: str = "NIFTY",
@@ -562,7 +683,7 @@ def run_gap_backfill(
         return {"skipped": "no_dhan_creds"}
 
     band = band if band is not None else settings.WAREHOUSE_STRIKE_BAND
-    codes = codes or [1, 2]
+    ladder = ladder or SELF_HEAL_LADDER
     end = end or datetime.now(UTC).astimezone().date()
     start = end - timedelta(days=lookback_days)
     days = trading_days(start, end, holidays(settings.NSE_HOLIDAYS_JSON))
@@ -586,7 +707,7 @@ def run_gap_backfill(
             "from": str(start),
             "to": str(end),
             "trading_days": len(days),
-            "codes": codes,
+            "ladder": ladder,
             "band": band,
             "underlying": underlying,
         },
@@ -596,7 +717,7 @@ def run_gap_backfill(
         col=col,
         cal=cal,
         days=days,
-        codes=codes,
+        ladder=ladder,
         band=band,
         underlying=underlying,
         underlying_sid=underlying_sid,

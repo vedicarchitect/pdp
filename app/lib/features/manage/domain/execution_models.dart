@@ -7,11 +7,13 @@ class IndexPrice {
   final String name;
   final double spot;
   final double? future;
+  final double? spotAgeS;
 
   const IndexPrice({
     required this.name,
     required this.spot,
     this.future,
+    this.spotAgeS,
   });
 
   factory IndexPrice.fromJson(String name, Map<String, dynamic> json) {
@@ -19,6 +21,7 @@ class IndexPrice {
       name: name,
       spot: (json['spot'] as num?)?.toDouble() ?? 0.0,
       future: (json['future'] as num?)?.toDouble(),
+      spotAgeS: (json['spot_age_s'] as num?)?.toDouble(),
     );
   }
 }
@@ -100,6 +103,25 @@ class LegRow {
   }
 }
 
+// ─── SuperTrend variant ────────────────────────────────────────────────────────
+
+/// One of the three SuperTrend variants the matrix overlays alongside Kite:
+/// (10,2) / (10,3) / (3,1) — see `IndicatorEngine.MATRIX_ST_VARIANTS`.
+class SuperTrendVariant {
+  final double? value;
+  final String? direction; // "up" | "down"
+
+  const SuperTrendVariant({this.value, this.direction});
+
+  factory SuperTrendVariant.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return const SuperTrendVariant();
+    return SuperTrendVariant(
+      value: (json['value'] as num?)?.toDouble(),
+      direction: json['direction'] as String?,
+    );
+  }
+}
+
 // ─── Indicator cell ───────────────────────────────────────────────────────────
 
 class IndicatorCell {
@@ -115,6 +137,9 @@ class IndicatorCell {
   final double? rsiMa; // SMA(14) signal line — Kite "RSI 14 SMA 14"
   final double? vwap; // sourced from futures contract
   final double? vwma; // sourced from futures contract
+  final SuperTrendVariant st1020; // ST(10,2)
+  final SuperTrendVariant st1030; // ST(10,3)
+  final SuperTrendVariant st31; // ST(3,1)
 
   const IndicatorCell({
     this.ema9,
@@ -129,6 +154,9 @@ class IndicatorCell {
     this.rsiMa,
     this.vwap,
     this.vwma,
+    this.st1020 = const SuperTrendVariant(),
+    this.st1030 = const SuperTrendVariant(),
+    this.st31 = const SuperTrendVariant(),
   });
 
   factory IndicatorCell.fromJson(Map<String, dynamic>? json) {
@@ -146,6 +174,9 @@ class IndicatorCell {
       rsiMa: (json['rsi_ma'] as num?)?.toDouble(),
       vwap: (json['vwap'] as num?)?.toDouble(),
       vwma: (json['vwma'] as num?)?.toDouble(),
+      st1020: SuperTrendVariant.fromJson(json['st_10_2'] as Map<String, dynamic>?),
+      st1030: SuperTrendVariant.fromJson(json['st_10_3'] as Map<String, dynamic>?),
+      st31: SuperTrendVariant.fromJson(json['st_3_1'] as Map<String, dynamic>?),
     );
   }
 }
@@ -233,6 +264,42 @@ class SidIndicators {
       pwl: (period?['pwl'] as num?)?.toDouble(),
       pmh: (period?['pmh'] as num?)?.toDouble(),
       pml: (period?['pml'] as num?)?.toDouble(),
+    );
+  }
+}
+
+// ─── NIFTY ATM CE/PE row ──────────────────────────────────────────────────────
+
+/// One on-demand ATM option row (NIFTY_ATM_CE / NIFTY_ATM_PE), computed from
+/// `option_bars` — see `pdp.strategy.atm_suite`. No Camarilla/period levels
+/// (index-only concepts); a timeframe with insufficient 1m history renders an
+/// empty cell rather than a guessed value.
+class AtmOptionRow {
+  final String label; // e.g. "NIFTY 24050 CE"
+  final double strike;
+  final String expiry;
+  final String securityId;
+  final Map<String, IndicatorCell> tf;
+
+  const AtmOptionRow({
+    required this.label,
+    required this.strike,
+    required this.expiry,
+    required this.securityId,
+    required this.tf,
+  });
+
+  factory AtmOptionRow.fromJson(Map<String, dynamic> json) {
+    final tfRaw = json['tf'] as Map<String, dynamic>? ?? {};
+    final tf = tfRaw.map(
+      (k, v) => MapEntry(k, IndicatorCell.fromJson(v as Map<String, dynamic>?)),
+    );
+    return AtmOptionRow(
+      label: json['label'] as String? ?? '',
+      strike: (json['strike'] as num?)?.toDouble() ?? 0.0,
+      expiry: json['expiry'] as String? ?? '',
+      securityId: json['security_id'] as String? ?? '',
+      tf: tf,
     );
   }
 }
@@ -333,6 +400,7 @@ class MonitorReadiness {
 // ─── Monitor snapshot ─────────────────────────────────────────────────────────
 
 class MonitorSnapshot {
+  final DateTime? asOf;
   final List<IndexPrice> indices;
   final List<UnderlyingGroup> groups;
   final double dayRealized;
@@ -347,8 +415,11 @@ class MonitorSnapshot {
   final List<Map<String, dynamic>> recentEvents;
   final Map<String, SidIndicators> indicators;
   final MonitorReadiness readiness;
+  final AtmOptionRow? atmCe;
+  final AtmOptionRow? atmPe;
 
   const MonitorSnapshot({
+    this.asOf,
     required this.indices,
     required this.groups,
     required this.dayRealized,
@@ -363,6 +434,8 @@ class MonitorSnapshot {
     required this.recentEvents,
     required this.indicators,
     this.readiness = MonitorReadiness.ok,
+    this.atmCe,
+    this.atmPe,
   });
 
   List<LegRow> get legs => groups.expand((g) => g.legs).toList();
@@ -386,8 +459,13 @@ class MonitorSnapshot {
     // Status (primary = NIFTY)
     final status = json['status'] as Map<String, dynamic>? ?? {};
 
-    // Indicators
-    final indicatorsRaw = json['indicators'] as Map<String, dynamic>? ?? {};
+    // Indicators — NIFTY_ATM_CE/PE are separate row shapes (label/strike/expiry),
+    // parsed distinctly from the sid-keyed spot/strike matrix rows.
+    final indicatorsRaw = Map<String, dynamic>.from(
+      json['indicators'] as Map<String, dynamic>? ?? {},
+    );
+    final atmCeRaw = indicatorsRaw.remove('NIFTY_ATM_CE') as Map<String, dynamic>?;
+    final atmPeRaw = indicatorsRaw.remove('NIFTY_ATM_PE') as Map<String, dynamic>?;
     final indicators = indicatorsRaw.map(
       (sid, v) => MapEntry(sid, SidIndicators.fromJson(sid, v as Map<String, dynamic>)),
     );
@@ -398,6 +476,7 @@ class MonitorSnapshot {
         eventsRaw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
 
     return MonitorSnapshot(
+      asOf: DateTime.tryParse(json['as_of'] as String? ?? '')?.toLocal(),
       indices: indices,
       groups: groups,
       dayRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
@@ -412,6 +491,8 @@ class MonitorSnapshot {
       recentEvents: recentEvents,
       indicators: indicators,
       readiness: MonitorReadiness.fromJson(status['readiness'] as Map<String, dynamic>?),
+      atmCe: atmCeRaw != null ? AtmOptionRow.fromJson(atmCeRaw) : null,
+      atmPe: atmPeRaw != null ? AtmOptionRow.fromJson(atmPeRaw) : null,
     );
   }
 }

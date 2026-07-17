@@ -34,7 +34,9 @@ log = structlog.get_logger()
 IST = timedelta(hours=5, minutes=30)
 _IST_MS = int(IST.total_seconds() * 1000)
 
-_OPTION_CODES = [1, 2]
+# Coverage is measured against the same lighter ladder the live warehouse self-heals (WEEK 1-2),
+# so "missing" here means the same thing the self-heal loop backfills — not the fuller CLI ladder.
+_OPTION_LADDER: list[tuple[str, int]] = [("WEEK", 1), ("WEEK", 2)]
 
 
 def _ist_date(ts: datetime) -> date:
@@ -126,7 +128,7 @@ def _options_gaps_sync(
     `(underlying, ts)`-only index, so an unbounded sort-by-ts query would be a full scan.
     """
     col = sync_client[mongo_db_name]["option_bars"]
-    return set(days_missing(col, days, _OPTION_CODES, band, underlying=underlying))
+    return set(days_missing(col, days, _OPTION_LADDER, band, underlying=underlying))
 
 
 async def _options_family(

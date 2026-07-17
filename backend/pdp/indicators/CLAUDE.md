@@ -4,7 +4,8 @@
 
 | File | Role |
 |------|------|
-| `engine.py` | `IndicatorEngine` — per-`(sid, tf)` SuperTrend + suite tracker bundle. Call `on_bar(bar)` on each closed bar. |
+| `engine.py` | `IndicatorEngine` — per-`(sid, tf)` SuperTrend + suite tracker bundle. Call `on_bar(bar)` on each closed bar. `get_supertrend_variants(sid, tf)` returns the 3-way `MATRIX_ST_VARIANTS` (`(10,2)`/`(10,3)`/`(3,1)`) bundle used by the execution-console indicator matrix (`indicator-matrix-kite-parity`). |
+| `levels_store.py` | PMH/PML and week/month session-HLC levels for the execution console. `_session_window_hlc`/`_session_anchored_hlc` compute each day's high/low/close independently over the session window (reusing `market/bars.py::_session_open_utc`) rather than a naive calendar-range MIN/MAX — fixes a Kite-parity bug where straddling a session boundary corrupted PMH/PML. |
 | `supertrend.py` | Pure `SuperTrendState` dataclass + `SuperTrendTracker`. Uses `Decimal`; unchanged. |
 | `warmup.py` | `warm_up_indicator_engine()` — seeds engine from MongoDB `market_bars` on startup. |
 | `snapshot.py` | `Snapshot` dataclass — bundles the latest `*State` per suite family for a `(sid, tf)`. |

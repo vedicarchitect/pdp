@@ -86,11 +86,22 @@ class _PositionsBody extends ConsumerWidget {
     final tradesAsync = ref.watch(strangleTradesProvider(todayStr));
     final trades = tradesAsync.asData?.value;
 
-    final indicators = IndicatorPanel(indicators: snap.indicators);
+    final indicators = IndicatorPanel(
+      indicators: snap.indicators,
+      atmCe: snap.atmCe,
+      atmPe: snap.atmPe,
+    );
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= _splitBreakpoint;
+        // The indicator panel's DataTable needs ~660px to show every column
+        // (incl. the 3 SuperTrend variants + Camarilla) without its own
+        // horizontal scroll. A fixed 440px clipped CamR4/CamS4 off-screen when
+        // the window was maximized — give the panel a third of the available
+        // width instead, clamped so it never starves the positions column on a
+        // merely-wide (not maximized) window, nor over-shrinks on an ultrawide one.
+        final panelWidth = (constraints.maxWidth * 0.32).clamp(440.0, 720.0);
         return Column(
           children: [
             _IndexPriceRow(indices: snap.indices),
@@ -105,7 +116,7 @@ class _PositionsBody extends ConsumerWidget {
                           child: _PositionsColumn(snap: snap, trades: trades),
                         ),
                         const VerticalDivider(width: 1),
-                        SizedBox(width: 440, child: indicators),
+                        SizedBox(width: panelWidth, child: indicators),
                       ],
                     )
                   : ListView(
@@ -159,6 +170,8 @@ class _PositionsColumn extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
         _OverallStatusBar(snap: snap),
+        const SizedBox(height: 6),
+        _RecentEventsStrip(events: snap.recentEvents),
         const SizedBox(height: 8),
         if (unders.isEmpty)
           const _EmptyCard(message: 'No positions today')
@@ -205,6 +218,8 @@ class _OverallStatusBar extends StatelessWidget {
                           style: Theme.of(context).textTheme.bodySmall),
                     const SizedBox(width: 8),
                     _ReadinessChip(readiness: snap.readiness),
+                    const SizedBox(width: 8),
+                    _FreshnessBadge(snap: snap),
                   ],
                 ),
               ),
@@ -224,6 +239,98 @@ class _OverallStatusBar extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ─── Recent activity strip (incl. entry_aborted) ──────────────────────────────
+
+/// Newest-first strip of strategy activity events (`recent_events` from the
+/// monitor snapshot). Without this, an aborted entry (`entry_aborted` —
+/// see `strangle-entry-fill-race-and-latch`) was only ever visible in the
+/// backend log; the panel just showed "legs: []", indistinguishable from a
+/// quiet, correctly-neutral day.
+class _RecentEventsStrip extends StatelessWidget {
+  final List<Map<String, dynamic>> events;
+  const _RecentEventsStrip({required this.events});
+
+  @override
+  Widget build(BuildContext context) {
+    if (events.isEmpty) return const SizedBox.shrink();
+    final shown = events.take(5).toList();
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Recent activity',
+                style: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 2),
+            ...shown.map((e) => _EventLine(event: e)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EventLine extends StatelessWidget {
+  final Map<String, dynamic> event;
+  const _EventLine({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final type = event['event_type'] as String? ?? '';
+    final aborted = type == 'entry_aborted';
+    final underlying = event['underlying'] as String?;
+    final reason = event['reason'] as String?;
+    final hhmm = _fmtTime(event['ist_time'] as String? ?? event['ts'] as String?);
+    final typeLabel = type.isEmpty ? '' : type.replaceAll('_', ' ');
+
+    final parts = <String>[
+      if (underlying != null && underlying.isNotEmpty) underlying,
+      typeLabel,
+      if (reason != null && reason.isNotEmpty) '($reason)',
+    ];
+    final label = parts.join(' ');
+    final color = aborted ? Colors.orange : Theme.of(context).colorScheme.onSurfaceVariant;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: Row(
+        children: [
+          Icon(
+            aborted ? Icons.warning_amber_rounded : Icons.circle,
+            size: aborted ? 12 : 5,
+            color: aborted ? Colors.orange : Colors.grey,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 11,
+                    color: color,
+                    fontWeight: aborted ? FontWeight.w600 : FontWeight.normal),
+                overflow: TextOverflow.ellipsis),
+          ),
+          if (hhmm != null)
+            Text(hhmm, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+        ],
+      ),
+    );
+  }
+
+  String? _fmtTime(String? iso) {
+    if (iso == null || iso.isEmpty) return null;
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return null;
+    final local = dt.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
   }
 }
 
@@ -488,6 +595,59 @@ class _ReadinessChip extends StatelessWidget {
                 style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w700)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Data-freshness cue so a stuck poll or a dead feed reads as "stale", not as
+/// silently-identical-to-live "--" cells. Combines two independent staleness
+/// signals: how long ago the server actually built this payload (`as_of` —
+/// catches a stuck client poll or a hung backend) and how long since the
+/// primary index last ticked (`spot_age_s` — catches a dead market feed even
+/// when the backend itself is polling fine). The worse of the two wins.
+class _FreshnessBadge extends StatelessWidget {
+  final MonitorSnapshot snap;
+  const _FreshnessBadge({required this.snap});
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final payloadAgeS = snap.asOf != null
+        ? now.difference(snap.asOf!).inSeconds.toDouble()
+        : null;
+    final spotAges = snap.indices.map((i) => i.spotAgeS).whereType<double>().toList();
+    final noLiveTick = spotAges.isEmpty;
+    final worstSpotAgeS = noLiveTick ? null : spotAges.reduce((a, b) => a > b ? a : b);
+
+    double? effectiveAgeS;
+    for (final v in [payloadAgeS, worstSpotAgeS]) {
+      if (v == null) continue;
+      if (effectiveAgeS == null || v > effectiveAgeS) effectiveAgeS = v;
+    }
+
+    // Redis LTP keys carry a 5s TTL and the panel polls every 2s — beyond ~10s
+    // combined slack, the snapshot is genuinely stale, not just mid-poll.
+    final stale = noLiveTick || (effectiveAgeS != null && effectiveAgeS > 10);
+    final color = stale ? Colors.orange : AppColors.profit;
+    final label = noLiveTick
+        ? 'feed stale'
+        : (effectiveAgeS != null ? '${effectiveAgeS.toStringAsFixed(0)}s ago' : 'no data');
+
+    final tooltip = snap.asOf != null
+        ? 'Snapshot built ${DateFormat('HH:mm:ss').format(snap.asOf!)}'
+            '${noLiveTick ? '\nNo index tick in the last 5s' : ''}'
+        : 'No server timestamp on this snapshot';
+
+    return Tooltip(
+      message: tooltip,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(stale ? Icons.wifi_off : Icons.wifi, size: 12, color: color),
+          const SizedBox(width: 3),
+          Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+        ],
       ),
     );
   }

@@ -112,7 +112,9 @@ def main() -> int:
     dto = date.fromisoformat(a.date_to) if a.date_to else date.today()
     hol = holidays(s.NSE_HOLIDAYS_JSON)
     tdays = trading_days(dfrom, dto, hol)
-    gaps = days_missing(col, tdays, codes, band, min_fraction=a.min_fraction, underlying=a.symbol)
+    # days_missing measures coverage against a (flag, code) ladder; --codes are WEEK codes.
+    ladder = [("WEEK", c) for c in codes]
+    gaps = days_missing(col, tdays, ladder, band, min_fraction=a.min_fraction, underlying=a.symbol)
     gap_ranges = collapse_date_ranges(gaps)
 
     print(f"\n  Gap scan {dfrom}..{dto}  (codes={codes}, band={band}, min_fraction={a.min_fraction})")

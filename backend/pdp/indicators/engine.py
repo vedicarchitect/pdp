@@ -46,6 +46,16 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
+# The three SuperTrend variants the Execution Console matrix overlays alongside the
+# chart, per user confirmation (indicator-matrix-kite-parity) — distinct from the
+# single engine-wide `st_period`/`st_multiplier` pair used for strategy signals
+# (`get()`/`ctx.indicators.supertrend()`), which is intentionally left unchanged.
+MATRIX_ST_VARIANTS: tuple[tuple[str, int, float], ...] = (
+    ("st_10_2", 10, 2.0),
+    ("st_10_3", 10, 3.0),
+    ("st_3_1", 3, 1.0),
+)
+
 # Snapshot field names that correspond to indicator family names
 _SUITE_FAMILIES = frozenset(
     {
@@ -82,6 +92,10 @@ class IndicatorEngine:
         # SuperTrend (unchanged)
         self._trackers: dict[tuple[str, str], SuperTrendTracker] = {}
         self._latest: dict[tuple[str, str], SuperTrendState] = {}
+        # SuperTrend matrix variants: (sid, tf, variant_label) -> tracker/state.
+        # Parallel to _trackers/_latest above; never read by strategies.
+        self._variant_trackers: dict[tuple[str, str, str], SuperTrendTracker] = {}
+        self._variant_latest: dict[tuple[str, str, str], SuperTrendState] = {}
         # Suite: per-(sid, tf) bundle of family trackers
         self._suite_trackers: dict[tuple[str, str], dict[str, Any]] = {}
         self._snapshots: dict[tuple[str, str], Snapshot] = {}
@@ -141,6 +155,20 @@ class IndicatorEngine:
         if state is not None:
             self._latest[key] = state
 
+        # SuperTrend matrix variants — only computed for pairs with a suite configured
+        # (the matrix's index/strike/ATM rows), so non-matrix (sid, tf) pairs (e.g. a
+        # strategy-only timeframe) incur no extra per-bar cost.
+        if key in self._suite_trackers:
+            for label, period, multiplier in MATRIX_ST_VARIANTS:
+                vkey = (bar.security_id, bar.timeframe, label)
+                vtracker = self._variant_trackers.get(vkey)
+                if vtracker is None:
+                    vtracker = SuperTrendTracker(period, multiplier)
+                    self._variant_trackers[vkey] = vtracker
+                vstate = vtracker.update(bar.high, bar.low, bar.close, bar.bar_time)
+                if vstate is not None:
+                    self._variant_latest[vkey] = vstate
+
         # Suite (only for configured (sid, tf) pairs)
         bundle = self._suite_trackers.get(key)
         if bundle:
@@ -160,6 +188,19 @@ class IndicatorEngine:
     def get(self, security_id: str, timeframe: str) -> SuperTrendState | None:
         """Latest computed SuperTrend for the pair, or None if not yet seeded."""
         return self._latest.get((security_id, timeframe))
+
+    def get_supertrend_variants(
+        self, security_id: str, timeframe: str
+    ) -> dict[str, SuperTrendState]:
+        """Latest state for each of the three matrix SuperTrend variants
+        (``MATRIX_ST_VARIANTS``) for this pair. Only populated for (sid, tf) pairs with a
+        suite configured (see ``on_bar``) — returns an empty dict otherwise, never a
+        partial/fabricated entry for an unseeded variant."""
+        return {
+            label: state
+            for label, _period, _mult in MATRIX_ST_VARIANTS
+            if (state := self._variant_latest.get((security_id, timeframe, label))) is not None
+        }
 
     def is_warm(self, security_id: str, timeframe: str, min_bars: int = 200) -> bool:
         """Return True if the tracker for this pair has consumed at least min_bars."""

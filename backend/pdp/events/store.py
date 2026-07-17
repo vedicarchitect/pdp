@@ -31,6 +31,7 @@ class EventStore:
         event_type: str | None = None,
         severity: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         if self._col is None:
             return []
@@ -41,7 +42,9 @@ class EventStore:
             query["event_type"] = event_type
         if severity:
             query["severity"] = severity
-        cursor = self._col.find(query, sort=[("ts", -1)], limit=max(1, min(limit, 500)))
+        cursor = self._col.find(
+            query, sort=[("ts", -1)], limit=max(1, min(limit, 500)), skip=max(0, offset)
+        )
         out: list[dict[str, Any]] = []
         async for doc in cursor:
             doc.pop("_id", None)

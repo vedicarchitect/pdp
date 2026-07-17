@@ -138,6 +138,23 @@ class TickRouter:
                             ),
                             ex=900,
                         )
+                    # Publish the 3 matrix SuperTrend variants (only when a suite is
+                    # configured for this (sid, tf) — see IndicatorEngine.on_bar).
+                    _variants = self._indicator_engine.get_supertrend_variants(
+                        bar.security_id, bar.timeframe
+                    )
+                    if _variants:
+                        await redis.set(
+                            f"st_variants:{bar.security_id}:{bar.timeframe}",
+                            json.dumps(
+                                {
+                                    label: {"direction": s.direction, "value": str(s.value)}
+                                    for label, s in _variants.items()
+                                }
+                            ),
+                            ex=900,
+                        )
+
                     # Publish suite snapshot (non-blocking; only when suite is configured)
                     _snap = self._indicator_engine.get_snapshot(bar.security_id, bar.timeframe)
                     if _snap is not None:

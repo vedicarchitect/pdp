@@ -260,6 +260,7 @@ def main() -> int:
     results: list = []
     skipped = 0
     vix_days_seen = 0
+    cadence_gap_total = 0
     for ci, chunk in enumerate(chunks, 1):
         window = load_window(
             mdb, cal, chunk,
@@ -271,8 +272,15 @@ def main() -> int:
         pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk,
                                      underlying=cfg.underlying)
         skipped += len(window.skipped)
+        # Trade days resolved across a detected expiry-cadence gap (a missing, never-ingested
+        # expiry) — surfaced separately from ordinary valid/skipped so a run doesn't need a
+        # bespoke investigation to notice it silently traded (or phantom-skipped) against a
+        # far-side expiry. See pdp.instruments.expiry_calendar.expiry_cadence_gaps.
+        chunk_cadence_gap = len(window.cadence_gap_days & set(window.valid_days))
+        cadence_gap_total += chunk_cadence_gap
         msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]}: "
                f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, "
+               f"{chunk_cadence_gap} cadence-gap, "
                f"VIX {len(vix_by_day)} PCR {len(pcr_by_day)}")
         log.info(msg)
         if writer:
@@ -308,6 +316,11 @@ def main() -> int:
 
     if not vix_days_seen:
         log.warning("no India VIX data found for sid=%s — VIX gate was inactive", args.vix_sid)
+    if cadence_gap_total:
+        log.warning(
+            "%d traded day(s) resolved to an expiry across a detected coverage gap "
+            "(see chunk logs above)", cadence_gap_total,
+        )
     if not results:
         print("No results (no decision bars / chain data in window).")
         return 1
@@ -316,7 +329,8 @@ def main() -> int:
     if writer:
         out = writer.finalize(
             window={"from": str(days[0]), "to": str(days[-1]), "biz_days": len(days),
-                    "traded_days": len(results), "skipped": skipped, "vix_days": vix_days_seen},
+                    "traded_days": len(results), "skipped": skipped, "vix_days": vix_days_seen,
+                    "cadence_gap_days": cadence_gap_total},
             metrics=m,
         )
         if out is not None:

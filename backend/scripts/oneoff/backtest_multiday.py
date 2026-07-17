@@ -1146,7 +1146,7 @@ def auto_heal(window: list[date]) -> None:
         col = mdb["option_bars"]
         summary = backfill_gaps(
             dhan=dhan, col=col, cal=_cal, days=window,
-            codes=[1, 2], band=_WAREHOUSE_STRIKE_BAND, only_missing=True)
+            ladder=[("WEEK", 1), ("WEEK", 2)], band=_WAREHOUSE_STRIKE_BAND, only_missing=True)
         if summary.get("gaps"):
             print(f"  [auto-heal] filled {summary['days_filled']}/{summary['gaps']} missing day(s), "
                   f"{summary['total_inserted']:,} bars: {', '.join(summary['gap_days'])}")

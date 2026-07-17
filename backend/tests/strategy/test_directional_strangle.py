@@ -1161,6 +1161,32 @@ async def test_check_readiness_blocked_when_indicator_unseeded():
 
 
 @pytest.mark.asyncio
+async def test_check_readiness_keys_seeding_by_security_id_not_name():
+    """Regression: the Indicators component must query `seeding_summary` by the
+    security_id (`self.sid`), not the underlying *name* — the engine keys suites by
+    security_id, so passing "NIFTY" returned an empty summary and the gate silently
+    always reported ok. See strangle-readiness-indicators-truthful."""
+    s = await _build_strategy()
+    s._last_spot = 24000.0
+    assert s.sid != s.underlying, "test is only meaningful when sid and name differ"
+
+    seen_first_args: list[str] = []
+
+    def _seeding(first, tf):
+        seen_first_args.append(first)
+        return {("ema", "200"): False} if tf == "1H" else {}
+
+    s.ctx.indicators.seeding_summary.side_effect = _seeding
+
+    readiness = await s.check_readiness()
+
+    assert seen_first_args, "seeding_summary must be consulted"
+    assert all(a == s.sid for a in seen_first_args), "must key by security_id, not underlying name"
+    ind = next(c for c in readiness.components if c.name == "Indicators")
+    assert ind.state == "blocked", "an unseeded indicator (keyed by sid) must now block"
+
+
+@pytest.mark.asyncio
 async def test_check_readiness_all_ok_composite():
     """Every component satisfied (paper mode bypasses broker sync, spot present,
     indicators seeded, PCR not required) composes to an overall `ok` (task 1.5)."""
@@ -1239,3 +1265,90 @@ async def test_on_bar_resumes_entries_once_readiness_recovers():
     await s.on_bar(bar)
 
     assert any(e.get("event_type") == StrangleEventType.BIAS_EVALUATED for e in s._activity)
+
+
+# ---------------------------------------------------------------------------
+# strangle-entry-fill-race-and-latch — no-latch-on-failed-open + retry + wait
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_open_does_not_latch_bucket_and_retries_next_bar():
+    """A confirmed bucket whose open cannot resolve a fill price must NOT latch
+    `_current_bucket`; it must emit `entry_aborted` and retry on the next bar, then
+    open once the fill price resolves. Regression for the 2026-07-17 full-day outage
+    where a cold first-open latched the bucket with zero legs."""
+    from pdp.signals.bias import BiasBucket, BiasResult
+
+    s = await _build_strategy(
+        params={
+            "bucket_confirm_bars": 1,
+            "hedge_enabled": False,
+            "dte_max": None,  # disable DTE gate so entry is always allowed in-test
+            "entry_ltp_wait_s": 0.01,
+        }
+    )
+    s._current_bucket = None
+
+    bull = BiasResult(
+        score=0.4, bucket=BiasBucket.MORE_BULL, pe_lots=3, ce_lots=2,
+        gated=False, reason="test", votes={},
+    )
+
+    def _resolve(*_a, **k):
+        ot = k.get("option_type", "CE")
+        return _make_instrument(f"{ot}_opt", 24000.0, ot)
+
+    cold = {"v": True}
+
+    async def _fill(_sid):
+        return None if cold["v"] else Decimal("100")
+
+    bar1 = _make_bar(ist_hhmm="10:20")
+    bar2 = _make_bar(ist_hhmm="10:25")
+
+    with (
+        patch("pdp.strategies.directional_strangle.score_bias", return_value=bull),
+        patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(side_effect=_resolve)),
+        patch.object(s, "_resolve_fill_price", AsyncMock(side_effect=_fill)),
+    ):
+        await s.on_bar(bar1)  # cold: open aborts
+        assert len(s._short_legs) == 0, "no legs must open while the fill price is cold"
+        assert s._current_bucket is None, "bucket must NOT latch on a failed open"
+        assert s._pending_bucket == "more_bull", "pending bucket retained so next bar retries"
+        aborted = [e for e in s._activity if e.get("event_type") == StrangleEventType.ENTRY_ABORTED]
+        assert aborted, "a failed open must emit entry_aborted"
+        assert aborted[0]["reason"] == "fill_unresolved"
+
+        cold["v"] = False
+        await s.on_bar(bar2)  # warm: retry opens
+        assert s._current_bucket == "more_bull", "bucket advances once a leg actually opens"
+        assert len(s._short_legs) == 2, "PE + CE shorts open on the retry bar"
+
+
+@pytest.mark.asyncio
+async def test_await_option_ltp_true_when_tick_arrives_within_wait():
+    """`_await_option_ltp` returns True as soon as a positive LTP is visible, so a
+    freshly-subscribed option that ticks within the wait window is priced, not aborted."""
+    s = await _build_strategy(params={"entry_ltp_wait_s": 1.0})
+    calls = {"n": 0}
+
+    async def _ltp(_sid):
+        calls["n"] += 1
+        return (Decimal("50"), 0.1) if calls["n"] >= 2 else (None, None)
+
+    s.ctx.market.ltp_with_age = AsyncMock(side_effect=_ltp)
+    s._ltp_cache.clear()
+
+    assert await s._await_option_ltp("opt_1") is True
+    assert calls["n"] >= 2, "must poll until a tick appears"
+
+
+@pytest.mark.asyncio
+async def test_await_option_ltp_false_when_no_tick_within_wait():
+    """`_await_option_ltp` returns False (cold) when no LTP appears within the budget."""
+    s = await _build_strategy(params={"entry_ltp_wait_s": 0.05})
+    s.ctx.market.ltp_with_age = AsyncMock(return_value=(None, None))
+    s._ltp_cache.clear()
+
+    assert await s._await_option_ltp("opt_1") is False

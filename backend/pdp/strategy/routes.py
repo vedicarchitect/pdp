@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import time as _time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -391,6 +393,21 @@ async def strangle_trades(
 # ------------------------------------------------------------------ #
 
 
+async def _get_ltp_age_redis(redis: Any, security_id: str) -> float | None:
+    """Seconds since the last tick for security_id, from ltp_ts:{sid} (TTL=5s, set by TickRouter).
+
+    None means no tick within the last 5s — the caller should treat this as stale/disconnected,
+    not as "unknown", since a live feed writes this key on every tick.
+    """
+    try:
+        raw_ts = await redis.get(f"ltp_ts:{security_id}")
+        if raw_ts is None:
+            return None
+        return max(0.0, _time.time() - float(raw_ts))
+    except Exception:
+        return None
+
+
 async def _get_ltp_redis(redis: Any, security_id: str) -> float | None:
     """Read LTP from Redis ltp:{sid} hash. Returns None if not found."""
     try:
@@ -496,11 +513,18 @@ def _build_indicator_cell_inproc(engine: Any, sid: str, tf: str, fut_sid: str | 
         cell["ema100"] = ema_state.values.get(100)
         cell["ema200"] = ema_state.values.get(200)
 
-    # SuperTrend (engine-wide ST(10,2))
+    # SuperTrend (engine-wide, strategy-config default — kept for back-compat callers)
     st_state = engine.get(sid, tf)
     if st_state:
         cell["st_val"] = float(st_state.value) if st_state.value else None
         cell["st_dir"] = "up" if st_state.direction == 1 else "down"
+
+    # Three matrix SuperTrend variants — (10,2)/(10,3)/(3,1), per user's Kite overlays
+    for label, variant_state in engine.get_supertrend_variants(sid, tf).items():
+        cell[label] = {
+            "value": float(variant_state.value) if variant_state.value else None,
+            "direction": "up" if variant_state.direction == 1 else "down",
+        }
 
     # PSAR
     psar_state = engine.get_psar(sid, tf)
@@ -541,6 +565,7 @@ async def _build_indicator_cell_from_redis(redis: Any, sid: str, tf: str, fut_si
     try:
         ind_raw = await redis.get(f"ind:{sid}:{tf}")
         st_raw = await redis.get(f"st:{sid}:{tf}")
+        st_variants_raw = await redis.get(f"st_variants:{sid}:{tf}")
         vwap_raw = ind_raw if vwap_src == sid else await redis.get(f"ind:{vwap_src}:{tf}")
     except Exception as exc:
         log.warning("indicator_redis_snapshot_read_failed", sid=sid, tf=tf, exc=str(exc))
@@ -568,6 +593,14 @@ async def _build_indicator_cell_from_redis(redis: Any, sid: str, tf: str, fut_si
         if st.get("value") is not None:
             cell["st_val"] = float(st["value"])
         cell["st_dir"] = "up" if st.get("direction") == 1 else "down"
+
+    if st_variants_raw:
+        variants = json.loads(st_variants_raw)
+        for label, v in variants.items():
+            cell[label] = {
+                "value": float(v["value"]) if v.get("value") is not None else None,
+                "direction": "up" if v.get("direction") == 1 else "down",
+            }
 
     if vwap_raw:
         vwap_snap = json.loads(vwap_raw)
@@ -654,6 +687,40 @@ async def _build_levels_cells(store: Any, sid: str, session_date: date) -> dict[
     return result
 
 
+async def _build_atm_option_rows(request: Request, nifty_spot: float) -> dict[str, Any]:
+    """Build the NIFTY_ATM_CE / NIFTY_ATM_PE matrix rows, or {} if the instruments table
+    can't resolve today's ATM strikes (degrade honestly — never guess a security_id)."""
+    from pdp.db.session import get_session_maker
+    from pdp.strategy.atm_suite import build_atm_option_row, resolve_nifty_atm_option
+
+    if not hasattr(request.app.state, "mongo_db"):
+        return {}
+    option_bars_col = request.app.state.mongo_db["option_bars"]
+    since = datetime.now(UTC) - timedelta(days=30)
+
+    session_maker = get_session_maker()
+
+    async def _build_one(opt_type: str) -> tuple[str, dict[str, Any]] | None:
+        # Each side gets its own DB session — an AsyncSession/connection can't run two
+        # queries concurrently, and CE/PE resolution is otherwise fully independent.
+        async with session_maker() as db:
+            try:
+                resolved = await resolve_nifty_atm_option(db, nifty_spot, opt_type)
+            except Exception as exc:
+                log.warning("atm_option_resolve_failed", opt_type=opt_type, exc=str(exc))
+                return None
+        if resolved is None:
+            return None
+        security_id, strike, expiry = resolved
+        row = await build_atm_option_row(
+            option_bars_col, security_id, strike, expiry, opt_type, _MATRIX_TFS, since
+        )
+        return (f"NIFTY_ATM_{opt_type}", row)
+
+    results = await asyncio.gather(*(_build_one(opt_type) for opt_type in ("CE", "PE")))
+    return dict(r for r in results if r is not None)
+
+
 @strangle_router.get("/monitor", response_model=StrangleMonitorOut)
 async def strangle_monitor(
     request: Request,
@@ -663,11 +730,13 @@ async def strangle_monitor(
     """Realtime directional-strangle monitor snapshot.
 
     Returns a single JSON doc with:
-    - indices: spot+future LTP for NIFTY/BANKNIFTY/SENSEX
+    - as_of: server UTC timestamp when this payload was built (freshness anchor for the client)
+    - indices: spot+future LTP for NIFTY/BANKNIFTY/SENSEX, plus spot_age_s (seconds since the
+      last tick per `ltp_ts:{sid}`; None means no tick within the last 5s — treat as stale)
     - groups: legs grouped by underlying with entry metadata + Greeks
     - totals: per-index and overall P&L
     - status: bucket/score/done_for_day/session metadata
-    - recent_events: last N from _activity (closed legs + exit reasons)
+    - recent_events: last N from _activity (closed legs + exit reasons + entry_aborted)
     - indicators: EMA/ST/PSAR matrix x timeframes + Camarilla + period levels
     """
     from pdp.strategies.directional_strangle import DirectionalStrangle
@@ -695,12 +764,20 @@ async def strangle_monitor(
     # Futures SID comes from the matrix's startup-resolved map (configure_matrix_suites),
     # not the strategy (bias-scoring dropped its own futures-SID path in backtest-paper-parity).
     matrix_fut_sids: dict[str, str] = await _get_matrix_futures_sids(engine, redis)
-    indices: dict[str, dict[str, Any]] = {}
-    for idx_name, idx_sid in _INDEX_SIDS.items():
-        spot_ltp = await _get_ltp_redis(redis, idx_sid)
+
+    async def _build_index_entry(idx_sid: str) -> dict[str, Any]:
         futures_sid = matrix_fut_sids.get(idx_sid)
-        future_ltp = await _get_ltp_redis(redis, futures_sid) if futures_sid else None
-        indices[idx_name] = {"spot": spot_ltp or 0.0, "future": future_ltp}
+        spot_ltp, spot_age_s, future_ltp = await asyncio.gather(
+            _get_ltp_redis(redis, idx_sid),
+            _get_ltp_age_redis(redis, idx_sid),
+            _get_ltp_redis(redis, futures_sid) if futures_sid else asyncio.sleep(0, result=None),
+        )
+        return {"spot": spot_ltp or 0.0, "future": future_ltp, "spot_age_s": spot_age_s}
+
+    index_entries = await asyncio.gather(
+        *(_build_index_entry(idx_sid) for idx_sid in _INDEX_SIDS.values())
+    )
+    indices: dict[str, dict[str, Any]] = dict(zip(_INDEX_SIDS.keys(), index_entries, strict=False))
 
     # ── Legs grouped by underlying ──────────────────────────────────────────
     today_ist_start = datetime.now(UTC).replace(
@@ -713,24 +790,38 @@ async def strangle_monitor(
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
     unrealized_by_underlying: dict[str, float] = {}
 
+    # Collect all legs first, then fetch Greeks for the active (non-hedge, non-momentum)
+    # strikes concurrently — each lookup is independent of every other leg.
+    _leg_entries: list[tuple[str, dict[str, Any]]] = []
+    _greeks_slots: list[int] = []
+    _greeks_coros: list[Any] = []
+
     for strategy, state in zip(strategies, states, strict=False):
         und = strategy.underlying  # all legs under same underlying for now
         for leg in state["legs"]:
             leg_enriched = dict(leg)
+            _leg_entries.append((und, leg_enriched))
+            unrealized_by_underlying[und] = unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
 
             # Greeks/OI/PCR only for active non-hedge strikes
             if not leg["is_hedge"] and not leg["is_momentum"]:
-                greeks = await _get_greeks_for_strike(
-                    chains_col,
-                    underlying=und,
-                    strike=leg["strike"],
-                    opt_type=leg["opt_type"],
-                    day_start_ts=today_ist_start,
+                _greeks_slots.append(len(_leg_entries) - 1)
+                _greeks_coros.append(
+                    _get_greeks_for_strike(
+                        chains_col,
+                        underlying=und,
+                        strike=leg["strike"],
+                        opt_type=leg["opt_type"],
+                        day_start_ts=today_ist_start,
+                    )
                 )
-                leg_enriched.update(greeks)
 
-            legs_by_underlying.setdefault(und, []).append(leg_enriched)
-            unrealized_by_underlying[und] = unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
+    if _greeks_coros:
+        for slot, greeks in zip(_greeks_slots, await asyncio.gather(*_greeks_coros), strict=True):
+            _leg_entries[slot][1].update(greeks)
+
+    for und, leg_enriched in _leg_entries:
+        legs_by_underlying.setdefault(und, []).append(leg_enriched)
 
     # ── Status — per-underlying + overall ──────────────────────────────────
     primary_state = next(
@@ -821,19 +912,45 @@ async def strangle_monitor(
 
     fut_sids: dict[str, str] = await _get_matrix_futures_sids(engine, redis)
 
+    # Every (sid, tf) cell and every sid's levels lookup is independent of the others —
+    # fetch the whole matrix concurrently instead of 3 sids x 5 tfs sequential awaits.
+    _cell_keys: list[tuple[str, str]] = [(sid, tf) for sid in matrix_sids for tf in _MATRIX_TFS]
+    _cell_coros = [
+        _build_indicator_cell(engine, redis, sid, tf, fut_sids.get(sid)) for sid, tf in _cell_keys
+    ]
+    _levels_coros = (
+        [_build_levels_cells(levels_store, sid, session_date_ist) for sid in matrix_sids]
+        if levels_store is not None
+        else []
+    )
+    _cell_results, _levels_results = await asyncio.gather(
+        asyncio.gather(*_cell_coros), asyncio.gather(*_levels_coros)
+    )
+
+    _cells_by_sid: dict[str, dict[str, Any]] = {sid: {} for sid in matrix_sids}
+    for (sid, tf), cell in zip(_cell_keys, _cell_results, strict=True):
+        _cells_by_sid[sid][tf] = cell
+
     indicators: dict[str, Any] = {}
-    for sid in matrix_sids:
-        sid_data: dict[str, Any] = {}
-        tf_data: dict[str, Any] = {}
-        fut_sid = fut_sids.get(sid)
-        for tf in _MATRIX_TFS:
-            tf_data[tf] = await _build_indicator_cell(engine, redis, sid, tf, fut_sid)
-        sid_data["tf"] = tf_data
+    for i, sid in enumerate(matrix_sids):
+        sid_data: dict[str, Any] = {"tf": _cells_by_sid[sid]}
         if levels_store is not None:
-            sid_data.update(await _build_levels_cells(levels_store, sid, session_date_ist))
+            sid_data.update(_levels_results[i])
         indicators[sid] = sid_data
 
+    # ── NIFTY ATM CE/PE rows (on-demand, from option_bars — see atm_suite.py) ──
+    # A resolve/read failure here (e.g. instruments table not loaded, DB unreachable)
+    # must never take down the whole monitor endpoint — the ATM rows are additive.
+    nifty_spot = indices.get("NIFTY", {}).get("spot")
+    if nifty_spot:
+        try:
+            atm_rows = await _build_atm_option_rows(request, nifty_spot)
+            indicators.update(atm_rows)
+        except Exception as exc:
+            log.warning("atm_option_rows_failed", exc=str(exc))
+
     payload = {
+        "as_of": datetime.now(UTC).isoformat(),
         "indices": indices,
         "groups": groups,
         "totals": totals,

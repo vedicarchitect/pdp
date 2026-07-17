@@ -37,6 +37,9 @@ multi-year history, or re-running just one index/step).
 | `task audit:strangle` | `audit_strangle_data.py` | Per-year spot/options/VIX coverage for the directional-strangle backtest |
 | `task audit:coverage` | `audit_options_coverage.py` | Coverage gap audit by date+strike |
 | `task validate:warehouse` | `validate_options_warehouse.py` | Integrity: missing days, bad prices, OI |
+| `task expiry:seed:archive` | `seed_expiry_from_bhavcopy.py` | **One-time** seed of `expiry_calendar` from NSE+BSE bhavcopy archives (authoritative dates + weekday + lot; auto-routes SENSEX→BSE). `--symbols --exchange --from --to --dry-run` |
+| `task expiry:seed:observed` | `seed_expiry_calendar.py` | Seed `expiry_calendar` from expiries already in `option_bars`. `--symbol --from-option-bars \| --add \| --from-json` |
+| `task expiry:gaps` | `report_expiry_gaps.py` | Report `option_bars` cadence gaps + whether `expiry_calendar` can label them. `--symbol` |
 | `task expiry` | `expiry_analysis.py` | Read-only expiry analysis (NIFTY+BANKNIFTY+SENSEX, max-pain/PCR/VIX/OI walls). `--symbol --expiry` |
 | `task oi:track` | `expiry_analysis.py --track` | OI snapshot tracker, ATM±N vs morning baseline → JSONL (always) + Mongo `oi_snapshots` TS + Redis `oi:{sym}`/`oi.events.{sym}`. `--strikes --interval --event-threshold-pct --store mongo,redis\|none` |
 | `task monitor` | `monitor.pl` | Perl live monitor (read-only Redis+API) |

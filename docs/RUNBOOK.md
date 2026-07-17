@@ -666,6 +666,38 @@ To manually trigger a gap fill for a specific range/index:
 task backfill:options:nifty -- --from 2026-06-01 --to 2026-06-25 --only-missing
 ```
 
+### Expiry calendar — the backfill's labelling source
+
+Dhan's expired-options API (`/charts/rollingoption`) is **ATM- and code-relative** and returns bars
+with **no expiry date** — it answers "the WEEK/MONTH code-N series relative to this day", not "the
+2023-03-23 chain". The backfill must therefore label every fetched series from the DB-backed
+`expiry_calendar` Mongo collection (one doc per `(underlying, flag, expiry_date)`, with
+`expiry_weekday` + `lot_size`). If the calendar is missing a real expiry, the backfill silently
+labels that day's data under the wrong (far-side) expiry — the root cause fixed in
+`option-bars-expiry-gap-backfill`.
+
+**Seeding the calendar is a one-time historical backfill.** Once it holds the full history, the
+daily scrip-master refresh (`ScripRefreshScheduler._sync_expiry_calendar`, `source="scripmaster"`)
+upserts each underlying's upcoming expiries automatically, so the calendar self-maintains for all
+current and future contracts — you never re-run the archive seed.
+
+```powershell
+# 1. ONE-TIME authoritative history from exchange F&O bhavcopy archives (dates + weekday + lot).
+#    `auto` routes NIFTY/BANKNIFTY -> NSE archive and SENSEX -> BSE archive in one command.
+task expiry:seed:archive -- --from 2020-01-01 --to 2026-07-14
+
+# 2. (Optional) top up from expiries already in option_bars — free, but by definition cannot add
+#    a date missing from option_bars. Also stamps weekday on any bare pre-existing docs.
+task expiry:seed:observed -- --symbol NIFTY --from-option-bars
+
+# 3. See which expiries option_bars is still missing and whether the calendar can now label them.
+task expiry:gaps                       # all three indices
+task expiry:gaps -- --symbol NIFTY
+
+# 4. Now backfill the gap window; the complete calendar labels each series with the right expiry.
+task backfill:options:nifty -- --from 2023-03-09 --to 2023-03-23
+```
+
 ---
 
 ## 11. Paper Reset
