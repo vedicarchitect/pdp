@@ -89,6 +89,16 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-17: Go-live hardening pass on live-session evidence (root cause: entry-path fill race +
+  one-shot bucket latch silently blocked NIFTY/BANKNIFTY paper entries) — fixed and pushed to
+  `papermode`: `strangle-partial-entry-recovery` (bounded per-side recovery, 2 correctness gaps from
+  `/code-review` also fixed: `naked_hedge_averted` latch + day-rollover pin), plus
+  `indicator-matrix-kite-parity` (**archived**), `strangle-entry-fill-race-and-latch`,
+  `indicator-warmup-derive-from-1m`, `strangle-readiness-indicators-truthful`,
+  `execution-panel-freshness-and-events`, and a new `strangle-monitor-concurrent-fetch`
+  (`/monitor`'s 4 sequential I/O chains → `asyncio.gather`). `task test`: 1203 passed, 0 failed.
+  All 6 non-archived changes above are implementation-complete; only their live/boot-smoke tasks and
+  `openspec archive` remain, gated on the next market day.
 - 2026-07-13: Incident-remediation program **complete** — all 10 `EXECUTION-ORDER.md` changes plus
   `flutter-execution-tab-layout` and `lot-size-live-reconciliation` archived (`bar-session-anchoring`,
   `indicator-history-depth`, `bias-input-completeness`, `strangle-close-path-atomicity`,
@@ -111,9 +121,13 @@ Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-
 - 2026-06-26: Directional strangle backtest (+Rs 85.6L, PF 5.72) archived — **superseded 2026-07-13**,
   see above
 - **In-flight:** `option-bars-expiry-gap-backfill` (data-completeness follow-up, blocked on live Dhan
-  creds). Two live-paper-session deploy-day checks remain open (recorded in the archived
-  `strangle-close-path-atomicity`/`strangle-leg-state-durability` tasks) — need a `dev:trade` session
-  during market hours, not code.
+  creds); `strangle-partial-entry-recovery`, `strangle-entry-fill-race-and-latch`,
+  `indicator-warmup-derive-from-1m`, `strangle-readiness-indicators-truthful`,
+  `execution-panel-freshness-and-events`, `strangle-monitor-concurrent-fetch` (all code-complete,
+  each blocked only on a live/boot smoke check + `openspec archive`). Two earlier live-paper-session
+  deploy-day checks also remain open (recorded in the archived
+  `strangle-close-path-atomicity`/`strangle-leg-state-durability` tasks) — all of the above need a
+  `dev:trade` session during market hours, not code.
 
 ## Troubleshooting
 

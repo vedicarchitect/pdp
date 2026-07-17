@@ -13,19 +13,28 @@ Dhan scrip master loader, NSE/BSE/MCX instrument metadata, expiry calendar.
 | `routes.py` | FastAPI router (`/api/v1/instruments`) |
 | `symbols.py` | Symbol normalisation helpers (NSE, BSE, MCX) |
 | `snapshots.py` | Daily snapshot diffing for instrument changes |
-| `expiry_calendar.py` | `NiftyExpiryCalendar` — weekly/monthly expiry lookup |
+| `expiry_calendar.py` | `NiftyExpiryCalendar` — weekly/monthly expiry lookup; also `load_expiry_calendar_from_db`/`record_confirmed_expiry` for the Mongo-backed calendar (see below) |
 
 ## Key facts
 
 - `security_id` is the Dhan internal ID (e.g. NIFTY index = `"13"`)
 - Scrip master URL: `DHAN_SCRIPMASTER_URL` (set in `.env`)
-- Expiry calendar loaded from `data/expiry/` JSON cache (`EXPIRY_CACHE_PATH` setting)
 - `InstrumentLoader` runs on API startup if `DHAN_CLIENT_ID` is set
 
-## Expiry calendar
+## Expiry calendar (`option-bars-expiry-gap-backfill`, 2026-07-17)
+
+The **persistent, editable source of truth** is now the Mongo `expiry_calendar` collection — one
+doc per `(underlying, flag, expiry_date)` — not the `data/expiry/` JSON cache, because the JSON
+cache derives expiries by walking `option_bars` for a chain, which is blind to a day where the
+chain itself never got backfilled (a confirmed gap day silently produces a wrong/missing expiry).
+`scripts/seed_expiry_calendar.py` / `scripts/seed_expiry_from_bhavcopy.py` seed it from NSE/BSE
+bhavcopy archives (weekday + lot size per row, 1257 docs across NIFTY/BANKNIFTY/SENSEX at last
+seed). Use `load_expiry_calendar_from_db(mdb, underlying)` to build a `NiftyExpiryCalendar` from
+it; `record_confirmed_expiry` upserts one-off confirmed dates. The old JSON-cache path
+(`NiftyExpiryCalendar.load(cache_path)`) still exists for callers that haven't migrated.
 
 ```python
-from pdp.instruments.expiry_calendar import NiftyExpiryCalendar
-cal = NiftyExpiryCalendar.load(settings.EXPIRY_CACHE_PATH)
+from pdp.instruments.expiry_calendar import load_expiry_calendar_from_db
+cal = load_expiry_calendar_from_db(mdb, "NIFTY")
 expiry = cal.next_weekly_expiry(date.today())
 ```

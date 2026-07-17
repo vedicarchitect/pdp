@@ -76,8 +76,8 @@ For implementation specs, start at:
 - **Market feed** → `openspec/specs/market-feed/spec.md`
 
 ## Notes
-- `task test` is green: `1131 passed, 0 failed` (2026-07-13, see the incident-remediation program in
-  root `CLAUDE.md`). The two `xfail(strict=True, ...)` markers that previously guarded
+- `task test` is green: `1203 passed, 0 failed` (2026-07-17, see the go-live hardening pass in root
+  `CLAUDE.md`). The two `xfail(strict=True, ...)` markers that previously guarded
   `test_leg_rehydration.py`/`test_event_taxonomy.py` were dropped once `strangle-leg-state-durability`
   and `strangle-observability-gaps` landed for real — there is no standing xfail debt.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
