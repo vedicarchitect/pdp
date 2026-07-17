@@ -112,8 +112,25 @@ def test_app(mock_strategy):
     levels_col = AsyncMock()
     levels_col.find_one = AsyncMock(side_effect=_levels_find_one)
 
+    # option_bars collection — ATM CE/PE suite reads. Empty in this fixture (no ATM
+    # option data configured), so the ATM rows resolve to {} via the degrade-honestly
+    # path rather than fabricating anything.
+    class _EmptyCursor:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    option_bars_col = MagicMock()
+    option_bars_col.find.return_value = _EmptyCursor()
+
     def _getitem(name):
-        return levels_col if name == "index_levels" else chains_col
+        if name == "index_levels":
+            return levels_col
+        if name == "option_bars":
+            return option_bars_col
+        return chains_col
 
     mock_db = MagicMock()
     mock_db.__getitem__.side_effect = _getitem
@@ -124,8 +141,12 @@ def test_app(mock_strategy):
 
 @pytest.mark.asyncio
 async def test_strangle_monitor_endpoint_shape(test_app):
-    with patch("pdp.strategy.routes._get_ltp_redis", new_callable=AsyncMock) as mock_ltp:
+    with (
+        patch("pdp.strategy.routes._get_ltp_redis", new_callable=AsyncMock) as mock_ltp,
+        patch("pdp.strategy.atm_suite.resolve_nifty_atm_option", new_callable=AsyncMock) as mock_atm,
+    ):
         mock_ltp.return_value = 24200.0
+        mock_atm.return_value = None  # no instruments-table row in this fixture's world
 
         with TestClient(test_app) as client:
             resp = client.get("/api/v1/strangle/monitor?strategy_id=null_strat")
@@ -158,8 +179,12 @@ async def test_strangle_monitor_endpoint_shape(test_app):
 @pytest.mark.asyncio
 async def test_monitor_levels_from_warehouse(test_app):
     """Matrix Camarilla + period levels come from index_levels (daily/weekly/monthly)."""
-    with patch("pdp.strategy.routes._get_ltp_redis", new_callable=AsyncMock) as mock_ltp:
+    with (
+        patch("pdp.strategy.routes._get_ltp_redis", new_callable=AsyncMock) as mock_ltp,
+        patch("pdp.strategy.atm_suite.resolve_nifty_atm_option", new_callable=AsyncMock) as mock_atm,
+    ):
         mock_ltp.return_value = 24200.0
+        mock_atm.return_value = None
 
         with TestClient(test_app) as client:
             data = client.get("/api/v1/strangle/monitor").json()

@@ -1,6 +1,7 @@
 """Unit tests for GET /api/v1/strangle/monitor — payload shape + 404."""
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI
@@ -68,6 +69,18 @@ def _redis_no_ltp() -> MagicMock:
     return redis
 
 
+def _redis_with_fresh_tick(security_id: str, ts_epoch: float) -> MagicMock:
+    """Redis mock where only ltp_ts:{security_id} resolves, for spot_age_s assertions."""
+    async def _get(key: str):
+        if key == f"ltp_ts:{security_id}":
+            return str(ts_epoch)
+        return None
+
+    redis = MagicMock()
+    redis.get = AsyncMock(side_effect=_get)
+    return redis
+
+
 def test_monitor_404_when_no_strangle_running() -> None:
     host = _host_no_strangle()
     app = _make_app(host)
@@ -91,13 +104,20 @@ def test_monitor_payload_shape_with_running_strategy() -> None:
     data = resp.json()
 
     # Top-level keys
-    assert set(data.keys()) >= {"indices", "groups", "totals", "status", "recent_events", "indicators"}
+    assert set(data.keys()) >= {
+        "as_of", "indices", "groups", "totals", "status", "recent_events", "indicators",
+    }
+
+    # as_of: server build timestamp, so the client can tell a live payload from a stuck poll
+    assert data["as_of"]
 
     # Indices block: 3 known indices
     assert set(data["indices"].keys()) == {"NIFTY", "BANKNIFTY", "SENSEX"}
     for _idx, info in data["indices"].items():
         assert "spot" in info
         assert "future" in info
+        # No tick within the last 5s (redis mock returns None) → None, not a stale guess
+        assert info["spot_age_s"] is None
 
     # Totals block
     assert "day_realized" in data["totals"]
@@ -201,3 +221,23 @@ def test_monitor_readiness_is_worst_case_across_strategies() -> None:
     assert readiness["state"] == "blocked"
     assert readiness["by_underlying"]["NIFTY"]["state"] == "ok"
     assert readiness["by_underlying"]["BANKNIFTY"]["state"] == "blocked"
+
+
+def test_monitor_spot_age_reflects_seconds_since_last_tick() -> None:
+    """A live NIFTY feed (ltp_ts:13 set ~2s ago) reports a small spot_age_s, not None —
+    this is the freshness signal the execution panel uses to distinguish a live snapshot
+    from a stuck one (see execution-panel-freshness-and-events)."""
+    host = _host_with_strangle()
+    ts_two_seconds_ago = time.time() - 2.0
+    redis = _redis_with_fresh_tick("13", ts_two_seconds_ago)
+    app = _make_app(host, redis)
+
+    with TestClient(app) as client:
+        data = client.get("/api/v1/strangle/monitor").json()
+
+    age = data["indices"]["NIFTY"]["spot_age_s"]
+    assert age is not None
+    assert 0 <= age < 10
+    # BANKNIFTY/SENSEX never ticked in this mock → no stale guess, an honest None
+    assert data["indices"]["BANKNIFTY"]["spot_age_s"] is None
+    assert data["indices"]["SENSEX"]["spot_age_s"] is None

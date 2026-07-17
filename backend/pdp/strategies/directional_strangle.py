@@ -223,6 +223,19 @@ class DirectionalStrangle(Strategy):
         # Bucket-change hysteresis: new bucket must persist for N bars before acting.
         self._bucket_confirm_bars: int = int(p.get("bucket_confirm_bars", 2))
 
+        # Entry-side recovery: a side that fails to open (cold LTP, rejected order)
+        # is retried within the same bucket episode instead of leaving the book
+        # lopsided until the bucket changes. See `strangle-partial-entry-recovery`.
+        self._entry_recovery_enabled: bool = bool(p.get("entry_recovery_enabled", True))
+        self._entry_recovery_max_attempts: int = int(p.get("entry_recovery_max_attempts", 3))
+
+        # Max seconds to wait for a freshly-subscribed option's first LTP before an open
+        # aborts. A newly-subscribed F&O instrument may not have ticked within the ~1.2s
+        # broker-fill budget; without this wait the first open of a session aborts cold and
+        # (before the no-latch fix) the bucket latched with zero legs. See
+        # `strangle-entry-fill-race-and-latch`.
+        self._entry_ltp_wait_s: float = float(p.get("entry_ltp_wait_s", 4.0))
+
         # Rollup params: close short when LTP < roll_trigger_prem, reopen at >= roll_target_min_prem
         self._roll_trigger_prem: float = float(p.get("roll_trigger_prem", 20.0))
         self._roll_target_min_prem: float = float(p.get("roll_target_min_prem", 50.0))
@@ -273,6 +286,13 @@ class DirectionalStrangle(Strategy):
         self._halt_checked: bool = False  # checked once per day to avoid repeated Redis reads
         self._pending_bucket: str | None = None  # candidate new bucket awaiting confirmation
         self._pending_bucket_count: int = 0  # consecutive bars seen for pending bucket
+
+        # Current bucket episode's intended composition + recovery bookkeeping.
+        # Reset every time a bucket transition is confirmed and acted on (see
+        # `_maybe_act_on_bucket`'s transition branch) -- never mutated elsewhere.
+        self._bucket_target: dict[str, int] = {}  # {"PE": pe_lots, "CE": ce_lots} for this episode
+        self._bucket_realized: set[str] = set()  # sides that opened >=1 short leg this episode
+        self._recovery_attempts: dict[str, int] = {}  # per-side recovery attempt count this episode
 
         # Nearest tradeable expiry, cached once per bar day (for the DTE entry gate).
         self._expiry_cache: tuple[date, date | None] | None = None
@@ -435,9 +455,13 @@ class DirectionalStrangle(Strategy):
                     components.append(ReadinessComponent(name="Broker Sync", state="ok", reason="Broker state fresh"))
 
         # 3. Indicators
+        # NB: the engine keys suites by security_id, not the underlying *name*. Passing
+        # self.underlying ("NIFTY") returned an empty summary, so this component always
+        # reported "ok" and never actually gated on unconverged indicators — the whole
+        # point of the check. Key by self.sid ("13"). See strangle-readiness-indicators-truthful.
         ind_blocked = []
         for tf in ["5m", "15m", "1H", "1w"]:
-            summary = self.ctx.indicators.seeding_summary(self.underlying, tf) if self.ctx.indicators else {}
+            summary = self.ctx.indicators.seeding_summary(self.sid, tf) if self.ctx.indicators else {}
             for (family, period), is_seeded in summary.items():
                 if not is_seeded:
                     suffix = f"({period})" if period else ""
@@ -640,7 +664,7 @@ class DirectionalStrangle(Strategy):
                 self._pending_bucket_count = 1
 
             if self._pending_bucket_count >= self._bucket_confirm_bars:
-                # Confirmation met — act on the bucket change.
+                # Confirmation met. Close any legs held for the old bucket first.
                 if self._short_legs or self._hedge_legs:
                     self._emit_event(
                         StrangleEventType.BUCKET_CHANGE,
@@ -648,15 +672,52 @@ class DirectionalStrangle(Strategy):
                         new_bucket=bucket_str,
                     )
                     await self._close_shorts_and_hedges("bucket_change")
-                self._current_bucket = bucket_str
-                self._pending_bucket = None
-                self._pending_bucket_count = 0
+
+                # Commit the bucket transition ONLY when a leg actually opened. A DTE-gated
+                # bar (legitimate no-trade) or a transient fill-price failure must not latch
+                # `_current_bucket`, so the open is retried on the next bar rather than the
+                # bucket sticking with zero legs for the rest of the day.
                 if entry_allowed:
-                    await self._open_bucket(spot, pe_lots, ce_lots)
+                    # New episode: reset intended composition + recovery bookkeeping
+                    # before attempting the open, so a fresh commit starts clean.
+                    self._bucket_target = {"PE": pe_lots, "CE": ce_lots}
+                    self._bucket_realized = set()
+                    self._recovery_attempts = {}
+                    opened = await self._open_bucket(spot, pe_lots, ce_lots)
+                    expected = (1 if pe_lots > 0 else 0) + (1 if ce_lots > 0 else 0)
+                    if opened > 0:
+                        self._current_bucket = bucket_str
+                        self._pending_bucket = None
+                        self._pending_bucket_count = 0
+                        if opened < expected:
+                            self._emit_event(
+                                StrangleEventType.ENTRY_ABORTED,
+                                bucket=bucket_str,
+                                pe_lots=pe_lots,
+                                ce_lots=ce_lots,
+                                opened=opened,
+                                reason="partial_open",
+                            )
+                        if self._entry_recovery_enabled and not self._lot_size_degraded:
+                            await self._reconcile_bucket_composition(spot)
+                    else:
+                        # Nothing opened (e.g. cold LTP) — keep the pending bucket so the
+                        # next 5m bar retries, and surface the abort so it is not invisible.
+                        self._emit_event(
+                            StrangleEventType.ENTRY_ABORTED,
+                            bucket=bucket_str,
+                            pe_lots=pe_lots,
+                            ce_lots=ce_lots,
+                            opened=0,
+                            reason="fill_unresolved",
+                        )
         else:
-            # Bucket matches current — clear any pending confirmation.
+            # Bucket matches current — clear any pending confirmation and reconcile
+            # composition: retry any side that never opened this episode.
             self._pending_bucket = None
             self._pending_bucket_count = 0
+            if entry_allowed and self._entry_recovery_enabled and not self._lot_size_degraded:
+                await self._reconcile_bucket_composition(spot)
 
         if self._momentum_enabled:
             if entry_allowed and result.bucket in _EXTREME_BUCKETS and not self._momentum_legs:
@@ -965,11 +1026,82 @@ class DirectionalStrangle(Strategy):
         expiry = await self._resolve_current_expiry(bar_day)
         return within_dte(bar_day, expiry, self._dte_max)
 
-    async def _open_bucket(self, spot: float, pe_lots: int, ce_lots: int) -> None:
-        if pe_lots > 0:
-            await self._open_short(spot, "PE", pe_lots)
-        if ce_lots > 0:
-            await self._open_short(spot, "CE", ce_lots)
+    async def _open_bucket(self, spot: float, pe_lots: int, ce_lots: int) -> int:
+        """Open the bucket's PE/CE short legs; return how many short legs actually opened.
+
+        The caller commits the bucket transition only when this returns > 0, so a
+        transient fill-price failure retries on the next bar instead of latching the
+        bucket for the rest of the day — see `strangle-entry-fill-race-and-latch`.
+        """
+        opened = 0
+        if pe_lots > 0 and await self._open_short(spot, "PE", pe_lots):
+            opened += 1
+        if ce_lots > 0 and await self._open_short(spot, "CE", ce_lots):
+            opened += 1
+        return opened
+
+    async def _reconcile_bucket_composition(self, spot: float) -> None:
+        """Recover any bucket-required side that never opened this episode.
+
+        Runs on the bucket-unchanged path (every bar) and once more immediately
+        after the initial `_open_bucket` on a confirmed transition, so a same-bar
+        partial abort is retried without waiting a full bar. A side is skipped
+        when it already holds an open short leg, was realized then deliberately
+        exited this episode (take-profit/roll), or is currently stop-gated --
+        only a side that never successfully opened is retried. Bounded to
+        `_entry_recovery_max_attempts` attempts per side per episode; on
+        exhaustion emits one terminal `ENTRY_SIDE_UNFILLED` and stops retrying
+        that side until the next bucket change. See `strangle-partial-entry-recovery`.
+        """
+        for side in ("PE", "CE"):
+            target = self._bucket_target.get(side, 0)
+            if target <= 0:
+                continue
+            if self._open_short_lots(side) > 0:
+                continue
+            if side in self._bucket_realized:
+                continue
+            if side in self._stop_gate:
+                continue
+            attempts = self._recovery_attempts.get(side, 0)
+            if attempts >= self._entry_recovery_max_attempts:
+                if attempts == self._entry_recovery_max_attempts:
+                    self._recovery_attempts[side] = attempts + 1
+                    self._emit_event(
+                        StrangleEventType.ENTRY_SIDE_UNFILLED,
+                        opt_type=side,
+                        attempts=attempts,
+                        bucket=self._current_bucket,
+                    )
+                continue
+            self._recovery_attempts[side] = attempts + 1
+            self._emit_event(
+                StrangleEventType.ENTRY_RECOVERY_ATTEMPT,
+                opt_type=side,
+                attempt=attempts + 1,
+                target_lots=target,
+            )
+            await self._open_short(spot, side, target)
+
+    async def _await_option_ltp(self, sid: str) -> bool:
+        """Wait up to `_entry_ltp_wait_s` for a freshly-subscribed option's first LTP.
+
+        Returns True once a positive LTP is visible (in-process cache or market feed),
+        so the subsequent MARKET order can fill on the first tick rather than aborting
+        cold. Returns False if no tick arrives within the budget (caller still attempts
+        the open; the existing fill-price fallbacks + abort path handle a cold leg).
+        """
+        deadline = asyncio.get_running_loop().time() + self._entry_ltp_wait_s
+        while asyncio.get_running_loop().time() < deadline:
+            cached = self._ltp_cache.get(sid)
+            if cached and cached > 0:
+                return True
+            if self.ctx.market is not None:
+                ltp, _ = await self.ctx.market.ltp_with_age(sid)
+                if ltp and ltp > 0:
+                    return True
+            await asyncio.sleep(0.2)
+        return False
 
     async def _resolve_fill_price(self, sid: str) -> Decimal | None:
         """Resolve a real fill reference price via four fallback layers.
@@ -1016,16 +1148,24 @@ class DirectionalStrangle(Strategy):
         """
         return await self._resolve_fill_price(sid)
 
-    async def _open_short(self, spot: float, opt_type: str, lots: int) -> None:
+    async def _open_short(self, spot: float, opt_type: str, lots: int) -> bool:
+        """Open one short OTM leg; return True iff the short leg remains open afterwards.
+
+        Returns False on every skip/abort path (lot-size degraded, stop-gate, no
+        instrument, cap-refused, order rejected, unresolved fill price) and also when a
+        hedge failure squares the just-opened short (`naked_hedge_averted`) — the caller
+        treats a False as "nothing opened" and retries on the next bar rather than
+        latching the bucket. See `strangle-entry-fill-race-and-latch`.
+        """
         if self._lot_size_degraded:
-            return
+            return False
         # Stop-gate check: block re-entry for 3 bars after a stop on this side
         if opt_type in self._stop_gate:
             self._emit_event(StrangleEventType.STOP_GATE_WAIT, opt_type=opt_type, reason="open_blocked")
-            return
+            return False
 
         if self.ctx.session_maker is None:
-            return
+            return False
 
         async with self.ctx.session_maker() as session:
             inst = await resolve_otm_option(
@@ -1038,7 +1178,7 @@ class DirectionalStrangle(Strategy):
             )
         if inst is None:
             self.ctx.log.warning("short_no_instrument", opt_type=opt_type, spot=spot)
-            return
+            return False
 
         sid = inst.security_id
         segment = inst.exchange_segment
@@ -1050,15 +1190,18 @@ class DirectionalStrangle(Strategy):
         async with self._lock_for(sid):
             reserved_lots = await self._reserve_leg_lots(sid, opt_type, lots, "short leg")
             if reserved_lots is None:
-                return
+                return False
             lots = reserved_lots
 
             await self._subscribe_option(sid, segment)
+            # Give a freshly-subscribed option a bounded moment to produce its first tick,
+            # so the MARKET order below fills instead of aborting cold (subscribe→fill race).
+            await self._await_option_ltp(sid)
             await self._record_day_baseline(sid)
 
             order = await self._place(sid, segment, "SELL", lots)
             if order is None or order.status in ("CANCELLED", "REJECTED"):
-                return
+                return False
 
             avg_px = await self._await_fill_avg_px(sid)
             if avg_px is None or avg_px <= 0:
@@ -1073,7 +1216,7 @@ class DirectionalStrangle(Strategy):
                     f"short leg {sid} aborted: entry price could not be resolved after all fallbacks",
                     {"strategy_id": self.strategy_id, "opt_type": opt_type},
                 )
-                return
+                return False
             _reason = f"{self._current_bucket}@{self._last_score:.2f}"
             leg = OpenLeg(
                 security_id=sid,
@@ -1094,7 +1237,7 @@ class DirectionalStrangle(Strategy):
                 # a leg we can't register; the orphan position surfaces via the next
                 # _reconcile_divergences() poll instead of taking every other leg's
                 # management offline with it.
-                return
+                return False
             await self._persist_leg_open(leg)
             self._emit_event(
                 StrangleEventType.LEG_OPEN,
@@ -1109,6 +1252,18 @@ class DirectionalStrangle(Strategy):
 
         if self._hedge_enabled:
             await self._open_hedge(opt_type, spot, lots, segment, short_leg=leg)
+
+        # The hedge path squares the short (`naked_hedge_averted`) when it cannot price a
+        # wing, so report success by whether the short leg is still tracked — a squared
+        # short is "not opened" and must be retried, not latched. Mark realized only
+        # once the short has survived the hedge step too: marking it earlier would let
+        # a naked_hedge_averted square-off permanently block recovery for this side for
+        # the rest of the episode, since a realized side is never retried (see
+        # `strangle-partial-entry-recovery` review).
+        opened = leg.security_id in self._legs
+        if opened:
+            self._bucket_realized.add(opt_type)
+        return opened
 
     async def _open_hedge(
         self, opt_type: str, spot: float, lots: int, segment: str, short_leg: OpenLeg | None = None
@@ -1919,6 +2074,16 @@ class DirectionalStrangle(Strategy):
             # _current_bucket is intentionally NOT reset: open legs persist across
             # trading days, so carrying the bucket forward prevents a spurious
             # close/reopen on the first bar of the new session.
+            #
+            # _recovery_attempts DOES reset daily even though the bucket episode
+            # carries over: a side that exhausted entry_recovery_max_attempts and
+            # was surfaced via ENTRY_SIDE_UNFILLED must not stay permanently
+            # unrecoverable for as long as the bucket happens to persist -- the
+            # transient cause (cold LTP, feed hiccup) from a prior day is long gone.
+            # _bucket_realized is NOT reset: a side deliberately closed this episode
+            # (take-profit/roll) must still never be resurrected just because a day
+            # boundary passed.
+            self._recovery_attempts = {}
 
     async def _maybe_resolve_lot_size(self, bar_day: date) -> None:
         """Resolve `self._lot_size` from the instruments table once per IST trading day.
@@ -1997,6 +2162,10 @@ class DirectionalStrangle(Strategy):
     def _ratio_for(self, bucket: BiasBucket) -> tuple[int, int]:
         pe, ce = self._ratio_table.get(bucket, (1, 1))
         return pe * self._scale_lots, ce * self._scale_lots
+
+    def _open_short_lots(self, opt_type: str) -> int:
+        """Total lots currently held short on `opt_type` ("PE"/"CE")."""
+        return sum(leg.lots for leg in self._short_legs if leg.opt_type == opt_type)
 
     def _max_leg_lots(self) -> int:
         """Largest lots a single fresh entry could ever request, per config.

@@ -1,6 +1,7 @@
-"""Backfill persisted price levels (daily + weekly) for NIFTY, BANKNIFTY, SENSEX.
+"""Backfill persisted price levels (daily + weekly + monthly) for NIFTY, BANKNIFTY, SENSEX.
 
-Reads 1m spot bars from `market_bars`, derives prior-session/week HLC,
+Reads 1m spot bars from `market_bars`, derives prior-session/week/month HLC using the same
+session-anchored ([09:15,15:30) IST, 1m-only) window as the live `compute_session_levels` path,
 computes standard + Camarilla + Fibonacci pivots, and upserts into `index_levels`.
 
 Usage:
@@ -21,8 +22,9 @@ from typing import Any
 import structlog
 from dotenv import load_dotenv
 
-from pdp.indicators.levels_store import _UNDERLYING_MAP
+from pdp.indicators.levels_store import _SESSION_LENGTH, _UNDERLYING_MAP
 from pdp.indicators.pivots import _compute_pivots
+from pdp.market.bars import _session_open_utc
 from pdp.options.gap_backfill import holidays, trading_days
 from pdp.settings import get_settings
 
@@ -41,16 +43,17 @@ def _iso_week_monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
-def _day_window_utc(day: date) -> tuple[datetime, datetime]:
-    """UTC-naive [start, end) for a full IST trade day."""
-    # IST 00:00 = UTC -5:30 of that calendar day
-    lo = datetime(day.year, day.month, day.day) - timedelta(hours=5, minutes=30)
-    return lo, lo + timedelta(days=1)
+def _session_window_utc(day: date) -> tuple[datetime, datetime]:
+    """Session-anchored [09:15, 15:30) IST window for a trade day, in UTC. Sync mirror of
+    `pdp.indicators.levels_store._session_window_hlc`'s window (this script uses pymongo, not
+    motor, so it re-derives HLC itself rather than awaiting the async helper)."""
+    start = _session_open_utc(datetime(day.year, day.month, day.day, tzinfo=UTC))
+    return start, start + _SESSION_LENGTH
 
 
 def _fetch_day_hlc_sync(col: Any, security_id: str, day: date) -> tuple[float, float, float] | None:
-    """Return (H, L, C) from 1m bars for a given IST trade day. Sync (pymongo)."""
-    lo, hi = _day_window_utc(day)
+    """Return session-anchored (H, L, C) from 1m bars for a given IST trade day. Sync (pymongo)."""
+    lo, hi = _session_window_utc(day)
     pipeline = [
         {"$match": {
             "metadata.security_id": security_id,
@@ -70,6 +73,35 @@ def _fetch_day_hlc_sync(col: Any, security_id: str, day: date) -> tuple[float, f
         return None
     r = result[0]
     return float(r["h"]), float(r["l"]), float(r["c"])
+
+
+def _fetch_range_hlc_sync(
+    col: Any, security_id: str, start: date, end: date
+) -> tuple[float, float, float] | None:
+    """Aggregate session-anchored HLC across every trading day in [start, end] (inclusive).
+
+    Combines each day's independently-windowed HLC (max of highs, min of lows, last day's
+    close) rather than running one aggregate over the whole padded range — the latter is what
+    let an out-of-session print or an adjacent day leak into a week/month's H/L (the PMH bug).
+    """
+    h: float | None = None
+    lo: float | None = None
+    c: float | None = None
+    c_day: date | None = None
+    d = start
+    while d <= end:
+        day_hlc = _fetch_day_hlc_sync(col, security_id, d)
+        if day_hlc is not None:
+            dh, dl, dc = day_hlc
+            h = dh if h is None else max(h, dh)
+            lo = dl if lo is None else min(lo, dl)
+            if c_day is None or d > c_day:
+                c = dc
+                c_day = d
+        d += timedelta(days=1)
+    if h is None:
+        return None
+    return h, lo, c  # type: ignore[return-value]
 
 
 def _run_backfill(
@@ -137,33 +169,9 @@ def _run_backfill(
             continue
 
         dy_h, dy_l, dy_c = hlc
-        ps = _compute_pivots(dy_h, dy_l, dy_c, session_date)
-        doc: dict[str, Any] = {
-            "schema_version": 1,
-            "security_id": security_id,
-            "underlying": underlying,
-            "period": "daily",
-            "session_date": session_date.isoformat(),
-            "source": {
-                "h": dy_h, "l": dy_l, "c": dy_c,
-                "window_start": prior_day.isoformat(),
-                "window_end": prior_day.isoformat(),
-            },
-            "standard": {
-                "pp": ps.pp, "r1": ps.r1, "r2": ps.r2, "r3": ps.r3,
-                "s1": ps.s1, "s2": ps.s2, "s3": ps.s3,
-            },
-            "camarilla": {
-                "pp": ps.cam_pp, "r3": ps.cam_r3, "r4": ps.cam_r4,
-                "s3": ps.cam_s3, "s4": ps.cam_s4,
-            },
-            "fibonacci": {
-                "pp": ps.fib_pp, "r1": ps.fib_r1, "r2": ps.fib_r2, "r3": ps.fib_r3,
-                "s1": ps.fib_s1, "s2": ps.fib_s2, "s3": ps.fib_s3,
-            },
-            "levels": {},
-            "computed_at": datetime.now(UTC).isoformat(),
-        }
+        doc = _build_level_doc(
+            security_id, underlying, "daily", session_date, dy_h, dy_l, dy_c, prior_day, prior_day
+        )
         levels_col.update_one(
             {"security_id": security_id, "period": "daily", "session_date": session_date.isoformat()},
             {"$set": doc},
@@ -196,57 +204,15 @@ def _run_backfill(
         week_start = prior_week_days[0]
         week_end = prior_week_days[-1]
 
-        # Aggregate HLC across all days in prior week
-        wlo, _ = _day_window_utc(week_start)
-        _, whi = _day_window_utc(week_end)
-        pipeline = [
-            {"$match": {
-                "metadata.security_id": security_id,
-                "metadata.timeframe": "1m",
-                "ts": {"$gte": wlo, "$lt": whi},
-            }},
-            {"$group": {
-                "_id": None,
-                "h": {"$max": "$high"},
-                "l": {"$min": "$low"},
-                "c": {"$last": "$close"},
-                "count": {"$sum": 1},
-            }},
-        ]
-        result = list(bars_col.aggregate(pipeline))
-        if not result or result[0].get("count", 0) < 10:
+        hlc = _fetch_range_hlc_sync(bars_col, security_id, week_start, week_end)
+        if hlc is None:
             log.debug("levels_backfill_no_bars", symbol=symbol, week=str(prior_monday), period="weekly")
             continue
 
-        r = result[0]
-        wk_h, wk_l, wk_c = float(r["h"]), float(r["l"]), float(r["c"])
-        ps = _compute_pivots(wk_h, wk_l, wk_c, monday)
-        doc = {
-            "schema_version": 1,
-            "security_id": security_id,
-            "underlying": underlying,
-            "period": "weekly",
-            "session_date": monday.isoformat(),
-            "source": {
-                "h": wk_h, "l": wk_l, "c": wk_c,
-                "window_start": week_start.isoformat(),
-                "window_end": week_end.isoformat(),
-            },
-            "standard": {
-                "pp": ps.pp, "r1": ps.r1, "r2": ps.r2, "r3": ps.r3,
-                "s1": ps.s1, "s2": ps.s2, "s3": ps.s3,
-            },
-            "camarilla": {
-                "pp": ps.cam_pp, "r3": ps.cam_r3, "r4": ps.cam_r4,
-                "s3": ps.cam_s3, "s4": ps.cam_s4,
-            },
-            "fibonacci": {
-                "pp": ps.fib_pp, "r1": ps.fib_r1, "r2": ps.fib_r2, "r3": ps.fib_r3,
-                "s1": ps.fib_s1, "s2": ps.fib_s2, "s3": ps.fib_s3,
-            },
-            "levels": {},
-            "computed_at": datetime.now(UTC).isoformat(),
-        }
+        wk_h, wk_l, wk_c = hlc
+        doc = _build_level_doc(
+            security_id, underlying, "weekly", monday, wk_h, wk_l, wk_c, week_start, week_end
+        )
         levels_col.update_one(
             {"security_id": security_id, "period": "weekly", "session_date": monday.isoformat()},
             {"$set": doc},
@@ -255,14 +221,107 @@ def _run_backfill(
         total_weekly += 1
 
     log.info("levels_weekly_done", symbol=symbol, upserted=total_weekly)
+
+    # ── Monthly levels ────────────────────────────────────────────────────────
+    # Find the first trading day of each calendar month in the range (that day gets the
+    # prior calendar month's HLC).
+    first_of_month_days = _first_trading_days_of_month(all_days)
+    total_monthly = 0
+    for session_date in first_of_month_days:
+        if only_missing:
+            existing = levels_col.count_documents({
+                "security_id": security_id,
+                "period": "monthly",
+                "session_date": session_date.isoformat(),
+            })
+            if existing > 0:
+                continue
+
+        prior_month_end = session_date.replace(day=1) - timedelta(days=1)
+        prior_month_start = prior_month_end.replace(day=1)
+
+        hlc = _fetch_range_hlc_sync(bars_col, security_id, prior_month_start, prior_month_end)
+        if hlc is None:
+            log.debug(
+                "levels_backfill_no_bars", symbol=symbol, month=str(prior_month_start), period="monthly"
+            )
+            continue
+
+        mo_h, mo_l, mo_c = hlc
+        doc = _build_level_doc(
+            security_id, underlying, "monthly", session_date, mo_h, mo_l, mo_c,
+            prior_month_start, prior_month_end,
+        )
+        levels_col.update_one(
+            {"security_id": security_id, "period": "monthly", "session_date": session_date.isoformat()},
+            {"$set": doc},
+            upsert=True,
+        )
+        total_monthly += 1
+
+    log.info("levels_monthly_done", symbol=symbol, upserted=total_monthly)
     log.info(
         "levels_backfill_summary",
         symbol=symbol,
         daily=total_daily,
         weekly=total_weekly,
+        monthly=total_monthly,
     )
     client.close()
     return 0
+
+
+def _build_level_doc(
+    security_id: str,
+    underlying: str,
+    period: str,
+    session_date: date,
+    h: float,
+    lo: float,
+    c: float,
+    window_start: date,
+    window_end: date,
+) -> dict[str, Any]:
+    """Build an `index_levels` document from source HLC — shared by daily/weekly/monthly."""
+    ps = _compute_pivots(h, lo, c, session_date)
+    return {
+        "schema_version": 1,
+        "security_id": security_id,
+        "underlying": underlying,
+        "period": period,
+        "session_date": session_date.isoformat(),
+        "source": {
+            "h": h, "l": lo, "c": c,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+        },
+        "standard": {
+            "pp": ps.pp, "r1": ps.r1, "r2": ps.r2, "r3": ps.r3,
+            "s1": ps.s1, "s2": ps.s2, "s3": ps.s3,
+        },
+        "camarilla": {
+            "pp": ps.cam_pp, "r3": ps.cam_r3, "r4": ps.cam_r4,
+            "s3": ps.cam_s3, "s4": ps.cam_s4,
+        },
+        "fibonacci": {
+            "pp": ps.fib_pp, "r1": ps.fib_r1, "r2": ps.fib_r2, "r3": ps.fib_r3,
+            "s1": ps.fib_s1, "s2": ps.fib_s2, "s3": ps.fib_s3,
+        },
+        "levels": {},
+        "computed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _first_trading_days_of_month(all_days: list[date]) -> list[date]:
+    """Return the first trading day of each calendar month present in `all_days`."""
+    seen_months: set[tuple[int, int]] = set()
+    result: list[date] = []
+    for d in all_days:
+        key = (d.year, d.month)
+        if key not in seen_months:
+            seen_months.add(key)
+            result.append(d)
+    return result
 
 
 def _prior_trading_day(d: date, hol_set: set[date]) -> date | None:
@@ -276,7 +335,10 @@ def _prior_trading_day(d: date, hol_set: set[date]) -> date | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Backfill daily + weekly price levels for NIFTY/BANKNIFTY/SENSEX into index_levels."
+        description=(
+            "Backfill daily + weekly + monthly price levels for NIFTY/BANKNIFTY/SENSEX into "
+            "index_levels."
+        )
     )
     ap.add_argument("--symbol", default="NIFTY", choices=list(SYMBOL_MAP),
                     help="Index to backfill (default: NIFTY).")

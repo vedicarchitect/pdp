@@ -4,9 +4,12 @@ Context: bar-session-anchoring (openspec/changes/bar-session-anchoring) moved bu
 boundaries for 25m/30m/1H from Unix-epoch anchoring to 09:15 IST session-open anchoring.
 Historical bars stored under the old anchoring are on the wrong grid for those three
 timeframes (5m/15m/1D/1w are unaffected — see bars.py's docstrings for why). This script
-recomputes 15m/30m/1H from the stored 1m bars (which are timeframe-agnostic prints and
-don't need rebuilding themselves) and replaces them via delete-then-insert, since
-market_bars is a MongoDB time-series collection with no in-place update.
+recomputes 15m/30m/1H (and, on request, 5m — its bucket boundaries were never wrong, but
+`--timeframes 5m` is useful to re-derive 5m bars that a live-process outage simply never
+produced, e.g. `indicator-matrix-kite-parity`'s 2026-07-13 coverage gap) from the stored
+1m bars (which are timeframe-agnostic prints and don't need rebuilding themselves) and
+replaces them via delete-then-insert, since market_bars is a MongoDB time-series
+collection with no in-place update.
 
 Rolls up from stored 1m OHLCV docs rather than replaying through BarAggregator/BarBuilder
 (which are tick-oriented and expect one LTP per push): a 1m bar's own OHLC already carries
@@ -45,8 +48,10 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-# label -> minutes; the three timeframes that moved off the epoch grid.
-_REBUILD_TIMEFRAMES: dict[str, int] = {"15m": 15, "30m": 30, "1H": 60}
+# label -> minutes. 15m/30m/1H moved off the epoch grid (bar-session-anchoring); 5m did
+# not (225 min from UTC midnight to the 09:15 IST session open divides evenly by 5), but
+# is included so this script can also re-derive 5m bars a live-process outage dropped.
+_REBUILD_TIMEFRAMES: dict[str, int] = {"5m": 5, "15m": 15, "30m": 30, "1H": 60}
 
 
 async def discover_security_ids(

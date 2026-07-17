@@ -123,6 +123,7 @@ class StrangleTradesOut(BaseModel):
     totals: dict[str, Any]
 
 class StrangleMonitorOut(BaseModel):
+    as_of: str
     indices: dict[str, dict[str, Any]]
     groups: list[dict[str, Any]]
     totals: dict[str, float]

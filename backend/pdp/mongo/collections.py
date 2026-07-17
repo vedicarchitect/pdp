@@ -29,6 +29,7 @@ async def init_collections(db: AsyncIOMotorDatabase, settings: Settings) -> None
     await _ensure_backtest_promotions(db)
     await _ensure_index_levels(db)
     await _ensure_events(db, settings.EVENTS_TTL_DAYS)
+    await _ensure_expiry_calendar(db)
 
 
 async def _ensure_market_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
@@ -110,6 +111,14 @@ async def _ensure_option_bars(db: AsyncIOMotorDatabase) -> None:  # type: ignore
     await col.create_index(
         [("underlying", ASCENDING), ("timeframe", ASCENDING), ("ts", ASCENDING)],
         name="idx_underlying_tf_ts",
+    )
+    # Read path: a single contract's own 1m series by security_id (the ATM CE/PE
+    # indicator suite, `pdp.strategy.atm_suite`). None of the indexes above lead with
+    # security_id, so that query previously fell back to a full collection scan across
+    # the whole warehouse (tens of millions of docs) and tripped socketTimeoutMS.
+    await col.create_index(
+        [("security_id", ASCENDING), ("timeframe", ASCENDING), ("ts", ASCENDING)],
+        name="idx_security_tf_ts",
     )
 
 
@@ -399,6 +408,10 @@ def get_index_levels_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollect
     return db["index_levels"]
 
 
+def get_expiry_calendar_collection(db: AsyncIOMotorDatabase) -> AsyncIOMotorCollection:  # type: ignore[type-arg]
+    return db["expiry_calendar"]
+
+
 async def _ensure_events(db: AsyncIOMotorDatabase, ttl_days: int) -> None:  # type: ignore[type-arg]
     """Alerts/decision events written by ``EventService``/``EventStore`` (field ``security_id``)
     and, since `strangle-observability-gaps`, the strangle strategy's leg-open/leg-close events
@@ -446,3 +459,28 @@ async def _ensure_index_levels(db: AsyncIOMotorDatabase) -> None:  # type: ignor
         name="idx_levels_underlying_period_date",
     )
     log.debug("mongo_indexes_ensured", collection="index_levels")
+
+
+async def _ensure_expiry_calendar(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Persistent, DB-backed store of confirmed real expiry dates per underlying/flag.
+
+    Replaces the static ``data/expiry/*.json`` cache as the source `pdp.options.gap_backfill`
+    resolves target expiries from — that JSON cache carries the same coverage gaps as
+    `option_bars` itself (it was built from the same incomplete ingestion), so any tool that
+    resolves an expiry from it can never target a genuinely-missing expiry. Populated by
+    `scripts/seed_expiry_calendar.py`, either migrated from the JSON cache or added one date at
+    a time as gaps are confirmed against a real historical NSE calendar (see
+    `option-bars-expiry-gap-backfill`).
+    """
+    try:
+        await db.create_collection("expiry_calendar")
+        log.info("mongo_collection_created", collection="expiry_calendar")
+    except CollectionInvalid:
+        log.debug("mongo_collection_exists", collection="expiry_calendar")
+
+    col = db["expiry_calendar"]
+    await col.create_index(
+        [("underlying", ASCENDING), ("flag", ASCENDING), ("expiry_date", ASCENDING)],
+        unique=True,
+        name="uq_underlying_flag_expiry",
+    )

@@ -22,7 +22,9 @@ import pytest
 from pdp.indicators.engine import IndicatorEngine
 from pdp.indicators.supertrend import UP
 from pdp.indicators.warmup import (
+    _derive_bars_from_1m,
     _fetch_from_dhan,
+    _ninety_day_chunks,
     _prior_trading_day,
     lookback_days,
     required_bars,
@@ -783,3 +785,177 @@ class TestSeedingSummary:
 
         summary = engine.seeding_summary(sid, tf)
         assert all(summary.values())
+
+
+# ── indicator-warmup-derive-from-1m: 90-day chunking + 1m derivation ─────────
+
+
+def test_ninety_day_chunks_splits_over_90_days():
+    chunks = _ninety_day_chunks(date(2026, 1, 1), date(2026, 7, 1))
+    assert len(chunks) == 3  # 182 days -> 90 + 90 + 2
+    assert chunks[0][0] == date(2026, 1, 1)
+    assert chunks[-1][1] == date(2026, 7, 1)
+    for f, t in chunks:
+        assert (t - f).days <= 89  # inclusive window <= 90 calendar days
+    # contiguous, no gaps or overlaps
+    for (_f1, t1), (f2, _t2) in zip(chunks, chunks[1:]):
+        assert f2 == t1 + timedelta(days=1)
+
+
+def test_ninety_day_chunks_single_window_under_90_days():
+    assert _ninety_day_chunks(date(2026, 7, 1), date(2026, 7, 5)) == [
+        (date(2026, 7, 1), date(2026, 7, 5))
+    ]
+
+
+def test_derive_bars_from_1m_rolls_up_session_anchored_30m():
+    from pdp.market.bars import _bar_boundary
+
+    base = datetime(2026, 6, 15, 3, 45, tzinfo=UTC)  # 09:15 IST session open
+    bars_1m = [
+        BarClosed(
+            security_id="13",
+            timeframe="1m",
+            bar_time=base + timedelta(minutes=i),
+            open=Decimal("100"),
+            high=Decimal(str(100 + i)),
+            low=Decimal(str(100 - i)),
+            close=Decimal(str(100 + i)),
+            volume=1,
+            oi=0,
+        )
+        for i in range(60)
+    ]
+    derived = _derive_bars_from_1m(bars_1m, 30, "30m")
+    assert len(derived) == 2  # 60 one-minute bars -> two 30m buckets
+    assert derived[0].timeframe == "30m"
+    assert derived[0].bar_time == _bar_boundary(base, 30)
+    assert derived[0].open == Decimal("100")
+    assert derived[0].high == Decimal("129")  # max over minutes 0..29
+    assert derived[0].low == Decimal("71")
+    assert derived[0].close == Decimal("129")  # last close in the bucket
+    assert derived[0].volume == 30
+
+
+class _CountingDhanClient:
+    """Records every intraday/daily call so chunking can be asserted."""
+
+    def __init__(self, resp: dict) -> None:
+        self._resp = resp
+        self.intraday_calls: list[dict] = []
+        self.daily_calls: list[dict] = []
+
+    def intraday_minute_data(self, **kwargs):
+        self.intraday_calls.append(kwargs)
+        return self._resp
+
+    def historical_daily_data(self, **kwargs):
+        self.daily_calls.append(kwargs)
+        return self._resp
+
+
+def test_fetch_from_dhan_chunks_intraday_over_90_days():
+    """A >90-day intraday warmup window is fetched in ≤90-day chunks (no DH-905)."""
+    now = datetime(2026, 7, 1, 10, 30, tzinfo=UTC)  # after IST close
+    client = _CountingDhanClient(_dhan_resp([]))
+    with (
+        patch("dhanhq.dhanhq", return_value=client),
+        patch("dhanhq.DhanContext", return_value=object()),
+    ):
+        _fetch_from_dhan(_DHAN_CREDS, "13", "IDX_I", "30m", prior_day=date(2026, 1, 1), now=now)
+    assert len(client.intraday_calls) == 3, "182-day window -> 3 chunks"
+    for kw in client.intraday_calls:
+        f = datetime.strptime(kw["from_date"], "%Y-%m-%d").date()
+        t = datetime.strptime(kw["to_date"], "%Y-%m-%d").date()
+        assert (t - f).days <= 89
+
+
+def test_fetch_from_dhan_daily_is_not_chunked():
+    now = datetime(2026, 7, 1, 10, 30, tzinfo=UTC)
+    client = _CountingDhanClient(_dhan_resp([]))
+    with (
+        patch("dhanhq.dhanhq", return_value=client),
+        patch("dhanhq.DhanContext", return_value=object()),
+    ):
+        _fetch_from_dhan(_DHAN_CREDS, "13", "IDX_I", "1D", prior_day=date(2026, 1, 1), now=now)
+    assert len(client.daily_calls) == 1
+    assert len(client.intraday_calls) == 0
+
+
+class _TfAwareCol:
+    """find() returns docs by the query's metadata.timeframe; supports the
+    delete-then-insert used by _replace_derived_bars/_persist_bars."""
+
+    def __init__(self, by_tf: dict[str, list[dict]]) -> None:
+        self._by_tf = by_tf
+        self.queries: list[dict] = []
+        self.deleted: list[dict] = []
+        self.inserted: list[list[dict]] = []
+
+    def find(self, query, sort=None):
+        self.queries.append(query)
+        tf = query.get("metadata.timeframe")
+        return _FakeCursor(list(self._by_tf.get(tf, [])))
+
+    async def delete_many(self, query):
+        self.deleted.append(query)
+        return SimpleNamespace(deleted_count=0)
+
+    async def insert_many(self, docs, ordered=True):
+        self.inserted.append(list(docs))
+        return SimpleNamespace(inserted_ids=list(range(len(docs))))
+
+
+class _TfAwareDB:
+    def __init__(self, by_tf: dict[str, list[dict]]) -> None:
+        self.col = _TfAwareCol(by_tf)
+
+    def __getitem__(self, name: str) -> _TfAwareCol:
+        assert name == "market_bars"
+        return self.col
+
+
+def _min_docs(n: int) -> list[dict]:
+    """n one-minute bars, all safely in the past (so every derived bar is complete)."""
+    base = datetime.now(UTC) - timedelta(days=12)
+    return [
+        {
+            "ts": base + timedelta(minutes=i),
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 100.0 + (i % 10),
+            "volume": 10,
+            "oi": 0,
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_warmup_derives_30m_from_1m_and_skips_dhan():
+    """A short 30m series with a rich 1m series is topped up by deriving 30m from 1m —
+    the live intraday API is NOT called. This is the permanent DH-905 fix path."""
+    engine = IndicatorEngine()
+    # 3 stored 30m bars (< 200 floor), 6300 one-minute bars (-> ~210 derived 30m buckets).
+    db = _TfAwareDB({"30m": _bar_docs([22000 + i for i in range(3)]), "1m": _min_docs(6300)})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["30m"]}]
+
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]) as mock_fetch:
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
+
+    mock_fetch.assert_not_called()
+    assert db.col.inserted, "derived 30m bars must be persisted (delete-then-insert)"
+
+
+@pytest.mark.asyncio
+async def test_warmup_derive_falls_back_to_dhan_when_1m_absent():
+    """When 1m coverage is itself missing, the chunked Dhan fallback still fires."""
+    engine = IndicatorEngine()
+    db = _TfAwareDB({"30m": _bar_docs([22000 + i for i in range(3)]), "1m": []})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["30m"]}]
+
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]) as mock_fetch:
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
+
+    mock_fetch.assert_called_once()

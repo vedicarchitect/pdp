@@ -5,6 +5,9 @@ Usage (run from backend/ directory):
     python scripts/trade_day.py            # pre-checks → live monitor
     python scripts/trade_day.py check      # pre-checks only, then exit
     python scripts/trade_day.py monitor    # live monitor only (API must be running)
+    python scripts/trade_day.py validate --expected path/to/kite_values.json
+                                            # one-shot value-by-value diff against
+                                            # hand-entered Kite values (indicator-matrix-kite-parity)
 
 Endpoints used:
     GET /healthz                              API alive
@@ -12,6 +15,7 @@ Endpoints used:
     GET /api/v1/strategies                    strategy list + status
     GET /api/v1/strangle/status?strategy_id=  per-strategy state
     GET /api/v1/instruments?underlying=X&limit=1  instruments check
+    GET /api/v1/strangle/monitor               full indicator matrix (used by `monitor`/`validate`)
     http://localhost:9200/                    OpenSearch health
     http://localhost:5601/                    OpenSearch Dashboards
 """
@@ -22,6 +26,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
@@ -269,40 +274,196 @@ def _fmt_ind(val: float | None, dp: int = 1) -> str:
     return f"{val:,.{dp}f}"
 
 
-def _indicator_lines(mon: dict | None) -> list[str]:
-    """Flat, copy-paste-friendly EMA/ST/PSAR/RSI matrix per underlying x timeframe.
+_CAM_PERIOD_FOR_TF = {"5m": "daily", "15m": "daily", "30m": "weekly", "1H": "weekly", "1D": "monthly"}
 
-    Sourced from GET /api/v1/strangle/monitor's `indicators` field (keyed by
-    the underlying's spot security_id). A `--` on ema200 means warmup hasn't
-    fed 200 bars for that timeframe yet — see memory/execution_console_accuracy.md.
+_ATM_ROW_LABEL = {"NIFTY_ATM_CE": "NIFTY ATM CE", "NIFTY_ATM_PE": "NIFTY ATM PE"}
+
+
+def _st_variant_disp(c: dict, key: str) -> str:
+    v = c.get(key) or {}
+    arrow = "^" if v.get("direction") == "up" else ("v" if v.get("direction") == "down" else "")
+    val = v.get("value")
+    return f"{_fmt_ind(val)}{arrow}" if val is not None else f"{DM}--{Z}"
+
+
+def _indicator_lines(mon: dict | None) -> list[str]:
+    """Full validation-harness dump: EMA/3xST/PSAR/RSI/VWAP/VWMA matrix per
+    underlying x timeframe, PDH/PDL/PWH/PWL/PMH/PML + Camarilla (period per the
+    5m/15m->daily, 30m/1H->weekly, 1D->monthly mapping), and the NIFTY ATM CE/PE
+    rows — everything `GET /api/v1/strangle/monitor` serves for the Kite-parity
+    validation described in indicator-matrix-kite-parity. A `--` on ema200 means
+    warmup hasn't fed 200 bars for that timeframe yet — see
+    memory/execution_console_accuracy.md.
     """
     lines: list[str] = []
     if not mon:
         return lines
     indicators: dict = mon.get("indicators") or {}
+
+    def _cell_row(tf: str, c: dict) -> str:
+        return (
+            f"  {tf:<5} {_st_variant_disp(c, 'st_10_2'):>10} {_st_variant_disp(c, 'st_10_3'):>10} "
+            f"{_st_variant_disp(c, 'st_3_1'):>9} {_fmt_ind(c.get('ema9')):>9} "
+            f"{_fmt_ind(c.get('ema20')):>9} {_fmt_ind(c.get('ema50')):>9} "
+            f"{_fmt_ind(c.get('ema100')):>9} {_fmt_ind(c.get('ema200')):>9} "
+            f"{_fmt_ind(c.get('psar')):>9} {_fmt_ind(c.get('rsi'), 1):>6} "
+            f"{_fmt_ind(c.get('vwap')):>9} {_fmt_ind(c.get('vwma')):>9}"
+        )
+
+    header = (
+        f"  {DM}{'TF':<5} {'ST(10,2)':>10} {'ST(10,3)':>10} {'ST(3,1)':>9} {'EMA9':>9} "
+        f"{'EMA20':>9} {'EMA50':>9} {'EMA100':>9} {'EMA200':>9} {'PSAR':>9} {'RSI':>6} "
+        f"{'VWAP':>9} {'VWMA':>9}{Z}"
+    )
+
     for sid, label in _INDEX_SID_LABEL.items():
-        cell_by_tf = (indicators.get(sid) or {}).get("tf") or {}
+        sid_data = indicators.get(sid) or {}
+        cell_by_tf = sid_data.get("tf") or {}
         if not cell_by_tf:
             continue
         lines.append(f"\n  {BD}{W}{label} indicators{Z}")
-        lines.append(
-            f"  {DM}{'TF':<5} {'EMA9':>10} {'EMA20':>10} {'EMA50':>10} "
-            f"{'EMA100':>10} {'EMA200':>10} {'ST':>10} {'PSAR':>10} {'RSI':>7}{Z}"
-        )
+        lines.append(header)
         for tf in _IND_TFS:
             c = cell_by_tf.get(tf)
             if not c:
                 continue
-            st_dir = c.get("st_dir")
-            st_arrow = "^" if st_dir == "up" else ("v" if st_dir == "down" else "")
-            st_disp = f"{_fmt_ind(c.get('st_val'))}{st_arrow}"
+            lines.append(_cell_row(tf, c))
+
+        period = sid_data.get("period") or {}
+        lines.append(
+            f"  {DM}PDH {_fmt_ind(period.get('pdh'))}  PDL {_fmt_ind(period.get('pdl'))}  "
+            f"PWH {_fmt_ind(period.get('pwh'))}  PWL {_fmt_ind(period.get('pwl'))}  "
+            f"PMH {_fmt_ind(period.get('pmh'))}  PML {_fmt_ind(period.get('pml'))}{Z}"
+        )
+        for cam_period in ("daily", "weekly", "monthly"):
+            cam = sid_data.get(f"camarilla_{cam_period}") or {}
+            if not cam:
+                continue
             lines.append(
-                f"  {tf:<5} {_fmt_ind(c.get('ema9')):>10} {_fmt_ind(c.get('ema20')):>10} "
-                f"{_fmt_ind(c.get('ema50')):>10} {_fmt_ind(c.get('ema100')):>10} "
-                f"{_fmt_ind(c.get('ema200')):>10} {st_disp:>10} {_fmt_ind(c.get('psar')):>10} "
-                f"{_fmt_ind(c.get('rsi'), 1):>7}"
+                f"  {DM}Camarilla({cam_period:<7}){Z} R4 {_fmt_ind(cam.get('r4'))}  "
+                f"R3 {_fmt_ind(cam.get('r3'))}  S3 {_fmt_ind(cam.get('s3'))}  "
+                f"S4 {_fmt_ind(cam.get('s4'))}"
             )
+
+    # NIFTY ATM CE/PE rows — same cell shape, no Camarilla/period levels.
+    for key, row_label in _ATM_ROW_LABEL.items():
+        row = indicators.get(key)
+        if not row:
+            continue
+        cell_by_tf = row.get("tf") or {}
+        strike = row.get("strike")
+        expiry = row.get("expiry")
+        lines.append(f"\n  {BD}{W}{row_label} (strike {strike}, expiry {expiry}){Z}")
+        lines.append(header)
+        for tf in _IND_TFS:
+            c = cell_by_tf.get(tf)
+            if not c:
+                continue
+            lines.append(_cell_row(tf, c))
+
     return lines
+
+
+# ── --expected diff harness ───────────────────────────────────────────────────
+
+def _flatten_expected(prefix: str, cell: dict) -> dict[str, float]:
+    """Flatten a hand-entered expected cell into dotted keys matching the live
+    cell's own field names, so a diff can walk both by the same key set."""
+    out: dict[str, float] = {}
+    for k, v in cell.items():
+        if isinstance(v, dict):
+            out.update(_flatten_expected(f"{prefix}.{k}", v))
+        elif isinstance(v, (int, float)):
+            out[f"{prefix}.{k}"] = float(v)
+    return out
+
+
+def _flatten_live_cell(prefix: str, cell: dict, keys: set[str]) -> dict[str, float | None]:
+    """Pull only the dotted keys the expected file asked about, from a live cell
+    (handling the nested st_10_2/st_10_3/st_3_1 variant dicts)."""
+    out: dict[str, float | None] = {}
+    for key in keys:
+        if not key.startswith(f"{prefix}."):
+            continue
+        parts = key[len(prefix) + 1:].split(".")
+        node: Any = cell
+        for p in parts:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(p)
+        out[key] = float(node) if isinstance(node, (int, float)) else None
+    return out
+
+
+def _run_validation(mon: dict | None, expected_path: str, tolerance: float) -> int:
+    """Diff the live monitor snapshot against a hand-entered `--expected` JSON file.
+
+    Expected file shape: {"<SID_OR_ROW_KEY>": {"<tf>": {"ema9": 24213.0, "st_10_2":
+    {"value": ..., "direction": "up"}, ...}, "camarilla_daily": {"r4": ...}, "period":
+    {"pmh": ...}}}. Each numeric leaf is compared to the live value within `tolerance`
+    points; a missing live value is reported as a distinct failure (still-stale/unseeded),
+    not silently skipped.
+    """
+    import json as _json
+
+    with open(expected_path, encoding="utf-8") as f:
+        expected = _json.load(f)
+
+    if not mon:
+        print(f"  {R}No live monitor data — is the API running?{Z}")
+        return 1
+
+    indicators: dict = mon.get("indicators") or {}
+    n_checked = 0
+    n_failed = 0
+
+    for row_key, row_expected in expected.items():
+        live_row = indicators.get(row_key)
+        label = _INDEX_SID_LABEL.get(row_key, _ATM_ROW_LABEL.get(row_key, row_key))
+        print(f"\n  {BD}{W}{label}{Z}")
+        if live_row is None:
+            print(f"    {R}✗ no live data for {row_key}{Z}")
+            n_failed += 1
+            continue
+
+        for section, section_expected in row_expected.items():
+            live_section = live_row.get(section) if section != "tf" else None
+            if section == "tf":
+                for tf, tf_expected in section_expected.items():
+                    live_cell = (live_row.get("tf") or {}).get(tf) or {}
+                    flat_expected = _flatten_expected(f"{row_key}.tf.{tf}", tf_expected)
+                    flat_live = _flatten_live_cell(f"{row_key}.tf.{tf}", live_cell, set(flat_expected))
+                    for key, exp_val in flat_expected.items():
+                        n_checked += 1
+                        live_val = flat_live.get(key)
+                        if live_val is None:
+                            print(f"    {R}✗ {key}: expected {exp_val}, live is -- (unseeded){Z}")
+                            n_failed += 1
+                        elif abs(live_val - exp_val) > tolerance:
+                            print(f"    {R}✗ {key}: expected {exp_val}, live {live_val} "
+                                  f"(diff {abs(live_val - exp_val):.2f} > {tolerance}){Z}")
+                            n_failed += 1
+                        else:
+                            print(f"    {G}✓ {key}: {live_val} (expected {exp_val}){Z}")
+            else:
+                flat_expected = _flatten_expected(f"{row_key}.{section}", section_expected)
+                flat_live = _flatten_live_cell(f"{row_key}.{section}", live_section or {}, set(flat_expected))
+                for key, exp_val in flat_expected.items():
+                    n_checked += 1
+                    live_val = flat_live.get(key)
+                    if live_val is None:
+                        print(f"    {R}✗ {key}: expected {exp_val}, live is -- (unseeded){Z}")
+                        n_failed += 1
+                    elif abs(live_val - exp_val) > tolerance:
+                        print(f"    {R}✗ {key}: expected {exp_val}, live {live_val} "
+                              f"(diff {abs(live_val - exp_val):.2f} > {tolerance}){Z}")
+                        n_failed += 1
+                    else:
+                        print(f"    {G}✓ {key}: {live_val} (expected {exp_val}){Z}")
+
+    print(f"\n  {BD}{n_checked - n_failed}/{n_checked} cells matched within ±{tolerance}{Z}")
+    return 1 if n_failed else 0
 
 
 def monitor_loop() -> None:
@@ -411,6 +572,18 @@ def main() -> None:
     elif mode == "monitor":
         monitor_loop()
 
+    elif mode == "validate":
+        if "--expected" not in sys.argv:
+            print("Usage: python scripts/trade_day.py validate --expected path/to/kite_values.json "
+                  "[--tolerance N]")
+            sys.exit(1)
+        expected_path = sys.argv[sys.argv.index("--expected") + 1]
+        tolerance = 1.0
+        if "--tolerance" in sys.argv:
+            tolerance = float(sys.argv[sys.argv.index("--tolerance") + 1])
+        mon = _get("/api/v1/strangle/monitor", n_events=1)
+        sys.exit(_run_validation(mon, expected_path, tolerance))
+
     elif mode in ("all", ""):
         ok = pre_checks()
         if not ok:
@@ -424,7 +597,7 @@ def main() -> None:
         monitor_loop()
 
     else:
-        print(f"Usage: python scripts/trade_day.py [check | monitor | all]")
+        print("Usage: python scripts/trade_day.py [check | monitor | validate | all]")
         sys.exit(1)
 
 
