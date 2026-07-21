@@ -36,10 +36,19 @@ class BarWriter:
         self._flush_task = asyncio.create_task(self._flush_loop(), name="bar-writer-flush")
         log.info("bar_writer_started")
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float = 10.0) -> None:
         self._stop_event.set()
         if self._flush_task is not None:
-            await self._flush_task
+            # Bound the final drain: it issues one more delete_many+insert_many, and if
+            # Mongo is pegged that await would otherwise block shutdown forever (the hang
+            # that forced SIGKILL). wait_for cancels the drain on timeout and awaits the
+            # cancellation, so exit proceeds rather than wedging.
+            try:
+                await asyncio.wait_for(self._flush_task, timeout=timeout_s)
+            except TimeoutError:
+                log.warning("bar_writer_stop_timeout", timeout_s=timeout_s, buffered=len(self._buffer))
+            except Exception as exc:
+                log.warning("bar_writer_stop_error", exc=str(exc))
 
     def enqueue(self, bar: BarClosed) -> None:
         if len(self._buffer) >= _MAX_BUFFER:

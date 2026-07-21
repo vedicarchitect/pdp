@@ -411,6 +411,37 @@ class MonitorReadiness {
 
 // ─── Monitor snapshot ─────────────────────────────────────────────────────────
 
+/// Whether the standalone premarket warmup job (`task warmup`) ran for today's IST
+/// trading date. When it hasn't, the trading process still boots and trades intraday,
+/// but the deep higher-timeframe history (EMA200, weekly pivots) is unreconciled — the
+/// execution panel surfaces this as a banner recommending the job. An absent `premarket`
+/// key (older backend) is treated as "ran" so no false banner shows.
+class PremarketStatus {
+  final bool ranToday;
+  final String? date;
+  final DateTime? ranAt;
+  final int? unseededTotal;
+
+  const PremarketStatus({
+    required this.ranToday,
+    this.date,
+    this.ranAt,
+    this.unseededTotal,
+  });
+
+  static const PremarketStatus unknown = PremarketStatus(ranToday: true);
+
+  factory PremarketStatus.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return unknown;
+    return PremarketStatus(
+      ranToday: json['ran_today'] as bool? ?? false,
+      date: json['date'] as String?,
+      ranAt: DateTime.tryParse(json['ran_at'] as String? ?? '')?.toLocal(),
+      unseededTotal: (json['unseeded_total'] as num?)?.toInt(),
+    );
+  }
+}
+
 class MonitorSnapshot {
   final DateTime? asOf;
   final List<IndexPrice> indices;
@@ -427,6 +458,7 @@ class MonitorSnapshot {
   final List<Map<String, dynamic>> recentEvents;
   final Map<String, SidIndicators> indicators;
   final MonitorReadiness readiness;
+  final PremarketStatus premarket;
   final AtmOptionRow? atmCe;
   final AtmOptionRow? atmPe;
 
@@ -446,6 +478,7 @@ class MonitorSnapshot {
     required this.recentEvents,
     required this.indicators,
     this.readiness = MonitorReadiness.ok,
+    this.premarket = PremarketStatus.unknown,
     this.atmCe,
     this.atmPe,
   });
@@ -503,6 +536,7 @@ class MonitorSnapshot {
       recentEvents: recentEvents,
       indicators: indicators,
       readiness: MonitorReadiness.fromJson(status['readiness'] as Map<String, dynamic>?),
+      premarket: PremarketStatus.fromJson(status['premarket'] as Map<String, dynamic>?),
       atmCe: atmCeRaw != null ? AtmOptionRow.fromJson(atmCeRaw) : null,
       atmPe: atmPeRaw != null ? AtmOptionRow.fromJson(atmPeRaw) : null,
     );

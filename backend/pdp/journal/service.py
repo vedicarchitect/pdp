@@ -65,11 +65,19 @@ class JournalService:
         self._task = asyncio.create_task(self._flush_loop(), name="journal-flush")
         log.info("journal_service_started")
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float = 10.0) -> None:
+        # Bound both the flush-loop join and the final drain on a Mongo write, so a pegged
+        # Mongo can't hang process exit (see BarWriter.stop). Best-effort: a dropped final
+        # journal flush is recoverable, a wedged shutdown is not.
         self._stop_event.set()
-        if self._task is not None:
-            await self._task
-        await self._flush()
+        try:
+            if self._task is not None:
+                await asyncio.wait_for(self._task, timeout=timeout_s)
+            await asyncio.wait_for(self._flush(), timeout=timeout_s)
+        except TimeoutError:
+            log.warning("journal_stop_timeout", timeout_s=timeout_s)
+        except Exception as exc:
+            log.warning("journal_stop_error", exc=str(exc))
 
     def subscribe_fill_events(self, orders_hub: OrdersHub) -> None:
         orders_hub.register_fill_callback(self.record_fill)

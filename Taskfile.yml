@@ -18,11 +18,23 @@ tasks:
       - uv run uvicorn pdp.main:app --reload --reload-dir pdp --host 0.0.0.0 --port 8000
 
   dev:trade:
-    desc: Run the API for trading — stable, no file-watch restarts
+    desc: "Run the API for trading — stable, no file-watch restarts. Boots read-only (light engine seed, no market_bars reconcile writes). Run `task warmup` separately before market open for deep higher-timeframe history; the execution panel flags it if today's premarket run is missing."
     dir: backend
     cmds:
       - uv run python scripts/ensure_port_free.py --port 8000
-      - uv run uvicorn pdp.main:app --host 0.0.0.0 --port 8000 --workers 1
+      - uv run uvicorn pdp.main:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-graceful-shutdown 20
+
+  warmup:
+    desc: "Pre-market prechecks: reconcile market_bars from 1m (self-heals duplicates/gaps from any prior feed outage), reseed indicator engine, recompute session levels. Safe to run anytime — refuses during market hours unless --allow-market-hours. Args: -- [--allow-market-hours]"
+    dir: backend
+    cmds:
+      - uv run python scripts/warmup_premarket.py {{.CLI_ARGS}}
+
+  warmup:now:
+    desc: "Run the pre-market warmup right now, even during market hours (bypasses the market-hours guard). Use when starting a session mid-day so higher-timeframe indicators seed today."
+    dir: backend
+    cmds:
+      - uv run python scripts/warmup_premarket.py --allow-market-hours
 
   trade:up:
     desc: "Start all services for a paper trading day: Postgres/Redis/Mongo + OpenSearch + run migrations + init dashboards"
@@ -31,6 +43,46 @@ tasks:
       - task: search:up
       - task: db:migrate
       - task: search:init
+
+  # ── Local process split (no Docker) ──────────────────────────────────────────
+  # Mirrors the containerized api/engine/ops roles (GROUPS_BY_ROLE, entrypoints.py) as
+  # plain local uvicorn processes on one host, so the hot path (engine: feed, indicators,
+  # orders, portfolio, risk, StrategyHost) isn't sharing an event loop with HTTP/WS
+  # traffic or ops polling. `dev:trade` (role=all, one process) remains the simple default;
+  # use this split only when isolating the hot path is worth the extra terminals.
+  # Run `task warmup` once before `dev:engine` for deep higher-timeframe history — the
+  # engine boots read-only (FeedEngineGroup seeds with reconcile=False, no market_bars
+  # reconcile writes on the boot path), the same as dev:trade.
+
+  dev:engine:
+    desc: "Trading hot path only (feed, indicators, orders, portfolio, risk, StrategyHost) on :8000. Boots read-only — run `task warmup` separately before market open for deep history"
+    dir: backend
+    env:
+      PDP_ROLE: engine
+      PORT: "8000"
+    cmds:
+      - uv run python scripts/ensure_port_free.py --port 8000
+      - uv run pdp-engine
+
+  dev:api:
+    desc: "HTTP/WS + JobRunner only (reads engine state via Redis bridge) on :8001 — pair with dev:engine"
+    dir: backend
+    env:
+      PDP_ROLE: api
+      PORT: "8001"
+    cmds:
+      - uv run python scripts/ensure_port_free.py --port 8001
+      - uv run pdp-api
+
+  dev:ops:
+    desc: "Options-chain poller, broker sync, scrip refresh, intel on :8002 — pair with dev:engine"
+    dir: backend
+    env:
+      PDP_ROLE: ops
+      PORT: "8002"
+    cmds:
+      - uv run python scripts/ensure_port_free.py --port 8002
+      - uv run pdp-ops
 
   trade:
     desc: "Pre-market checks + live monitor for 3-index paper trading (requires API running). Args: -- [check|monitor]"

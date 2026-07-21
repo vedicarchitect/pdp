@@ -169,3 +169,29 @@ async def test_distinct_buckets_in_one_batch_all_survive(mock_collection):
 
     docs = mock_collection.insert_many.call_args[0][0]
     assert len(docs) == 3
+
+
+@pytest.mark.asyncio
+async def test_stop_times_out_on_wedged_flush_instead_of_hanging(mock_collection):
+    """A final drain that blocks on a pegged Mongo must not wedge shutdown. stop() bounds
+    the drain and returns within its timeout by cancelling it, rather than awaiting forever
+    (the hang that previously forced SIGKILL during the CPU-spike incident)."""
+    import asyncio
+
+    started = asyncio.Event()
+
+    async def _never_returns(*_a, **_k):
+        started.set()
+        await asyncio.sleep(3600)
+
+    mock_collection.delete_many = AsyncMock(side_effect=_never_returns)
+
+    writer = BarWriter(mock_collection)
+    await writer.start()
+    writer.enqueue(_bar())
+    # Let the background flush loop pick up the bar and block inside delete_many.
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    # The outer wait_for is the assertion: if stop() did not bound its drain it would hang
+    # here and raise TimeoutError. With the guard it returns in ~0.2s.
+    await asyncio.wait_for(writer.stop(timeout_s=0.2), timeout=2)

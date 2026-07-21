@@ -72,14 +72,32 @@ class IndicatorPanel extends StatelessWidget {
   }
 }
 
-class _SidMatrix extends StatelessWidget {
+class _SidMatrix extends StatefulWidget {
   final String name;
   final SidIndicators ind;
 
   const _SidMatrix({required this.name, required this.ind});
 
   @override
+  State<_SidMatrix> createState() => _SidMatrixState();
+}
+
+class _SidMatrixState extends State<_SidMatrix> {
+  // Own a controller so the horizontal Scrollbar shows a persistent thumb — the
+  // 15-column matrix is wider than its fixed-width panel, and without a visible
+  // affordance the rightmost columns (CamR4/CamS4) look clipped off-screen.
+  final _hScroll = ScrollController();
+
+  @override
+  void dispose() {
+    _hScroll.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final name = widget.name;
+    final ind = widget.ind;
     return Card(
       margin: const EdgeInsets.only(bottom: 6),
       child: Padding(
@@ -106,33 +124,39 @@ class _SidMatrix extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 6),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: DataTable(
-                headingRowHeight: 28,
-                dataRowMinHeight: 32,
-                dataRowMaxHeight: 32,
-                columnSpacing: 8,
-                columns: const [
-                  DataColumn(label: Text('TF')),
-                  DataColumn(label: Text('ST(10,2)'), numeric: true),
-                  DataColumn(label: Text('ST(10,3)'), numeric: true),
-                  DataColumn(label: Text('ST(3,1)'), numeric: true),
-                  DataColumn(label: Text('EMA9'), numeric: true),
-                  DataColumn(label: Text('EMA20'), numeric: true),
-                  DataColumn(label: Text('EMA50'), numeric: true),
-                  DataColumn(label: Text('EMA100'), numeric: true),
-                  DataColumn(label: Text('EMA200'), numeric: true),
-                  DataColumn(label: Text('PSAR'), numeric: true),
-                  DataColumn(label: Text('RSI'), numeric: true),
-                  DataColumn(label: Text('VWAP'), numeric: true),
-                  DataColumn(label: Text('VWMA'), numeric: true),
-                  DataColumn(label: Text('CamR4'), numeric: true),
-                  DataColumn(label: Text('CamS4'), numeric: true),
-                ],
-                rows: _matrixTfs
-                    .map((tf) => _tfRow(context, tf, ind.tf[tf], ind.camForTf(tf)))
-                    .toList(),
+            Scrollbar(
+              controller: _hScroll,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _hScroll,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.only(bottom: 6),
+                child: DataTable(
+                  headingRowHeight: 28,
+                  dataRowMinHeight: 32,
+                  dataRowMaxHeight: 32,
+                  columnSpacing: 8,
+                  columns: const [
+                    DataColumn(label: Text('TF')),
+                    DataColumn(label: Text('ST(10,2)'), numeric: true),
+                    DataColumn(label: Text('ST(10,3)'), numeric: true),
+                    DataColumn(label: Text('ST(3,1)'), numeric: true),
+                    DataColumn(label: Text('EMA9'), numeric: true),
+                    DataColumn(label: Text('EMA20'), numeric: true),
+                    DataColumn(label: Text('EMA50'), numeric: true),
+                    DataColumn(label: Text('EMA100'), numeric: true),
+                    DataColumn(label: Text('EMA200'), numeric: true),
+                    DataColumn(label: Text('PSAR'), numeric: true),
+                    DataColumn(label: Text('RSI'), numeric: true),
+                    DataColumn(label: Text('VWAP'), numeric: true),
+                    DataColumn(label: Text('VWMA'), numeric: true),
+                    DataColumn(label: Text('CamR4'), numeric: true),
+                    DataColumn(label: Text('CamS4'), numeric: true),
+                  ],
+                  rows: _matrixTfs
+                      .map((tf) => _tfRow(context, tf, ind.tf[tf], ind.camForTf(tf)))
+                      .toList(),
+                ),
               ),
             ),
             if (ind.pdh != null || ind.pwh != null || ind.pmh != null) ...[

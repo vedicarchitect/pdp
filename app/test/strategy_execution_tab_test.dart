@@ -21,6 +21,7 @@ void main() {
     List<Map<String, dynamic>> recentEvents = const [],
     DateTime? asOf,
     List<IndexPrice>? indices,
+    PremarketStatus premarket = PremarketStatus.unknown,
   }) =>
       MonitorSnapshot(
         asOf: asOf,
@@ -76,6 +77,7 @@ void main() {
         recentEvents: recentEvents,
         indicators: indicators,
         readiness: readiness,
+        premarket: premarket,
         atmCe: atmCe,
         atmPe: atmPe,
       );
@@ -156,6 +158,28 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('BLOCKED'), findsOneWidget);
+  });
+
+  testWidgets('premarket banner shows when today\'s warmup job has not run',
+      (tester) async {
+    await pumpAt(tester, const Size(500, 900),
+        snap: snapshot(premarket: const PremarketStatus(ranToday: false)));
+
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Premarket warmup not run today'), findsOneWidget);
+  });
+
+  testWidgets('premarket banner hidden when the warmup job ran (and by default)',
+      (tester) async {
+    // Explicit ran-today…
+    await pumpAt(tester, const Size(500, 900),
+        snap: snapshot(premarket: const PremarketStatus(ranToday: true)));
+    expect(find.textContaining('Premarket warmup not run today'), findsNothing);
+
+    // …and the default (absent field / older backend) must not false-alarm.
+    await pumpAt(tester, const Size(500, 900), snap: snapshot());
+    expect(find.textContaining('Premarket warmup not run today'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('ok readiness renders no chip', (tester) async {
