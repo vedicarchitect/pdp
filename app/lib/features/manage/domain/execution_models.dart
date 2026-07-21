@@ -36,6 +36,8 @@ class LegRow {
   final double entryPrice;
   final String? entryTime;
   final String? entryReason;
+  final String? expiry; // ISO date, or null
+  final int? dte; // server-computed calendar days to expiry, or null
   final double? ltp;
   final double? mtm;
   final double? dayHigh;
@@ -60,6 +62,8 @@ class LegRow {
     required this.entryPrice,
     this.entryTime,
     this.entryReason,
+    this.expiry,
+    this.dte,
     this.ltp,
     this.mtm,
     this.dayHigh,
@@ -85,6 +89,8 @@ class LegRow {
       entryPrice: (json['entry_price'] as num?)?.toDouble() ?? 0.0,
       entryTime: json['entry_time'] as String?,
       entryReason: json['entry_reason'] as String?,
+      expiry: json['expiry'] as String?,
+      dte: (json['dte'] as num?)?.toInt(),
       ltp: (json['ltp'] as num?)?.toDouble(),
       mtm: (json['mtm'] as num?)?.toDouble(),
       dayHigh: (json['day_high'] as num?)?.toDouble(),
@@ -309,7 +315,9 @@ class AtmOptionRow {
 class UnderlyingGroup {
   final String underlying;
   final List<LegRow> legs;
-  final double dayPnl;
+  final double dayRealized;
+  final double dayUnrealized;
+  final double dayPnl; // combined realized + unrealized (server-computed)
   final String? bucket; // null when not yet evaluated
   final double? score;
   final bool doneForDay;
@@ -317,6 +325,8 @@ class UnderlyingGroup {
   const UnderlyingGroup({
     required this.underlying,
     required this.legs,
+    required this.dayRealized,
+    required this.dayUnrealized,
     required this.dayPnl,
     this.bucket,
     this.score,
@@ -330,6 +340,8 @@ class UnderlyingGroup {
     return UnderlyingGroup(
       underlying: json['underlying'] as String? ?? '',
       legs: legsRaw.map((l) => LegRow.fromJson(l as Map<String, dynamic>)).toList(),
+      dayRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
+      dayUnrealized: (totals['day_unrealized'] as num?)?.toDouble() ?? 0.0,
       dayPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
       bucket: status['bucket'] as String?,
       score: (status['score'] as num?)?.toDouble(),
@@ -399,6 +411,37 @@ class MonitorReadiness {
 
 // ─── Monitor snapshot ─────────────────────────────────────────────────────────
 
+/// Whether the standalone premarket warmup job (`task warmup`) ran for today's IST
+/// trading date. When it hasn't, the trading process still boots and trades intraday,
+/// but the deep higher-timeframe history (EMA200, weekly pivots) is unreconciled — the
+/// execution panel surfaces this as a banner recommending the job. An absent `premarket`
+/// key (older backend) is treated as "ran" so no false banner shows.
+class PremarketStatus {
+  final bool ranToday;
+  final String? date;
+  final DateTime? ranAt;
+  final int? unseededTotal;
+
+  const PremarketStatus({
+    required this.ranToday,
+    this.date,
+    this.ranAt,
+    this.unseededTotal,
+  });
+
+  static const PremarketStatus unknown = PremarketStatus(ranToday: true);
+
+  factory PremarketStatus.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return unknown;
+    return PremarketStatus(
+      ranToday: json['ran_today'] as bool? ?? false,
+      date: json['date'] as String?,
+      ranAt: DateTime.tryParse(json['ran_at'] as String? ?? '')?.toLocal(),
+      unseededTotal: (json['unseeded_total'] as num?)?.toInt(),
+    );
+  }
+}
+
 class MonitorSnapshot {
   final DateTime? asOf;
   final List<IndexPrice> indices;
@@ -415,6 +458,7 @@ class MonitorSnapshot {
   final List<Map<String, dynamic>> recentEvents;
   final Map<String, SidIndicators> indicators;
   final MonitorReadiness readiness;
+  final PremarketStatus premarket;
   final AtmOptionRow? atmCe;
   final AtmOptionRow? atmPe;
 
@@ -434,6 +478,7 @@ class MonitorSnapshot {
     required this.recentEvents,
     required this.indicators,
     this.readiness = MonitorReadiness.ok,
+    this.premarket = PremarketStatus.unknown,
     this.atmCe,
     this.atmPe,
   });
@@ -491,6 +536,7 @@ class MonitorSnapshot {
       recentEvents: recentEvents,
       indicators: indicators,
       readiness: MonitorReadiness.fromJson(status['readiness'] as Map<String, dynamic>?),
+      premarket: PremarketStatus.fromJson(status['premarket'] as Map<String, dynamic>?),
       atmCe: atmCeRaw != null ? AtmOptionRow.fromJson(atmCeRaw) : null,
       atmPe: atmPeRaw != null ? AtmOptionRow.fromJson(atmPeRaw) : null,
     );

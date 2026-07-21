@@ -22,6 +22,7 @@ import pytest
 from pdp.indicators.engine import IndicatorEngine
 from pdp.indicators.supertrend import UP
 from pdp.indicators.warmup import (
+    _bars_disagree,
     _derive_bars_from_1m,
     _fetch_from_dhan,
     _ninety_day_chunks,
@@ -55,6 +56,15 @@ class _FakeCol:
 
     def find(self, query, sort=None):  # mirrors motor's signature used in warmup
         self.queries.append(query)
+        # Real Mongo filters by metadata.timeframe; a derivable-TF entry (30m/1H) now
+        # also queries "1m" unconditionally for reconciliation (bar-warmup-reconcile-
+        # from-1m) — return [] for any timeframe other than the one this fixture was
+        # built for, so that unrelated query doesn't get handed this fixture's docs.
+        tf = query.get("metadata.timeframe")
+        if self._docs and tf is not None:
+            fixture_tf = self._docs[0].get("_fixture_timeframe")
+            if fixture_tf is not None and tf != fixture_tf:
+                return _FakeCursor([])
         return _FakeCursor(self._docs)
 
 
@@ -67,8 +77,14 @@ class _FakeDB:
         return self.col
 
 
-def _bar_docs(closes: list[float]) -> list[dict]:
-    """Ascending 5-minute bars within the warmup lookback window."""
+def _bar_docs(closes: list[float], *, timeframe: str = "5m") -> list[dict]:
+    """Ascending 5-minute bars within the warmup lookback window.
+
+    Tagged with ``_fixture_timeframe`` (a test-only key, ignored by
+    ``_fetch_from_mongo``'s doc parsing) so ``_FakeCol.find`` can emulate Mongo's
+    per-timeframe filtering — needed now that a derivable-TF entry also queries "1m"
+    unconditionally for reconciliation (bar-warmup-reconcile-from-1m).
+    """
     base = datetime.now(UTC) - timedelta(minutes=5 * len(closes))
     docs = []
     for i, c in enumerate(closes):
@@ -81,6 +97,7 @@ def _bar_docs(closes: list[float]) -> list[dict]:
                 "close": c,
                 "volume": 0,
                 "oi": 0,
+                "_fixture_timeframe": timeframe,
             }
         )
     return docs
@@ -638,7 +655,7 @@ async def test_warmup_short_emits_exactly_one_warning_with_counts():
     import pdp.indicators.warmup as warmup_module
 
     engine = IndicatorEngine()
-    db = _FakeDB(_bar_docs([22000 + i for i in range(150)]))
+    db = _FakeDB(_bar_docs([22000 + i for i in range(150)], timeframe="30m"))
     watchlist = [
         {
             "security_id": "13",
@@ -949,6 +966,62 @@ async def test_warmup_derives_30m_from_1m_and_skips_dhan():
 
 
 @pytest.mark.asyncio
+async def test_warmup_reconcile_false_seeds_engine_without_writing():
+    """API boot path (reconcile=False): the fuller 1m-derived series still seeds the
+    engine, but market_bars is never written — no delete_many, no insert_many. This is
+    the decoupling guarantee that keeps the trading process's boot off the Mongo write
+    path (warmup-decouple directive); the write-heavy reconcile is the premarket job's."""
+    engine = IndicatorEngine()
+    db = _TfAwareDB({"30m": _bar_docs([22000 + i for i in range(3)]), "1m": _min_docs(6300)})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["30m"]}]
+
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]) as mock_fetch:
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist, reconcile=False)
+
+    # 30m is not an intraday top-up TF, so the read-only boot path never calls Dhan…
+    mock_fetch.assert_not_called()
+    # …and it never writes to market_bars.
+    assert db.col.deleted == [], "reconcile=False must not delete_many on market_bars"
+    assert db.col.inserted == [], "reconcile=False must not insert_many on market_bars"
+    # But the engine is still seeded from the derived series — intraday is unaffected.
+    assert engine.get("13", "30m") is not None
+
+
+@pytest.mark.asyncio
+async def test_warmup_reconcile_false_intraday_topup_fetches_but_does_not_persist():
+    """On the read-only boot path a short intraday timeframe (15m) may still fetch a
+    bounded Dhan top-up so live signals seed even if the premarket job never ran — but
+    the fetched bars are not written back to market_bars."""
+    engine = IndicatorEngine()
+    # Thin 15m, no 1m to derive from -> forces the Dhan fallback branch.
+    db = _TfAwareDB({"15m": _bar_docs([22000 + i for i in range(3)]), "1m": []})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["15m"]}]
+
+    topup = [_bc(datetime.now(UTC) - timedelta(days=1), 100.0, timeframe="15m")]
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=topup) as mock_fetch:
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist, reconcile=False)
+
+    mock_fetch.assert_called_once()  # 15m IS an intraday top-up timeframe
+    assert db.col.inserted == [], "reconcile=False must not persist the Dhan top-up"
+
+
+@pytest.mark.asyncio
+async def test_warmup_reconcile_false_skips_higher_tf_dhan_topup():
+    """A higher timeframe (1H) short on depth is NOT topped up on the read-only boot
+    path — its ~200-day window belongs to the premarket job. It stays unseeded (surfaced
+    by the Premarket badge) rather than pulling a heavy fetch onto the boot path."""
+    engine = IndicatorEngine()
+    db = _TfAwareDB({"1H": _bar_docs([22000 + i for i in range(3)]), "1m": []})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["1H"]}]
+
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]) as mock_fetch:
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist, reconcile=False)
+
+    mock_fetch.assert_not_called()
+    assert db.col.inserted == []
+
+
+@pytest.mark.asyncio
 async def test_warmup_derive_falls_back_to_dhan_when_1m_absent():
     """When 1m coverage is itself missing, the chunked Dhan fallback still fires."""
     engine = IndicatorEngine()
@@ -959,3 +1032,150 @@ async def test_warmup_derive_falls_back_to_dhan_when_1m_absent():
         await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
 
     mock_fetch.assert_called_once()
+
+
+# ── Reconciliation (bar-warmup-reconcile-from-1m) ──────────────────────────────
+
+
+def _bc(bar_time: datetime, close: float, *, timeframe: str = "15m") -> BarClosed:
+    return BarClosed(
+        security_id="13",
+        timeframe=timeframe,
+        bar_time=bar_time,
+        open=Decimal(str(close)),
+        high=Decimal(str(close + 1)),
+        low=Decimal(str(close - 1)),
+        close=Decimal(str(close)),
+        volume=1,
+        oi=0,
+    )
+
+
+def test_bars_disagree_detects_duplicate_boundary():
+    t0 = datetime(2026, 7, 14, 4, 0, tzinfo=UTC)
+    stored = [_bc(t0, 100), _bc(t0, 101)]  # same boundary, two bars (flush/late-tick race)
+    derived = [_bc(t0, 100)]
+    disagrees, reasons = _bars_disagree(stored, derived)
+    assert disagrees is True
+    assert reasons["duplicates"] == 1
+    assert reasons["gaps"] == 0
+    assert reasons["mismatched"] == 0
+
+
+def test_bars_disagree_detects_gap():
+    t0 = datetime(2026, 7, 17, 4, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=15)
+    stored = [_bc(t0, 100)]
+    derived = [_bc(t0, 100), _bc(t1, 102)]  # 1m covers a boundary stored is missing
+    disagrees, reasons = _bars_disagree(stored, derived)
+    assert disagrees is True
+    assert reasons["gaps"] == 1
+    assert reasons["duplicates"] == 0
+    assert reasons["mismatched"] == 0
+
+
+def test_bars_disagree_detects_mismatched_ohlcv():
+    t0 = datetime(2026, 7, 14, 4, 0, tzinfo=UTC)
+    stored = [_bc(t0, 100)]
+    derived = [_bc(t0, 105)]  # same boundary, different close
+    disagrees, reasons = _bars_disagree(stored, derived)
+    assert disagrees is True
+    assert reasons["mismatched"] == 1
+    assert reasons["duplicates"] == 0
+    assert reasons["gaps"] == 0
+
+
+def test_bars_disagree_false_on_healthy_store():
+    t0 = datetime(2026, 7, 14, 4, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=15)
+    stored = [_bc(t0, 100), _bc(t1, 102)]
+    derived = [_bc(t0, 100), _bc(t1, 102)]
+    disagrees, reasons = _bars_disagree(stored, derived)
+    assert disagrees is False
+    assert reasons == {"duplicates": 0, "gaps": 0, "mismatched": 0}
+
+
+def _min_docs_for_15m_dupe() -> tuple[list[dict], list[dict]]:
+    """15 minutes of 1m bars (one clean 15m bucket) plus a stored 15m series that
+    duplicates that same bucket — reproduces the exact Jul 14 corruption (count
+    already >= a trivial target, but the series itself is wrong)."""
+    base = datetime.now(UTC) - timedelta(days=12)
+    base = base.replace(hour=4, minute=0, second=0, microsecond=0)  # 09:30 IST, mid-bucket-aligned
+    bars_1m = [
+        {
+            "ts": base + timedelta(minutes=i),
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 100.0 + i,
+            "volume": 1,
+            "oi": 0,
+        }
+        for i in range(15)
+    ]
+    duplicated_15m = [
+        {"ts": base, "open": 100.0, "high": 105.0, "low": 95.0, "close": 114.0, "volume": 15, "oi": 0},
+        {"ts": base, "open": 100.0, "high": 105.0, "low": 95.0, "close": 114.0, "volume": 15, "oi": 0},
+    ]
+    return bars_1m, duplicated_15m
+
+
+@pytest.mark.asyncio
+async def test_warm_one_reconciles_duplicate_store_even_when_depth_met():
+    """Regression test for the Jul 14 scenario: stored 15m count is not below the
+    (tiny, test-scale) target, but the series holds a duplicate bucket. The bare
+    depth check alone would skip reconciliation; this must still fire."""
+    bars_1m, duplicated_15m = _min_docs_for_15m_dupe()
+    engine = IndicatorEngine()
+    db = _TfAwareDB({"15m": duplicated_15m, "1m": bars_1m})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["15m"]}]
+
+    # Only 1 bucket's worth of 1m data is fixtured (below the 200-bar floor), so the
+    # depth-shortfall branch still runs after reconciliation and calls the Dhan
+    # fallback (mocked) to try to top up further — that's a separate, expected path.
+    # What this test asserts is that reconciliation itself fired and replaced the
+    # duplicated 2-bar bucket with the correct single derived bar.
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]):
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
+
+    assert db.col.deleted, "duplicate 15m store must be replaced via delete-then-insert"
+    assert db.col.inserted
+    reconcile_insert = db.col.inserted[0]
+    assert len(reconcile_insert) == 1, "duplicate bucket collapsed to exactly one bar"
+
+
+@pytest.mark.asyncio
+async def test_warm_one_skips_rewrite_on_healthy_store():
+    """A stored higher-TF series that already agrees with the 1m-derived rollup must
+    not be rewritten on every boot (idempotency/perf guard)."""
+    base = datetime.now(UTC) - timedelta(days=12)
+    base = base.replace(hour=4, minute=0, second=0, microsecond=0)
+    bars_1m = [
+        {
+            "ts": base + timedelta(minutes=i),
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "close": 100.0 + i,
+            "volume": 1,
+            "oi": 0,
+        }
+        for i in range(15)
+    ]
+    # Matches exactly what _derive_bars_from_1m produces for this bucket: open =
+    # first 1m open (100), high/low = the constant 105/95 across all 15 bars,
+    # close = last 1m close (100 + 14 = 114), volume = sum of 1m volumes (15).
+    healthy_15m = [
+        {"ts": base, "open": 100.0, "high": 105.0, "low": 95.0, "close": 114.0, "volume": 15, "oi": 0},
+    ]
+    engine = IndicatorEngine()
+    db = _TfAwareDB({"15m": healthy_15m, "1m": bars_1m})
+    watchlist = [{"security_id": "13", "exchange_segment": "IDX_I", "timeframes": ["15m"]}]
+
+    # Depth-shortfall still triggers the (mocked) Dhan fallback for this tiny fixture —
+    # what matters here is that reconciliation itself did NOT rewrite the healthy bucket.
+    with patch("pdp.indicators.warmup._fetch_from_dhan", return_value=[]):
+        await warm_up_indicator_engine(engine, db, _DHAN_CREDS, watchlist)
+
+    assert not db.col.deleted, "a healthy store must not be rewritten"
+    assert not db.col.inserted

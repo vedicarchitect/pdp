@@ -22,7 +22,9 @@ watchlist:
         period: 10
         multiplier: 2.0
       - family: psar
-      - family: vwap
+      # vwap intentionally omitted: index sid carries zero volume so VWAPTracker can
+      # never converge, and bias.py doesn't consume it anyway (strangle-drop-unused-vwap-watchlist).
+      # Re-add on the futures contract sid once futures market_bars history exists for backtest parity.
       - family: pivots
       - family: period_levels
   - security_id: "13"       # same index, weekly-only pivot tracker for cam_weekly

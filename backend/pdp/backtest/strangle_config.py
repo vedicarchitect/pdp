@@ -138,6 +138,10 @@ class StrangleConfig:
 
     # Behaviour
     neutral_no_trade: bool = True       # skip the neutral bucket
+    # India-VIX entry gate. Live parity: disabled (5yr data shows it costs ~Rs 33L +
+    # raises MaxDD). Read by strangle_run.py; when False the runner treats every bar
+    # as VIX-safe (equivalent to --no-vix-gate).
+    vix_gate_enabled: bool = True
 
     # Bias engine
     weights: BiasWeights = field(default_factory=BiasWeights)

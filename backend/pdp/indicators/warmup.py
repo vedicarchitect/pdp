@@ -48,6 +48,13 @@ _TF_SESSION_BARS: dict[str, int] = {
 }
 _DEFAULT_SESSION_BARS = 75
 
+# Timeframes for which the API boot path (reconcile=False) may still fetch a bounded
+# Dhan current-data top-up when the stored depth is short — so intraday signals seed even
+# if the premarket job did not run. Higher timeframes are left to the premarket reconcile
+# job: their warmup window is ~200 calendar days, and fetching/rewriting that on the boot
+# path is exactly the Mongo CPU spike this decoupling removes (warmup-decouple directive).
+_INTRADAY_TOPUP_TFS: frozenset[str] = frozenset({"5m", "15m"})
+
 # Period-like keys scanned across every configured indicator family to derive
 # the warmup depth. Deliberately broad (covers ema/rsi/macd/vwma/elder_impulse)
 # rather than family-specific, so a new family's period configuration is picked
@@ -146,6 +153,35 @@ def _ninety_day_chunks(
     return out
 
 
+def _bars_disagree(stored: list[BarClosed], derived: list[BarClosed]) -> tuple[bool, dict[str, int]]:
+    """Compare a stored higher-timeframe series against its 1m-derived rollup at the
+    bucket level. Catches what a bare length/depth check misses: a feed-restart race can
+    leave *duplicate* bars at one boundary while another boundary is silently dropped, so
+    ``len(stored)`` can still land at or above the required depth while the series itself
+    is wrong (`bar-warmup-reconcile-from-1m`)."""
+    stored_by_time: dict[datetime, list[BarClosed]] = {}
+    for b in stored:
+        stored_by_time.setdefault(b.bar_time, []).append(b)
+    derived_by_time = {b.bar_time: b for b in derived}
+
+    duplicates = sum(1 for bucket in stored_by_time.values() if len(bucket) > 1)
+    gaps = sum(1 for t in derived_by_time if t not in stored_by_time)
+    mismatched = sum(
+        1
+        for t, d in derived_by_time.items()
+        if t in stored_by_time
+        and len(stored_by_time[t]) == 1
+        and (
+            stored_by_time[t][0].open != d.open
+            or stored_by_time[t][0].high != d.high
+            or stored_by_time[t][0].low != d.low
+            or stored_by_time[t][0].close != d.close
+        )
+    )
+    reasons = {"duplicates": duplicates, "gaps": gaps, "mismatched": mismatched}
+    return bool(duplicates or gaps or mismatched), reasons
+
+
 def _derive_bars_from_1m(bars_1m: list[BarClosed], tf_minutes: int, timeframe: str) -> list[BarClosed]:
     """Roll up 1m ``BarClosed`` into ``timeframe`` buckets via the session-anchored
     ``_bar_boundary`` — the same bucket function the live ``BarAggregator`` uses, so a
@@ -193,18 +229,45 @@ def _prior_trading_day(holiday_set: set[date], *, _today: date | None = None) ->
     return d
 
 
+def premarket_marker_key(ist_date: date) -> str:
+    """Redis key recording that the premarket warmup job (`task warmup`) ran on a given
+    IST trading date. The standalone premarket script sets it on completion; the Premarket
+    readiness component reads it so the execution panel can flag a session that started
+    without a premarket run (warmup-decouple directive). 24h TTL — presence is scoped to
+    its own IST date, so a stale key from yesterday never reads as "ran today"."""
+    return f"warmup:premarket:{ist_date.isoformat()}"
+
+
 async def warm_up_indicator_engine(
     engine: IndicatorEngine,
     mongo_db: AsyncIOMotorDatabase,
     settings: Settings,
     watchlist: list[dict],
+    *,
+    reconcile: bool = True,
 ) -> None:
-    """Seed the IndicatorEngine from MongoDB or Dhan API for each watchlist entry."""
+    """Seed the IndicatorEngine from MongoDB or Dhan API for each watchlist entry.
+
+    ``reconcile`` controls whether this run may *write* to ``market_bars``:
+
+    - ``True`` (premarket job, ``scripts/warmup_premarket.py``): the derive-from-1m
+      reconcile persists — ``_replace_derived_bars`` / ``_persist_bars`` — so the store
+      self-heals deep higher-timeframe history. This is the write-heavy path and must
+      only run off the trading process's boot path (a ~200-day delete-then-insert on the
+      ``market_bars`` timeseries collection is CPU-expensive — the spike this decoupling
+      removes).
+    - ``False`` (API/engine boot, ``FeedEngineGroup``): read-only seeding — derive in
+      memory to seed the engine but never delete/insert; only short intraday timeframes
+      (``_INTRADAY_TOPUP_TFS``) may fetch a bounded Dhan top-up (not persisted) when the
+      stored depth is short. Higher-timeframe depth is the premarket job's responsibility;
+      until it runs, those periods stay unseeded (surfaced by the Premarket readiness
+      badge), which never blocks intraday trading.
+    """
     from pdp.options.gap_backfill import holidays as _load_holidays
 
     holiday_set = _load_holidays(settings.NSE_HOLIDAYS_JSON)
     prior_day = _prior_trading_day(holiday_set)
-    log.info("indicator_warmup_start", prior_day=str(prior_day))
+    log.info("indicator_warmup_start", prior_day=str(prior_day), reconcile=reconcile)
 
     for entry in watchlist:
         sid = str(entry["security_id"])
@@ -233,7 +296,8 @@ async def warm_up_indicator_engine(
             )
             try:
                 await _warm_one(
-                    engine, mongo_db, settings, sid, segment, tf, since, warmup_from, prior_day, indicators, req
+                    engine, mongo_db, settings, sid, segment, tf, since, warmup_from,
+                    prior_day, indicators, req, reconcile=reconcile,
                 )
             except Exception as exc:
                 log.warning(
@@ -256,6 +320,8 @@ async def _warm_one(
     prior_day: date,
     indicators: list[dict[str, Any]],
     target_bars: int,
+    *,
+    reconcile: bool = True,
 ) -> None:
     col = mongo_db["market_bars"]
     bars = await _fetch_from_mongo(col, security_id, timeframe, since)
@@ -263,11 +329,14 @@ async def _warm_one(
     # target_bars is the depth required by the configured indicator families
     # (derive_bars x max period, floor 200) — see required_bars().
     #
-    # Preferred top-up: derive a derivable higher timeframe (15m/30m/1H) from the 1m
-    # series already in Mongo — no live API, and it never trips Dhan's 90-day intraday
-    # cap. Only when 1m coverage is itself insufficient do we fall back to a chunked
-    # Dhan intraday fetch. See `indicator-warmup-derive-from-1m`.
-    if len(bars) < target_bars and timeframe in _DERIVABLE_TF_MINUTES:
+    # Preferred top-up/reconcile: derive a derivable higher timeframe (15m/30m/1H) from
+    # the 1m series already in Mongo — no live API, and it never trips Dhan's 90-day
+    # intraday cap. This runs *unconditionally* (not only when short on depth): a
+    # feed-restart race can leave duplicate bars at one boundary while dropping another,
+    # which passes a bare depth check while still corrupting the tracker — see
+    # `bar-warmup-reconcile-from-1m`. Only when 1m coverage is itself insufficient to
+    # cover the window do we fall back to a chunked Dhan intraday fetch.
+    if timeframe in _DERIVABLE_TF_MINUTES:
         bars_1m = await _fetch_from_mongo(col, security_id, "1m", since)
         if bars_1m:
             now = datetime.now(UTC)
@@ -277,29 +346,60 @@ async def _warm_one(
                 if bar_is_complete(b.bar_time, timeframe, now)
             ]
             if len(derived) > len(bars):
-                await _replace_derived_bars(col, security_id, timeframe, since, derived)
+                # reconcile=False (API boot): still seed the engine from the fuller
+                # derived series, but never write it back — the delete-then-insert is the
+                # premarket job's job (warmup-decouple directive).
+                if reconcile:
+                    await _replace_derived_bars(col, security_id, timeframe, since, derived)
                 log.info(
                     "indicator_warmup_derived_from_1m",
                     security_id=security_id,
                     timeframe=timeframe,
                     derived=len(derived),
                     from_1m=len(bars_1m),
+                    persisted=reconcile,
                 )
                 bars = derived
+            elif derived:
+                disagrees, reasons = _bars_disagree(bars, derived)
+                if disagrees:
+                    if reconcile:
+                        await _replace_derived_bars(col, security_id, timeframe, since, derived)
+                    log.info(
+                        "indicator_warmup_reconciled_from_1m",
+                        security_id=security_id,
+                        timeframe=timeframe,
+                        derived=len(derived),
+                        stored=len(bars),
+                        persisted=reconcile,
+                        **reasons,
+                    )
+                    bars = derived
 
-    if len(bars) < target_bars and settings.DHAN_CLIENT_ID and settings.DHAN_ACCESS_TOKEN:
+    # On the API boot path (reconcile=False) only short intraday timeframes may top up
+    # from Dhan — a higher-timeframe top-up spans ~200 calendar days and belongs to the
+    # premarket job. The fetched bars seed the engine but are not persisted on boot.
+    topup_allowed = reconcile or timeframe in _INTRADAY_TOPUP_TFS
+    if (
+        topup_allowed
+        and len(bars) < target_bars
+        and settings.DHAN_CLIENT_ID
+        and settings.DHAN_ACCESS_TOKEN
+    ):
         log.info(
             "indicator_warmup_fetching_from_api",
             security_id=security_id,
             timeframe=timeframe,
             mongo_count=len(bars),
             target=target_bars,
+            persisted=reconcile,
         )
         api_bars = await asyncio.get_running_loop().run_in_executor(
             None, _fetch_from_dhan, settings, security_id, segment, timeframe, warmup_from
         )
         if api_bars:
-            await _persist_bars(col, api_bars)
+            if reconcile:
+                await _persist_bars(col, api_bars)
             existing_times = {b.bar_time for b in bars}
             new_bars = [b for b in api_bars if b.bar_time not in existing_times]
             bars = sorted(new_bars + bars, key=lambda b: b.bar_time)

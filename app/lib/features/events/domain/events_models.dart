@@ -26,14 +26,18 @@ class AppEvent {
     // (INFO/WARNING/ERROR/CRITICAL). Read defensively and normalise here so the rest
     // of the app can switch on lowercase severities.
     final tsRaw = (json['ts'] ?? json['timestamp']) as String?;
+    // The REST `EventOut` envelope nests `underlying`/`timeframe`/`title` inside
+    // `data`; the WS frame (`Event.to_dict()`) may carry them top-level. Read
+    // top-level first, then fall back to the nested `data` map.
+    final data = (json['data'] as Map?)?.cast<String, dynamic>() ?? const {};
     return AppEvent(
       id: (json['id'] ?? '').toString(),
       securityId: json['security_id'] as String?,
-      underlying: json['underlying'] as String?,
-      timeframe: json['timeframe'] as String?,
+      underlying: (json['underlying'] ?? data['underlying']) as String?,
+      timeframe: (json['timeframe'] ?? data['timeframe']) as String?,
       eventType: (json['event_type'] ?? '').toString(),
       severity: (json['severity'] as String? ?? 'info').toLowerCase(),
-      title: json['title'] as String?,
+      title: (json['title'] ?? data['title']) as String?,
       message: (json['message'] ?? '').toString(),
       timestamp: tsRaw != null ? DateTime.parse(tsRaw) : DateTime.now(),
     );

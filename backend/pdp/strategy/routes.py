@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from pdp.deps import parse_ist_date, require_auth
+from pdp.instruments.expiry_calendar import dte as _calendar_dte
 from pdp.strategy import unified_registry
 from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost
 from pdp.strategy.schemas import (
@@ -624,6 +625,39 @@ async def _build_indicator_cell(
     return await _build_indicator_cell_from_redis(redis, sid, tf, fut_sid)
 
 
+async def _get_premarket_status(redis: Any) -> dict[str, Any]:
+    """Whether the standalone premarket warmup job (`task warmup`) ran for today's IST
+    trading date. Drives the execution panel's Premarket banner: a session that boots
+    without a premarket run still trades intraday, but the deep higher-timeframe history
+    (EMA200, weekly pivots) is only reconciled by that job — until it runs those periods
+    stay unconverged. See the warmup-decouple directive."""
+    import json
+
+    from pdp.indicators.warmup import premarket_marker_key
+
+    ist_date = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    base = {"ran_today": False, "date": ist_date.isoformat()}
+    if redis is None:
+        return base
+    try:
+        raw = await redis.get(premarket_marker_key(ist_date))
+    except Exception as exc:
+        log.warning("premarket_status_read_failed", exc=str(exc))
+        return base
+    if not raw:
+        return base
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        data = {}
+    return {
+        "ran_today": True,
+        "date": ist_date.isoformat(),
+        "ran_at": data.get("ran_at"),
+        "unseeded_total": data.get("unseeded_total"),
+    }
+
+
 async def _get_matrix_futures_sids(engine: Any, redis: Any) -> dict[str, str]:
     """Index sid → front-month futures sid, from the in-process engine or its Redis mirror
     (``matrix:futures_sids``, published once at startup by ``FeedEngineGroup``)."""
@@ -786,6 +820,8 @@ async def strangle_monitor(
         second=0,
         microsecond=0,
     )
+    # IST calendar date (UTC+5:30) for server-side DTE so the client needs no date lib.
+    today_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
 
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
     unrealized_by_underlying: dict[str, float] = {}
@@ -800,6 +836,17 @@ async def strangle_monitor(
         und = strategy.underlying  # all legs under same underlying for now
         for leg in state["legs"]:
             leg_enriched = dict(leg)
+            # Server-computed DTE: calendar days from IST-today to the leg's expiry.
+            # `expiry` (ISO date) is emitted by DirectionalStrangle.state(); dte is None
+            # when expiry is absent so the client can show '--' without a date library.
+            _exp = leg.get("expiry")
+            _dte: int | None = None
+            if _exp:
+                try:
+                    _dte = _calendar_dte(today_ist, date.fromisoformat(_exp))
+                except (ValueError, TypeError):
+                    _dte = None
+            leg_enriched["dte"] = _dte
             _leg_entries.append((und, leg_enriched))
             unrealized_by_underlying[und] = unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
 
@@ -839,14 +886,23 @@ async def strangle_monitor(
         for i, s in enumerate(states)
     }
 
+    # Per-underlying realized P&L from each strategy instance's own state() (each
+    # strategy owns exactly one underlying), so the group totals reflect real realized
+    # figures instead of a hardcoded 0.0. day_pnl = realized + unrealized per group.
+    realized_by_underlying: dict[str, float] = {}
+    for i, s in enumerate(states):
+        realized_by_underlying[strategies[i].underlying] = float(s.get("day_realized", 0.0) or 0.0)
+
     groups = [
         {
             "underlying": und,
             "legs": legs,
             "totals": {
-                "day_realized": 0.0,  # per-index realized not tracked separately
+                "day_realized": realized_by_underlying.get(und, 0.0),
                 "day_unrealized": unrealized_by_underlying.get(und, 0.0),
-                "day_pnl": unrealized_by_underlying.get(und, 0.0),
+                "day_pnl": round(
+                    realized_by_underlying.get(und, 0.0) + unrealized_by_underlying.get(und, 0.0), 2
+                ),
             },
             "status": underlying_status.get(und, {}),
         }
@@ -868,6 +924,10 @@ async def strangle_monitor(
         (r.state for r in readinesses), key=lambda s: _state_rank[s], default="ok"
     )
 
+    # Global premarket-warmup signal (not per-strategy) — drives the execution panel's
+    # Premarket banner recommending `task warmup` when today's deep-history run is missing.
+    premarket = await _get_premarket_status(redis)
+
     # ── Overall totals ──────────────────────────────────────────────────────
     totals = {
         "day_realized": sum(s.get("day_realized", 0.0) for s in states),
@@ -884,6 +944,7 @@ async def strangle_monitor(
         "n_open_momentum": sum(s.get("n_open_momentum", 0) for s in states),
         "by_underlying": underlying_status,
         "readiness": {"state": overall_readiness_state, "by_underlying": readiness_by_underlying},
+        "premarket": premarket,
     }
 
     # ── Recent events (newest-first, closed legs + exit reasons) ───────────

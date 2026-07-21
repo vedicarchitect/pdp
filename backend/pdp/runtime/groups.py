@@ -280,7 +280,13 @@ class FeedEngineGroup:
 
         if _watchlist_dicts:
             try:
-                await warm_up_indicator_engine(indicator_engine, mongo_db, settings, _watchlist_dicts)
+                # reconcile=False: the trading process's boot path seeds the engine
+                # read-only (no market_bars delete/insert). The write-heavy deep-history
+                # reconcile is owned by the standalone premarket job (`task warmup`) so it
+                # never runs on this critical path — see warmup-decouple directive.
+                await warm_up_indicator_engine(
+                    indicator_engine, mongo_db, settings, _watchlist_dicts, reconcile=False
+                )
             except Exception as exc:
                 log.warning("indicator_warmup_failed", exc=str(exc))
 

@@ -19,7 +19,10 @@ Dhan scrip master loader, NSE/BSE/MCX instrument metadata, expiry calendar.
 
 - `security_id` is the Dhan internal ID (e.g. NIFTY index = `"13"`)
 - Scrip master URL: `DHAN_SCRIPMASTER_URL` (set in `.env`)
-- `InstrumentLoader` runs on API startup if `DHAN_CLIENT_ID` is set
+- `InstrumentLoader` does **not** run on API/engine startup. It's driven by
+  `ScripRefreshScheduler` (`pdp/instruments/scheduler.py`, started in `OpsGroup` —
+  `pdp/runtime/groups.py`, role `ops`/`all`) on its own schedule, or manually via
+  `scripts/snapshot_instruments.py`.
 
 ## Expiry calendar (`option-bars-expiry-gap-backfill`, 2026-07-17)
 

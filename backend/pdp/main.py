@@ -65,7 +65,11 @@ async def lifespan(app: FastAPI):
         for group in reversed(started):
             try:
                 log.info("stopping_group", group=group.name)
-                await group.stop(app)
+                # Bound each group's teardown: a single group blocked on a pegged Mongo
+                # drain must not wedge the whole shutdown (the hang that forced SIGKILL).
+                await asyncio.wait_for(group.stop(app), timeout=25.0)
+            except TimeoutError:
+                log.error("group_stop_timeout", group=group.name, timeout=25.0)
             except Exception as exc:
                 log.error("group_stop_failed", group=group.name, exc=str(exc))
 

@@ -7,6 +7,10 @@ services:
   postgres:
     image: postgres:16
     container_name: pdp-postgres
+    # Resource caps (host = 8 CPU / 7.22 GB). These are limits, not reservations — a
+    # spike in one service can no longer starve the host, the app, or another container's
+    # healthcheck. Postgres (orders/trades ledger) is light here.
+    mem_limit: 1g
     environment:
       POSTGRES_USER: pdp
       POSTGRES_PASSWORD: pdp
@@ -24,11 +28,14 @@ services:
   redis:
     image: redis:7-alpine
     container_name: pdp-redis
+    mem_limit: 768m
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+    # maxmemory bounds the hot cache / pub-sub; LTP keys carry short TTLs so allkeys-lru
+    # only ever evicts genuinely cold data well before the cap is reached.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -38,19 +45,33 @@ services:
   mongo:
     image: mongo:7
     container_name: pdp-mongo
+    # CPU cap (4 of 8 cores) so a market_bars write burst can never peg the whole host and
+    # starve the trading process; mem cap + an explicit WiredTiger cache size stop Mongo
+    # sizing its cache to the full host RAM (the default) and thrashing eviction under
+    # pressure. Data is on the named volume, safe across container recreation.
+    cpus: 4.0
+    mem_limit: 3g
+    command: ["--wiredTigerCacheSizeGB", "1.5"]
     ports:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    # Relaxed from 5s/3s: the check spawns a full mongosh each run, and under a CPU burst a
+    # 3s timeout with no start_period made the check itself time out → false `unhealthy`
+    # flapping. 30s/10s with a 60s grace reflects real liveness without adding load.
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   opensearch:
     image: opensearchproject/opensearch:2.17.1
     container_name: pdp-opensearch
+    # Heap is already fixed at -Xmx512m below; this caps the uncapped off-heap footprint
+    # (Lucene mmap / page cache) so OpenSearch can't balloon under the host either.
+    mem_limit: 1.5g
     environment:
       # Single-node dev cluster, security plugin disabled (local only — enable + TLS in AWS).
       discovery.type: single-node

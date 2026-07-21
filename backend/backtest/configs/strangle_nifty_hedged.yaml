@@ -1,6 +1,7 @@
 underlying: NIFTY
 security_id: "13"
 adjustment_on_flip: true
+vix_gate_enabled: false        # parity with live: 5yr data shows the gate costs ~Rs 33L + raises MaxDD
 momentum_enabled: false
 momentum_premium_target: 50000.0
 momentum_score_threshold: 0.5

@@ -169,6 +169,7 @@ class _PositionsColumn extends StatelessWidget {
       physics: nested ? const NeverScrollableScrollPhysics() : null,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
+        _PremarketBanner(premarket: snap.premarket),
         _OverallStatusBar(snap: snap),
         const SizedBox(height: 6),
         _RecentEventsStrip(events: snap.recentEvents),
@@ -352,6 +353,8 @@ class _UnderlyingSection extends StatelessWidget {
     final openLegs = group?.legs ?? const [];
     final bkt = group?.bucket ?? '--';
     final dayPnl = group?.dayPnl ?? 0.0;
+    final dayRealized = group?.dayRealized ?? 0.0;
+    final dayUnrealized = group?.dayUnrealized ?? 0.0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -368,8 +371,26 @@ class _UnderlyingSection extends StatelessWidget {
               const SizedBox(width: 8),
               _BucketChip(bucket: bkt),
               const Spacer(),
+              // Combined per-underlying P&L (realized + unrealized), bold.
               PnlText(dayPnl,
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            ],
+          ),
+        ),
+        // Breakdown line so the combined figure above is legible at a glance.
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text('realized ', style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).textTheme.bodySmall?.color?.withValues(alpha: 0.6),
+                  )),
+              PnlText(dayRealized, style: Theme.of(context).textTheme.bodySmall),
+              Text('  ·  unrealized ', style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).textTheme.bodySmall?.color?.withValues(alpha: 0.6),
+                  )),
+              PnlText(dayUnrealized, style: Theme.of(context).textTheme.bodySmall),
             ],
           ),
         ),
@@ -407,6 +428,7 @@ class _OpenLegsTable extends StatelessWidget {
         columns: const [
           DataColumn(label: Text('Type')),
           DataColumn(label: Text('Strike'), numeric: true),
+          DataColumn(label: Text('DTE'), numeric: true),
           DataColumn(label: Text('Lots'), numeric: true),
           DataColumn(label: Text('Entry'), numeric: true),
           DataColumn(label: Text('LTP'), numeric: true),
@@ -422,6 +444,9 @@ class _OpenLegsTable extends StatelessWidget {
           return DataRow(cells: [
             DataCell(_Tag(tag: tag, color: tagColor)),
             DataCell(Text(leg.strike.toStringAsFixed(0))),
+            // DTE distinguishes a rehydrated multi-day-old leg from a same-day entry
+            // even when entry_time is null (rehydrated legs have no timestamp).
+            DataCell(Text(leg.dte != null ? '${leg.dte}' : '--')),
             DataCell(Text('${leg.lots}')),
             DataCell(Text(leg.entryPrice > 0 ? leg.entryPrice.toStringAsFixed(1) : '—')),
             DataCell(Text(leg.ltp != null ? leg.ltp!.toStringAsFixed(1) : '--')),
@@ -593,6 +618,52 @@ class _ReadinessChip extends StatelessWidget {
             const SizedBox(width: 3),
             Text(label,
                 style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w700)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Prominent, non-dismissible banner shown when today's premarket warmup job
+/// (`task warmup`) has not run. The trading process boots read-only and trades
+/// intraday regardless — but the deep higher-timeframe history (EMA200, weekly
+/// pivots) is only reconciled by that job, so those periods read `--` until it
+/// runs. Renders nothing on the normal (ran) path. See the warmup-decouple directive.
+class _PremarketBanner extends StatelessWidget {
+  final PremarketStatus premarket;
+  const _PremarketBanner({required this.premarket});
+
+  @override
+  Widget build(BuildContext context) {
+    if (premarket.ranToday) return const SizedBox.shrink();
+    const color = Colors.orange;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: color.withValues(alpha: 0.6)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.warning_amber_rounded, size: 16, color: color),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Premarket warmup not run today — higher-timeframe indicators '
+                '(EMA200, weekly pivots) may show "--" until it runs. Run  '
+                'task warmup  before/at market open to reconcile deep history. '
+                'Intraday trading is unaffected.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+              ),
+            ),
           ],
         ),
       ),
