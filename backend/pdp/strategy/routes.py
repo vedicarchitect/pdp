@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from pdp.deps import parse_ist_date, require_auth
+from pdp.instruments.expiry_calendar import dte as _calendar_dte
 from pdp.strategy import unified_registry
 from pdp.strategy.host import AlreadyRunning, NotRunning, StrategyHost
 from pdp.strategy.schemas import (
@@ -786,6 +787,8 @@ async def strangle_monitor(
         second=0,
         microsecond=0,
     )
+    # IST calendar date (UTC+5:30) for server-side DTE so the client needs no date lib.
+    today_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
 
     legs_by_underlying: dict[str, list[dict[str, Any]]] = {}
     unrealized_by_underlying: dict[str, float] = {}
@@ -800,6 +803,17 @@ async def strangle_monitor(
         und = strategy.underlying  # all legs under same underlying for now
         for leg in state["legs"]:
             leg_enriched = dict(leg)
+            # Server-computed DTE: calendar days from IST-today to the leg's expiry.
+            # `expiry` (ISO date) is emitted by DirectionalStrangle.state(); dte is None
+            # when expiry is absent so the client can show '--' without a date library.
+            _exp = leg.get("expiry")
+            _dte: int | None = None
+            if _exp:
+                try:
+                    _dte = _calendar_dte(today_ist, date.fromisoformat(_exp))
+                except (ValueError, TypeError):
+                    _dte = None
+            leg_enriched["dte"] = _dte
             _leg_entries.append((und, leg_enriched))
             unrealized_by_underlying[und] = unrealized_by_underlying.get(und, 0.0) + (leg["mtm"] or 0.0)
 
@@ -839,14 +853,23 @@ async def strangle_monitor(
         for i, s in enumerate(states)
     }
 
+    # Per-underlying realized P&L from each strategy instance's own state() (each
+    # strategy owns exactly one underlying), so the group totals reflect real realized
+    # figures instead of a hardcoded 0.0. day_pnl = realized + unrealized per group.
+    realized_by_underlying: dict[str, float] = {}
+    for i, s in enumerate(states):
+        realized_by_underlying[strategies[i].underlying] = float(s.get("day_realized", 0.0) or 0.0)
+
     groups = [
         {
             "underlying": und,
             "legs": legs,
             "totals": {
-                "day_realized": 0.0,  # per-index realized not tracked separately
+                "day_realized": realized_by_underlying.get(und, 0.0),
                 "day_unrealized": unrealized_by_underlying.get(und, 0.0),
-                "day_pnl": unrealized_by_underlying.get(und, 0.0),
+                "day_pnl": round(
+                    realized_by_underlying.get(und, 0.0) + unrealized_by_underlying.get(und, 0.0), 2
+                ),
             },
             "status": underlying_status.get(und, {}),
         }

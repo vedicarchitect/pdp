@@ -223,6 +223,82 @@ def test_monitor_readiness_is_worst_case_across_strategies() -> None:
     assert readiness["by_underlying"]["BANKNIFTY"]["state"] == "blocked"
 
 
+def _leg(expiry: str | None = None, **over) -> dict:
+    base = {
+        "security_id": "63944", "opt_type": "PE", "strike": 24100.0, "lots": 6,
+        "entry_price": 100.0, "entry_time": None, "entry_reason": "neutral@0.10",
+        "expiry": expiry, "ltp": 90.0, "mtm": 60.0, "day_high": None, "day_low": None,
+        "is_hedge": False, "is_momentum": True, "origin": "system",
+    }
+    base.update(over)
+    return base
+
+
+def test_monitor_leg_carries_expiry_and_server_computed_dte() -> None:
+    """A leg with a resolved expiry gets `expiry` passed through and a server-computed
+    `dte` (calendar days from IST-today), so the client needs no date library
+    (strangle-execution-expiry-and-combined-pnl)."""
+    from datetime import UTC, datetime, timedelta
+
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+
+    today_ist = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date()
+    expiry = (today_ist + timedelta(days=3)).isoformat()
+
+    strategy = MagicMock(spec=DirectionalStrangle)
+    strategy.underlying = "NIFTY"
+    strategy._activity = []
+    strategy.state = AsyncMock(return_value={
+        "legs": [_leg(expiry=expiry), _leg(expiry=None, security_id="63951")],
+        "day_realized": 0.0, "day_unrealized": 60.0, "day_pnl": 60.0,
+        "bucket": "neutral", "score": 0.1, "done_for_day": False,
+        "started_at": None, "n_open_shorts": 0, "n_open_hedges": 0, "n_open_momentum": 2,
+    })
+    strategy.check_readiness = AsyncMock(return_value=_ok_readiness())
+
+    host = MagicMock()
+    host._running = {"nifty": MagicMock(instance=strategy)}
+    app = _make_app(host, _redis_no_ltp())
+
+    with TestClient(app) as client:
+        data = client.get("/api/v1/strangle/monitor").json()
+
+    legs = data["groups"][0]["legs"]
+    with_exp = next(l for l in legs if l["expiry"] == expiry)
+    assert with_exp["dte"] == 3
+    no_exp = next(l for l in legs if l["expiry"] is None)
+    assert no_exp["dte"] is None
+
+
+def test_monitor_group_totals_use_real_per_underlying_realized() -> None:
+    """Per-group `day_realized` reflects the strategy's real realized P&L (not a
+    hardcoded 0.0); `day_pnl` = realized + unrealized."""
+    from pdp.strategies.directional_strangle import DirectionalStrangle
+
+    strategy = MagicMock(spec=DirectionalStrangle)
+    strategy.underlying = "NIFTY"
+    strategy._activity = []
+    strategy.state = AsyncMock(return_value={
+        "legs": [_leg()],  # one leg, mtm=60.0 → unrealized 60
+        "day_realized": 1234.5, "day_unrealized": 60.0, "day_pnl": 1294.5,
+        "bucket": "neutral", "score": 0.1, "done_for_day": False,
+        "started_at": None, "n_open_shorts": 0, "n_open_hedges": 0, "n_open_momentum": 1,
+    })
+    strategy.check_readiness = AsyncMock(return_value=_ok_readiness())
+
+    host = MagicMock()
+    host._running = {"nifty": MagicMock(instance=strategy)}
+    app = _make_app(host, _redis_no_ltp())
+
+    with TestClient(app) as client:
+        data = client.get("/api/v1/strangle/monitor").json()
+
+    totals = data["groups"][0]["totals"]
+    assert totals["day_realized"] == 1234.5
+    assert totals["day_unrealized"] == 60.0
+    assert totals["day_pnl"] == 1294.5
+
+
 def test_monitor_spot_age_reflects_seconds_since_last_tick() -> None:
     """A live NIFTY feed (ltp_ts:13 set ~2s ago) reports a small spot_age_s, not None —
     this is the freshness signal the execution panel uses to distinguish a live snapshot

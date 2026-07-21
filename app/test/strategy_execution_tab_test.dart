@@ -40,6 +40,7 @@ void main() {
                   strike: 24300,
                   lots: 2,
                   entryPrice: 85.5,
+                  dte: 3,
                   ltp: 70.0,
                   mtm: 1162.5,
                   isHedge: false,
@@ -57,7 +58,9 @@ void main() {
                   isMomentum: false,
                 ),
               ],
-              dayPnl: 262.5,
+              dayRealized: 500.0,
+              dayUnrealized: 262.5,
+              dayPnl: 762.5,
               bucket: 'neutral',
               doneForDay: false,
             ),
@@ -292,6 +295,36 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.textContaining('leg status'), findsNWidgets(5));
+    });
+  });
+
+  group('expiry/DTE + combined P&L (strangle-execution-expiry-and-combined-pnl)', () {
+    testWidgets('leg DTE column renders at wide width', (tester) async {
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot());
+      expect(tester.takeException(), isNull);
+      expect(find.text('DTE'), findsOneWidget); // column header
+      expect(find.text('3'), findsWidgets); // the CE leg's dte value
+    });
+
+    testWidgets('leg DTE column renders at narrow width', (tester) async {
+      await pumpAt(tester, const Size(500, 900), snap: snapshot());
+      expect(tester.takeException(), isNull);
+      expect(find.text('DTE'), findsOneWidget);
+    });
+
+    testWidgets('group header shows a combined realized+unrealized breakdown',
+        (tester) async {
+      await pumpAt(tester, const Size(1400, 900), snap: snapshot());
+      expect(tester.takeException(), isNull);
+      // Breakdown line under the bold combined total: a "realized" / "unrealized"
+      // label pair, each followed by a PnlText rendering the signed, ₹-formatted,
+      // Indian-grouped amount (same formatter + coloring as the total above).
+      expect(find.text('realized '), findsOneWidget);
+      expect(find.textContaining('unrealized'), findsOneWidget);
+      // dayRealized (500.0) is unique to the group breakdown row — the overall
+      // snapshot total only has dayUnrealized/dayPnl at 262.5, so this alone
+      // proves the row renders via formatInr()/PnlText.
+      expect(find.text('+₹500.00'), findsOneWidget);
     });
   });
 

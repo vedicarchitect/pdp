@@ -28,7 +28,9 @@ class LiveEventsSource implements EventsSource {
       _config = EventConfig.fromJson(configJson);
 
       final eventsJson = await api.getJson('/api/v1/events?limit=50');
-      final list = (eventsJson['events'] as List?) ?? [];
+      // Backend returns a `Page` envelope whose list key is `items` (see
+      // pdp/schemas.py). Read `items`; fall back to `events` for safety.
+      final list = (eventsJson['items'] as List?) ?? (eventsJson['events'] as List?) ?? [];
       _events = list.map((e) => AppEvent.fromJson(e as Map<String, dynamic>)).toList();
       _emit();
 

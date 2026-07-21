@@ -277,8 +277,11 @@ class DirectionalStrangle(Strategy):
         # the same flag for both made the gate's "emit once on transition" dead code).
         self._entry_gate_blocked: bool = False
         # Security ids whose in-memory lots disagree with the broker (drives the
-        # readiness "Reconciliation" component). `_divergence_shapes` rate-limits
-        # the critical event to once per (sid, mem, broker) shape per session.
+        # readiness "Reconciliation" component). Recomputed fresh on every
+        # `_reconcile_divergences` pass so a healed mismatch clears the gate rather
+        # than latching for the session. `_divergence_shapes` is the session-long
+        # alert de-dup — it rate-limits the critical event to once per
+        # (sid, mem, broker) shape and is *not* reset when `_divergences` is.
         self._divergences: set[str] = set()
         self._divergence_shapes: set[str] = set()
 
@@ -414,6 +417,10 @@ class DirectionalStrangle(Strategy):
 
     def _remove_leg(self, sid: str) -> None:
         self._legs.pop(sid, None)
+        # Drop the cached LTP too — otherwise a rehydration-seeded stand-in (or a
+        # stale real tick) could linger past this leg's lifetime and be mistaken
+        # for a fresh price if the same sid is re-entered later in the session.
+        self._ltp_cache.pop(sid, None)
 
     async def check_readiness(self) -> StrategyReadiness:
         from pdp.strategy.readiness import ReadinessComponent, StrategyReadiness
@@ -1083,6 +1090,31 @@ class DirectionalStrangle(Strategy):
             )
             await self._open_short(spot, side, target)
 
+    def _entry_reason(self) -> str:
+        """`"<bucket>@<score>"` for a leg's `entry_reason`, guarded against an unset
+        bucket so a leg opened before the first bias score never renders the
+        literal `"None"`."""
+        return f"{self._current_bucket or 'unknown'}@{self._last_score:.2f}"
+
+    async def _seed_rehydrated_ltp(self, sid: str, entry_price: Decimal) -> None:
+        """Prime `_ltp_cache[sid]` for a just-rehydrated leg so the console shows a
+        price and non-blank P&L immediately, rather than `--` during the cold window
+        after restart before the next live option tick lands.
+
+        Prefers the live Redis LTP (via the market feed); falls back to the leg's avg
+        entry price so P&L reads ~0 rather than blank. A later real tick overwrites
+        this seed in `on_tick`. No-ops if neither source yields a positive price.
+        """
+        if self._ltp_cache.get(sid):
+            return
+        if self.ctx.market is not None:
+            ltp, _ = await self.ctx.market.ltp_with_age(sid)
+            if ltp and ltp > 0:
+                self._ltp_cache[sid] = float(ltp)
+                return
+        if entry_price and entry_price > Decimal("0"):
+            self._ltp_cache[sid] = float(entry_price)
+
     async def _await_option_ltp(self, sid: str) -> bool:
         """Wait up to `_entry_ltp_wait_s` for a freshly-subscribed option's first LTP.
 
@@ -1217,7 +1249,7 @@ class DirectionalStrangle(Strategy):
                     {"strategy_id": self.strategy_id, "opt_type": opt_type},
                 )
                 return False
-            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            _reason = self._entry_reason()
             leg = OpenLeg(
                 security_id=sid,
                 segment=segment,
@@ -1357,7 +1389,7 @@ class DirectionalStrangle(Strategy):
                 )
                 return
             h_strike = float(target.strike) if target.strike is not None else 0.0
-            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            _reason = self._entry_reason()
             hedge_leg = OpenLeg(
                 security_id=h_sid,
                 segment=segment,
@@ -1473,7 +1505,7 @@ class DirectionalStrangle(Strategy):
                     {"strategy_id": self.strategy_id, "opt_type": opt_type},
                 )
                 return
-            _reason = f"{self._current_bucket}@{self._last_score:.2f}"
+            _reason = self._entry_reason()
             momentum_leg = OpenLeg(
                 security_id=sid,
                 segment=segment,
@@ -1763,8 +1795,10 @@ class DirectionalStrangle(Strategy):
                 # a lot) while still emitting a terminal close + removing the leg
                 # would orphan the residual broker position with zero further
                 # tracking. Flag it and leave the leg in place so the next
-                # _reconcile_divergences() poll — and a human — see it.
-                self._flag_divergence(sid, leg.lots, broker_lots)
+                # _reconcile_divergences() poll — and a human — see it. Record it
+                # directly into the live `_divergences` set (not a pass-local one);
+                # the next reconcile pass will recompute and either confirm or clear it.
+                self._flag_divergence(self._divergences, sid, leg.lots, broker_lots)
                 return
             # A short is expected to sit at net_qty<0, a hedge/momentum long at
             # net_qty>0. A sign that contradicts the leg's tracked kind is
@@ -1925,13 +1959,17 @@ class DirectionalStrangle(Strategy):
             return []
         return list(await getter())
 
-    def _flag_divergence(self, sid: str, mem_lots: int, broker_lots: int) -> None:
-        """Record a memory-vs-broker lot mismatch for `sid` and emit
-        `LEG_STATE_DIVERGED` once per distinct (sid, mem, broker) shape per
-        session, so a persistent mismatch surfaces on the readiness endpoint
-        without alert-storming (the failure mode POSITION_RECONCILE_MISMATCH had
-        in paper)."""
-        self._divergences.add(sid)
+    def _flag_divergence(self, current: set[str], sid: str, mem_lots: int, broker_lots: int) -> None:
+        """Record a memory-vs-broker lot mismatch for `sid` in the current pass's
+        `current` set and emit `LEG_STATE_DIVERGED` once per distinct
+        (sid, mem, broker) shape per session, so a persistent mismatch surfaces on
+        the readiness endpoint without alert-storming (the failure mode
+        POSITION_RECONCILE_MISMATCH had in paper).
+
+        `current` (not `self._divergences`) is mutated so a healed mismatch can drop
+        out of the readiness gate on the next pass; the alert de-dup lives in the
+        session-long `self._divergence_shapes`, which is intentionally *not* reset."""
+        current.add(sid)
         shape = f"{sid}:{mem_lots}:{broker_lots}"
         if shape in self._divergence_shapes:
             return
@@ -1950,7 +1988,15 @@ class DirectionalStrangle(Strategy):
         """Compare every tracked leg's lots against the broker's net_qty (and flag
         any broker position with no tracked leg). Skipped when the order client
         cannot report positions, so a fake without `get_positions` is not treated
-        as "everything diverged"."""
+        as "everything diverged".
+
+        The divergence set is recomputed from scratch each pass and assigned to
+        `self._divergences` at the end, so a transient mismatch (e.g. a fill-timing
+        race right after entry, where the positions row lags in-memory lots for a
+        poll or two) clears the readiness Reconciliation component once it heals,
+        instead of latching for the rest of the session. A genuinely persistent
+        mismatch stays in the set every pass and still alerts exactly once per shape
+        via `_divergence_shapes`."""
         if getattr(self.ctx.orders, "get_positions", None) is None:
             return
         broker: dict[str, int] = {}
@@ -1958,13 +2004,15 @@ class DirectionalStrangle(Strategy):
             bsid = getattr(pos, "security_id", None)
             if bsid is not None:
                 broker[bsid] = int(getattr(pos, "net_qty", 0) or 0)
+        current: set[str] = set()
         for lg in self._legs.values():
             broker_lots = abs(broker.get(lg.security_id, 0)) // self._lot_size
             if lg.lots != broker_lots:
-                self._flag_divergence(lg.security_id, lg.lots, broker_lots)
+                self._flag_divergence(current, lg.security_id, lg.lots, broker_lots)
         for bsid, net in broker.items():
             if net != 0 and bsid not in self._legs:
-                self._flag_divergence(bsid, 0, abs(net) // self._lot_size)
+                self._flag_divergence(current, bsid, 0, abs(net) // self._lot_size)
+        self._divergences = current
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
         matching = [h for h in self._hedge_legs if h.opt_type == short_leg.opt_type]
@@ -1998,6 +2046,10 @@ class DirectionalStrangle(Strategy):
                     "entry_price": float(lg.entry_price),
                     "entry_time": lg.entry_time.isoformat() if lg.entry_time else None,
                     "entry_reason": lg.entry_reason,
+                    # Expiry is resolved at open time and preserved across rehydration;
+                    # surface it so the console can show DTE. dte itself is computed in the
+                    # monitor route (server-side, so the client needs no date library).
+                    "expiry": lg.expiry.isoformat() if lg.expiry else None,
                     "ltp": ltp,
                     "mtm": mtm,
                     "day_high": lg.day_high,
@@ -2465,6 +2517,12 @@ class DirectionalStrangle(Strategy):
                     expiry=expiry,
                 )
             )
+            # Seed `_ltp_cache` so the console shows a price immediately instead of
+            # `--` during the cold window after restart (the cache is otherwise only
+            # advanced by on_tick, which lands only on the next live option tick).
+            # Prefer the live Redis LTP; fall back to the position's avg entry price
+            # so P&L reads ~0 rather than blank until the first fresh tick corrects it.
+            await self._seed_rehydrated_ltp(sid, entry_price)
             # Baseline against the position's realized_pnl AT rehydrate time —
             # without this, _day_realized() has no baseline for this sid and
             # counts the leg's entire historical realized P&L as if it all

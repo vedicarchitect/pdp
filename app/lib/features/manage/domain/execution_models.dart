@@ -36,6 +36,8 @@ class LegRow {
   final double entryPrice;
   final String? entryTime;
   final String? entryReason;
+  final String? expiry; // ISO date, or null
+  final int? dte; // server-computed calendar days to expiry, or null
   final double? ltp;
   final double? mtm;
   final double? dayHigh;
@@ -60,6 +62,8 @@ class LegRow {
     required this.entryPrice,
     this.entryTime,
     this.entryReason,
+    this.expiry,
+    this.dte,
     this.ltp,
     this.mtm,
     this.dayHigh,
@@ -85,6 +89,8 @@ class LegRow {
       entryPrice: (json['entry_price'] as num?)?.toDouble() ?? 0.0,
       entryTime: json['entry_time'] as String?,
       entryReason: json['entry_reason'] as String?,
+      expiry: json['expiry'] as String?,
+      dte: (json['dte'] as num?)?.toInt(),
       ltp: (json['ltp'] as num?)?.toDouble(),
       mtm: (json['mtm'] as num?)?.toDouble(),
       dayHigh: (json['day_high'] as num?)?.toDouble(),
@@ -309,7 +315,9 @@ class AtmOptionRow {
 class UnderlyingGroup {
   final String underlying;
   final List<LegRow> legs;
-  final double dayPnl;
+  final double dayRealized;
+  final double dayUnrealized;
+  final double dayPnl; // combined realized + unrealized (server-computed)
   final String? bucket; // null when not yet evaluated
   final double? score;
   final bool doneForDay;
@@ -317,6 +325,8 @@ class UnderlyingGroup {
   const UnderlyingGroup({
     required this.underlying,
     required this.legs,
+    required this.dayRealized,
+    required this.dayUnrealized,
     required this.dayPnl,
     this.bucket,
     this.score,
@@ -330,6 +340,8 @@ class UnderlyingGroup {
     return UnderlyingGroup(
       underlying: json['underlying'] as String? ?? '',
       legs: legsRaw.map((l) => LegRow.fromJson(l as Map<String, dynamic>)).toList(),
+      dayRealized: (totals['day_realized'] as num?)?.toDouble() ?? 0.0,
+      dayUnrealized: (totals['day_unrealized'] as num?)?.toDouble() ?? 0.0,
       dayPnl: (totals['day_pnl'] as num?)?.toDouble() ?? 0.0,
       bucket: status['bucket'] as String?,
       score: (status['score'] as num?)?.toDouble(),

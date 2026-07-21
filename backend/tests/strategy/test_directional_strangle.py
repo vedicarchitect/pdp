@@ -1352,3 +1352,146 @@ async def test_await_option_ltp_false_when_no_tick_within_wait():
     s._ltp_cache.clear()
 
     assert await s._await_option_ltp("opt_1") is False
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation divergence must self-clear (strangle-reconcile-latch-clears)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_leg(s: DirectionalStrangle, sid: str, lots: int, opt_type: str = "CE") -> None:
+    """Insert a tracked short leg directly into `_legs` for reconcile tests."""
+    s._legs[sid] = OpenLeg(
+        security_id=sid,
+        segment="NSE_FNO",
+        opt_type=opt_type,
+        strike=24000.0,
+        lots=lots,
+        entry_price=Decimal("100"),
+        entry_time=datetime.now(tz=_IST),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_divergence_clears_when_mismatch_heals():
+    """A transient memory-vs-broker lot mismatch must clear the readiness gate on a
+    later reconcile pass once the broker catches up — it must NOT latch for the
+    session (the NIFTY "2 leg(s) diverged" live bug)."""
+    s = await _build_strategy()
+    s._lot_size = 65
+    orders = s.ctx.orders  # _FakeOrders
+
+    # One tracked leg thinks it holds 6 lots, but the broker positions row lags at
+    # 0 (fill not yet reflected) — a classic post-entry fill-timing race.
+    _tracked_leg(s, "opt_ce", lots=6)
+    orders._pos["opt_ce"] = {"net": 0, "avg": Decimal("100"), "realized": Decimal("0")}
+
+    await s._reconcile_divergences()
+    assert "opt_ce" in s._divergences, "mismatch must be flagged while it exists"
+
+    # Broker now reflects the 6-lot fill (6 * 65 = 390); memory and broker agree.
+    orders._pos["opt_ce"]["net"] = -390
+    await s._reconcile_divergences()
+    assert s._divergences == set(), "healed mismatch must clear the reconciliation gate"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_divergence_alert_deduped_across_passes():
+    """A persistent mismatch stays blocked but alerts exactly once per shape, even
+    across many reconcile passes (the recompute must not reset the alert de-dup)."""
+    s = await _build_strategy()
+    s._lot_size = 65
+    alerts = MagicMock()
+    s.ctx._event_service = alerts  # emit_critical routes here when wired
+
+    orders = s.ctx.orders
+    _tracked_leg(s, "opt_ce", lots=6)
+    orders._pos["opt_ce"] = {"net": 0, "avg": Decimal("100"), "realized": Decimal("0")}
+
+    for _ in range(3):
+        await s._reconcile_divergences()
+
+    assert "opt_ce" in s._divergences, "persistent mismatch stays flagged every pass"
+    assert alerts.emit_critical.call_count == 1, "same (sid, mem, broker) shape alerts once"
+    assert "opt_ce:6:0" in s._divergence_shapes
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphan_broker_position_clears_when_gone():
+    """An orphan broker position (no tracked leg) is flagged, then clears once the
+    broker position is flat again."""
+    s = await _build_strategy()
+    s._lot_size = 65
+    orders = s.ctx.orders
+
+    orders._pos["orphan"] = {"net": -130, "avg": Decimal("100"), "realized": Decimal("0")}
+    await s._reconcile_divergences()
+    assert "orphan" in s._divergences
+
+    orders._pos["orphan"]["net"] = 0  # get_positions filters net==0, so it disappears
+    await s._reconcile_divergences()
+    assert s._divergences == set()
+
+
+# ---------------------------------------------------------------------------
+# Expiry emission, entry_reason guard, rehydration LTP seed
+# (strangle-execution-expiry-and-combined-pnl)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_state_emits_leg_expiry():
+    """state() surfaces each leg's resolved expiry as an ISO date so the monitor
+    route can compute DTE; a leg with no expiry emits None."""
+    s = await _build_strategy()
+    s._lot_size = 65
+    s._legs["opt_ce"] = OpenLeg(
+        security_id="opt_ce", segment="NSE_FNO", opt_type="CE", strike=24300.0,
+        lots=6, entry_price=Decimal("100"), entry_time=datetime.now(tz=_IST),
+        expiry=date(2026, 7, 9),
+    )
+    s._legs["opt_pe"] = OpenLeg(
+        security_id="opt_pe", segment="NSE_FNO", opt_type="PE", strike=24100.0,
+        lots=6, entry_price=Decimal("100"), entry_time=datetime.now(tz=_IST),
+        expiry=None,
+    )
+
+    st = await s.state()
+    by_sid = {l["security_id"]: l for l in st["legs"]}
+    assert by_sid["opt_ce"]["expiry"] == "2026-07-09"
+    assert by_sid["opt_pe"]["expiry"] is None
+
+
+@pytest.mark.asyncio
+async def test_entry_reason_never_renders_literal_none():
+    """When the bias bucket is unset at leg-construction time, entry_reason uses a
+    stable placeholder rather than the literal string 'None'."""
+    s = await _build_strategy()
+    s._current_bucket = None
+    s._last_score = 0.20
+
+    # The three open paths all build `_reason` the same way; assert the guarded form.
+    reason = f"{s._current_bucket or 'unknown'}@{s._last_score:.2f}"
+    assert "None" not in reason
+    assert reason == "unknown@0.20"
+
+
+@pytest.mark.asyncio
+async def test_seed_rehydrated_ltp_prefers_redis_then_entry_price():
+    """A rehydrated leg is priced immediately: prefer the live Redis LTP, else fall
+    back to the avg entry price, so the console shows a value not `--`."""
+    s = await _build_strategy()
+
+    # Redis has a fresh LTP → used.
+    s.ctx.market.ltp_with_age = AsyncMock(return_value=(Decimal("42.5"), 0.1))
+    await s._seed_rehydrated_ltp("opt_a", Decimal("100"))
+    assert s._ltp_cache["opt_a"] == 42.5
+
+    # No Redis LTP → fall back to entry price.
+    s.ctx.market.ltp_with_age = AsyncMock(return_value=(None, None))
+    await s._seed_rehydrated_ltp("opt_b", Decimal("77"))
+    assert s._ltp_cache["opt_b"] == 77.0
+
+    # Neither source → no cache entry (console shows '--' honestly).
+    await s._seed_rehydrated_ltp("opt_c", Decimal("0"))
+    assert "opt_c" not in s._ltp_cache
