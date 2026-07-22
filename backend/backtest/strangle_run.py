@@ -30,7 +30,7 @@ load_dotenv()
 from pymongo import MongoClient  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
-from pdp.backtest.day_loader import biz_days, load_window  # noqa: E402
+from pdp.backtest.day_loader import biz_days, load_window, warmup_prefix  # noqa: E402
 from pdp.backtest.strangle_config import SECURITY_IDS, StrangleConfig, lot_size_for_date  # noqa: E402
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window  # noqa: E402
 from pdp.backtest.strangle_report import RunWriter  # noqa: E402
@@ -262,10 +262,16 @@ def main() -> int:
     vix_days_seen = 0
     cadence_gap_total = 0
     for ci, chunk in enumerate(chunks, 1):
+        # Spot-only warmup prefix: prior trading days before this chunk's first day so the
+        # higher-TF EMAs are converged for the chunk's first traded day (not just for long
+        # windows — every quarter-chunk boundary would otherwise start starved). See
+        # bias-ranking-hardening.
+        warmup_days = warmup_prefix(chunk)
         window = load_window(
             mdb, cal, chunk,
             security_id=cfg.security_id,
             underlying=cfg.underlying,
+            warmup_days=warmup_days,
         )
         vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
@@ -278,7 +284,8 @@ def main() -> int:
         # far-side expiry. See pdp.instruments.expiry_calendar.expiry_cadence_gaps.
         chunk_cadence_gap = len(window.cadence_gap_days & set(window.valid_days))
         cadence_gap_total += chunk_cadence_gap
-        msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]}: "
+        msg = (f"chunk {ci}/{len(chunks)} {chunk[0]}..{chunk[-1]} "
+               f"(warmup from {warmup_days[0]}): "
                f"{len(window.valid_days)} valid, {len(window.skipped)} skipped, "
                f"{chunk_cadence_gap} cadence-gap, "
                f"VIX {len(vix_by_day)} PCR {len(pcr_by_day)}")

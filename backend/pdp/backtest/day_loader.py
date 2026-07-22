@@ -39,6 +39,25 @@ def biz_days(end: date, n: int) -> list[date]:
     return list(reversed(days))
 
 
+# Business days of prior spot to load (spot-only) ahead of a traded window so the bias engine's
+# higher-TF EMAs (EMA-50 on 1h ≈ 8 trading days) are converged for the first traded day. ≈30
+# weekdays comfortably clears the 20 trading days strangle_loader._prior_days_1m scavenges
+# (holidays fall out). Shared by *every* directional-strangle backtest entry point (single run,
+# sweep, walk-forward) so none decides on a starved vote set. See bias-ranking-hardening.
+WARMUP_BIZ_DAYS = 30
+
+
+def warmup_prefix(days: list[date], n: int = WARMUP_BIZ_DAYS) -> list[date]:
+    """The ``n`` business days immediately before ``days[0]`` — the spot-only warmup runway.
+
+    Pass the result as ``load_window(..., warmup_days=warmup_prefix(days))`` so the loader widens
+    only the spot query to cover the prefix. Empty ``days`` -> ``[]`` (nothing to warm).
+    """
+    if not days:
+        return []
+    return biz_days(days[0] - timedelta(days=1), n)
+
+
 def _resolve_expiry(cal: Any, d: date) -> date | None:
     """Legacy JSON-calendar fallback, used only when ``option_bars`` has no chain at all
     for the underlying (pre-ingest). See ``pdp.instruments.expiry_calendar`` for the
@@ -71,13 +90,23 @@ def load_window(
     *,
     security_id: str = NIFTY_SID,
     underlying: str = "NIFTY",
+    warmup_days: list[date] | None = None,
 ) -> WindowData:
-    """Load raw 1-minute spot + option chains for ``days`` and run the completeness gate."""
-    # ── Spot: one query for the whole range, bucketed by IST trade-date. ──
+    """Load raw 1-minute spot + option chains for ``days`` and run the completeness gate.
+
+    ``warmup_days`` (prior trading days before ``days[0]``) are loaded as **spot only** so the
+    bias engine's higher-timeframe indicators (EMA/ST/PSAR) can converge before the first traded
+    day. They are never traded: expiry resolution, chain loading, the completeness gate and
+    ``valid_days`` are all keyed to ``days`` alone. The required prior spot already exists in the
+    warehouse, so the caller always pads rather than trading a starved window. See
+    bias-ranking-hardening.
+    """
+    # ── Spot: one query for the whole range (incl. warmup prefix), bucketed by IST trade-date. ──
     spot_by_day: dict[date, list[dict]] = {}
-    if days:
-        lo = datetime(days[0].year, days[0].month, days[0].day, 0, 0, tzinfo=timezone.utc)
-        hi = datetime(days[-1].year, days[-1].month, days[-1].day, 23, 59, tzinfo=timezone.utc)
+    spot_span = sorted(set(days) | set(warmup_days or []))
+    if spot_span:
+        lo = datetime(spot_span[0].year, spot_span[0].month, spot_span[0].day, 0, 0, tzinfo=timezone.utc)
+        hi = datetime(spot_span[-1].year, spot_span[-1].month, spot_span[-1].day, 23, 59, tzinfo=timezone.utc)
         for b in mdb["market_bars"].find(
             {"metadata.security_id": security_id, "metadata.timeframe": "1m",
              "ts": {"$gte": lo, "$lte": hi}}).sort("ts", 1):

@@ -24,7 +24,7 @@ from typing import Any
 from pymongo import MongoClient
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator
-from pdp.backtest.day_loader import load_window
+from pdp.backtest.day_loader import load_window, warmup_prefix
 from pdp.backtest.store import _sharpe_from_rets
 from pdp.backtest.strangle_config import StrangleConfig, lot_size_for_date
 from pdp.backtest.strangle_loader import build_strangle_day, load_pcr_window
@@ -170,6 +170,10 @@ def run_strangle_sweep(
             chunk,
             security_id=base_cfg.security_id,
             underlying=base_cfg.underlying,
+            # Spot-only warmup prefix so the bias engine's higher-TF EMAs are converged for each
+            # chunk's first traded day — every quarter-chunk boundary would otherwise start
+            # starved, biasing the leaderboard. See bias-ranking-hardening.
+            warmup_days=warmup_prefix(chunk),
         )
         vix_by_day = load_vix_window(mdb, vix_sid, chunk)
         pcr_by_day = load_pcr_window(

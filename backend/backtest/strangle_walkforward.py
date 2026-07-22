@@ -45,7 +45,7 @@ from pymongo import MongoClient  # noqa: E402
 from strangle_run import load_vix_window  # noqa: E402
 
 from pdp.backtest.commissions import CommissionCalculator, NullCommissionCalculator  # noqa: E402
-from pdp.backtest.day_loader import load_window  # noqa: E402
+from pdp.backtest.day_loader import load_window, warmup_prefix  # noqa: E402
 from pdp.backtest.store import (  # noqa: E402
     WF_PASS_NET,
     WF_PASS_PF,
@@ -254,7 +254,10 @@ def run_fold(
 ) -> dict | None:
     """Optimize candidates on the fold's IS slice, score the best on its OOS slice."""
     span_days = _weekdays(fold.is_start, fold.oos_end)
-    window = load_window(mdb, cal, span_days)
+    # Spot-only warmup prefix ahead of the fold's first IS day so the bias engine's higher-TF
+    # EMAs are converged before the first in-sample decision — otherwise each fold's opening days
+    # decide on a starved vote set and pollute IS candidate selection. See bias-ranking-hardening.
+    window = load_window(mdb, cal, span_days, warmup_days=warmup_prefix(span_days))
     if not window.valid_days:
         log.warning("fold %d: no valid days in span", fold.idx)
         return None
