@@ -121,6 +121,14 @@ class BiasWeights:
     th_most: float = 0.50  # -> most
     th_more: float = 0.20  # -> more; below this -> neutral
 
+    # Minimum fraction of *configured* weight (sum of non-zero w_*) that must be present
+    # (non-abstaining) before a non-neutral bucket is allowed. Below this, the score is
+    # forced NEUTRAL so a renormalised average over a small subset of present inputs cannot
+    # saturate into a directional (or naked) bet. Default sits between the proven ORB+PCR-only
+    # starved case (2.0/10.5 = 0.19 -> forced neutral) and a thin-but-trend-backed read
+    # (ema_1h+pcr = 3.0/10.5 = 0.286 -> allowed); walk-forward tunable. See bias-ranking-hardening.
+    min_quorum_weight_frac: float = 0.25
+
     # VIX gate
     vix_spike_pct: float = 0.05  # >5% intraday rise blocks entries
     vix_day_high_eps: float = 1e-6  # tolerance for "at day high"
@@ -273,6 +281,10 @@ class BiasResult:
     ce_lots: int
     gated: bool  # True -> VIX gate blocks new entries
     reason: str
+    # Fraction of total *configured* weight (sum of non-zero w_*) that was present
+    # (non-abstaining) this evaluation. Below BiasWeights.min_quorum_weight_frac the
+    # bucket is forced NEUTRAL. 1.0 when every configured input voted.
+    present_weight_frac: float = 1.0
     votes: dict[str, int] = field(default_factory=dict)  # per-signal votes (debug)
     # Every input, present or abstaining -- so an abstaining input (e.g. a bias
     # weight the strategy's own config can't supply) is visible in the log
@@ -401,6 +413,25 @@ def _bucket_for(score: float, w: BiasWeights) -> BiasBucket:
     return BiasBucket.NEUTRAL
 
 
+def _guard_extreme(bucket: BiasBucket, breakdown: dict[str, VoteBreakdown]) -> BiasBucket:
+    """Downgrade a naked extreme bucket unless the 1h trend vote confirms its direction.
+
+    ``COMPLETE_BULL`` (5:0) and ``COMPLETE_BEAR`` (0:5) are the only buckets that sell a fully
+    naked, undefended side. They are reachable only when ``ema_1h`` is present (non-abstaining)
+    and points the bucket's way; otherwise we drop to the nearest *defended* bucket
+    (``MOST_BULL``/``MOST_BEAR``), which keeps a protective position on the opposite side. This
+    stops a starved/renormalised score from committing to an undefended directional bet off
+    inputs that don't include the heavyweight higher-TF trend. See bias-ranking-hardening.
+    """
+    vb = breakdown.get("ema_1h")
+    trend = vb.vote if (vb is not None and not vb.abstained) else None
+    if bucket is BiasBucket.COMPLETE_BULL and trend != 1:
+        return BiasBucket.MOST_BULL
+    if bucket is BiasBucket.COMPLETE_BEAR and trend != -1:
+        return BiasBucket.MOST_BEAR
+    return bucket
+
+
 def score_bias(
     inp: BiasInputs,
     weights: BiasWeights | None = None,
@@ -440,11 +471,25 @@ def score_bias(
         weight_total += weight
 
     score = weighted_sum / weight_total if weight_total > 0 else 0.0
+
+    # Quorum floor: fraction of *configured* (non-zero-weight) inputs actually present. Below
+    # the floor, force NEUTRAL so a renormalised average over a small present subset cannot
+    # saturate into a directional bet. See bias-ranking-hardening.
+    total_configured = sum(weight for _v, weight, _n in candidates if weight > 0)
+    present_frac = (weight_total / total_configured) if total_configured > 0 else 0.0
+
     bucket = _bucket_for(score, w)
+    if present_frac < w.min_quorum_weight_frac:
+        bucket = BiasBucket.NEUTRAL
+    # Guard the naked extreme buckets on the 1h trend vote (after any quorum downgrade).
+    bucket = _guard_extreme(bucket, breakdown)
     pe_lots, ce_lots = table[bucket]
 
     gated, gate_reason = _vix_gate(inp, w)
-    reason = f"score={score:+.3f} bucket={bucket.value} gate={gate_reason}"
+    reason = (
+        f"score={score:+.3f} bucket={bucket.value} "
+        f"quorum={present_frac:.2f} gate={gate_reason}"
+    )
 
     return BiasResult(
         score=score,
@@ -455,4 +500,5 @@ def score_bias(
         reason=reason,
         votes=votes,
         breakdown=breakdown,
+        present_weight_frac=present_frac,
     )

@@ -24,6 +24,32 @@ abstention (renormalises the weighted average over whatever *is* present).
 | `orb` | `w_orb` | raw `15m` bar OHLC, tracked in the strategy itself | `15m` timeframe present (not a suite indicator — no `family` requirement) |
 | `pcr` | `w_pcr` | `ctx.chain_hub.get_pcr(underlying)` | this underlying has a running options chain poller — see `pdp.strategy.registry.strategy_underlyings` |
 
+## Abstention-saturation guards (`bias-ranking-hardening`, 2026-07-21)
+
+Because the score renormalises over *present* inputs only, a starved input set (few votes present)
+can saturate to an extreme far more easily than a full one — proven on 2026-07-21, when a backtest
+whose higher-TF EMAs never warmed renormalised onto ORB+PCR alone (2.0 of 10.5 configured weight),
+scored −1.000, and sold a naked `0 PE : 5 CE` (`COMPLETE_BEAR`). Two guards in `score_bias` make
+this unreachable, protecting **both** backtest and live:
+
+- **Quorum floor** (`BiasWeights.min_quorum_weight_frac`, default `0.25`). `present_weight_frac =
+  Σ(present non-zero weights) / Σ(all configured non-zero weights)`. Below the floor, the bucket is
+  forced `NEUTRAL` (1:1) regardless of score. The ORB+PCR-only case is `2.0/10.5 = 0.19 < 0.25` →
+  neutral; a thin-but-trend-backed `ema_1h+pcr = 3.0/10.5 = 0.286` still scores normally.
+  `present_weight_frac` is reported on `BiasResult` and in `reason` (`quorum=…`).
+- **Extreme-bucket guard** (`_guard_extreme`). The two *naked* buckets `COMPLETE_BULL` (5:0) and
+  `COMPLETE_BEAR` (0:5) are the only undefended positions in the ratio table. They are reachable
+  only when `ema_1h` is present (non-abstaining) **and** agrees with the bucket's direction;
+  otherwise the bucket downgrades to the nearest *defended* bucket (`MOST_BULL`/`MOST_BEAR`, 4:2 /
+  2:4), which keeps a protective opposite side. (The follow-up `bias-ranking-multisignal` extends the
+  agreement requirement to also include `st_1h`.)
+
+Note these are a *backstop*: live already blocks entry on any unseeded indicator via
+`DirectionalStrangle.check_readiness`, and the backtest now loads a spot-only warmup prefix
+(`day_loader.load_window(warmup_days=…)`, driven per quarter-chunk by `strangle_run.py`) so its
+higher-TF EMAs converge before the first traded day. The guards defend any path that still reaches
+`score_bias` on a thin vote set.
+
 ## Startup satisfiability check (`bias-input-completeness`, 2026-07-12)
 
 `check_bias_satisfiability(weights, watchlist, *, underlying, options_underlyings)` verifies

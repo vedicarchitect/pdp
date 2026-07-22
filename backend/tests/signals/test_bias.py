@@ -248,3 +248,73 @@ def test_breakdown_covers_every_input_every_evaluation():
         "ema_1h", "ema_15m", "ema_5m", "cam_daily", "cam_weekly", "swing", "orb", "pcr",
     }
     assert all(v.abstained for v in r.breakdown.values())
+
+
+# --------------------------------------------------------------------------- #
+# Quorum floor + extreme-bucket guard (bias-ranking-hardening)
+# --------------------------------------------------------------------------- #
+
+
+def test_quorum_floor_forces_neutral_when_starved():
+    """The proven 2026-07-21 failure: only ORB+PCR present (both bearish) renormalises to
+    score -1.0, but 2.0/10.5 = 0.19 is below the quorum floor -> forced NEUTRAL, not a naked
+    COMPLETE_BEAR."""
+    inp = BiasInputs(spot=100.0, orb_high=101.0, orb_low=100.5, pcr=0.7)  # spot<orb_low -> -1; pcr<0.9 -> -1
+    r = score_bias(inp)
+    assert r.votes == {"orb": -1, "pcr": -1}
+    assert r.score == -1.0  # raw renormalised score still saturates
+    assert r.present_weight_frac < BiasWeights().min_quorum_weight_frac
+    assert r.bucket is BiasBucket.NEUTRAL  # ...but quorum forces neutral
+    assert (r.pe_lots, r.ce_lots) == (1, 1)
+
+
+def test_quorum_reports_present_weight_fraction():
+    r_full = score_bias(_all_bull_inputs())
+    assert r_full.present_weight_frac == 1.0
+    assert "quorum=1.00" in r_full.reason
+    # ema_1h(2.0)+pcr(1.0) = 3.0/10.5 = 0.286 -> above the floor, scores normally
+    r_partial = score_bias(BiasInputs(spot=100.0, ema_1h=_bull_ema(), pcr=1.3))
+    assert abs(r_partial.present_weight_frac - 3.0 / 10.5) < 1e-9
+    assert r_partial.bucket is not BiasBucket.NEUTRAL
+
+
+def test_extreme_bucket_downgraded_without_agreeing_trend():
+    """A score in the COMPLETE_BEAR band but with ema_1h abstaining downgrades to the defended
+    MOST_BEAR (keeps a protective PE side) rather than selling naked 0:5."""
+    # Bearish set that clears quorum and the -0.75 threshold, but ema_1h is absent.
+    inp = BiasInputs(
+        spot=80.0,
+        ema_15m=_bear_ema(80.0),
+        ema_5m=_bear_ema(80.0),
+        cam_daily=CamLevels(r3=95, r4=96, s3=85, s4=84),
+        cam_weekly=CamLevels(r3=94, r4=95, s3=84, s4=83),
+        pdh=90, pdl=86, pwh=91, pwl=85,
+        orb_high=89, orb_low=86,
+        pcr=0.7,
+    )
+    r = score_bias(inp)
+    assert r.score <= -0.75
+    assert r.breakdown["ema_1h"].abstained is True
+    assert r.bucket is BiasBucket.MOST_BEAR
+    assert (r.pe_lots, r.ce_lots) == (2, 4)
+
+
+def test_extreme_bucket_allowed_with_agreeing_trend():
+    """The full bull/bear sets (ema_1h present and agreeing) still reach the naked buckets."""
+    bull = score_bias(_all_bull_inputs())
+    assert bull.bucket is BiasBucket.COMPLETE_BULL
+    assert (bull.pe_lots, bull.ce_lots) == (5, 0)
+
+
+def test_extreme_bull_downgraded_when_trend_disagrees():
+    """If the score still reaches the COMPLETE_BULL band but ema_1h is bearish, downgrade to the
+    defended MOST_BULL. (A light ema_1h weight keeps the score complete while the vote disagrees,
+    isolating the guard from the score-lowering effect of a heavy disagreeing vote.)"""
+    inp = _all_bull_inputs()
+    inp.ema_1h = _bear_ema()  # its own bar close (90) is below the stack -> vote -1
+    w = BiasWeights(w_ema_1h=0.5)  # 8.0/9.0 = 0.889 -> still COMPLETE_BULL band
+    r = score_bias(inp, weights=w)
+    assert r.score >= 0.75
+    assert r.breakdown["ema_1h"].vote == -1
+    assert r.bucket is BiasBucket.MOST_BULL
+    assert (r.pe_lots, r.ce_lots) == (4, 2)
