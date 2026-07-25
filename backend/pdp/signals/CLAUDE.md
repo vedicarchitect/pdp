@@ -39,10 +39,33 @@ this unreachable, protecting **both** backtest and live:
   `present_weight_frac` is reported on `BiasResult` and in `reason` (`quorum=…`).
 - **Extreme-bucket guard** (`_guard_extreme`). The two *naked* buckets `COMPLETE_BULL` (5:0) and
   `COMPLETE_BEAR` (0:5) are the only undefended positions in the ratio table. They are reachable
-  only when `ema_1h` is present (non-abstaining) **and** agrees with the bucket's direction;
-  otherwise the bucket downgrades to the nearest *defended* bucket (`MOST_BULL`/`MOST_BEAR`, 4:2 /
-  2:4), which keeps a protective opposite side. (The follow-up `bias-ranking-multisignal` extends the
-  agreement requirement to also include `st_1h`.)
+  only when **both** higher-timeframe trend votes — `ema_1h` and `st_1h` — are present
+  (non-abstaining) **and** agree with the bucket's direction; otherwise the bucket downgrades to the
+  nearest *defended* bucket (`MOST_BULL`/`MOST_BEAR`, 4:2 / 2:4), which keeps a protective opposite
+  side. Requiring two independent 1h trend families (EMA alignment + SuperTrend agreement) means a
+  fully-naked directional bet needs two confirmations, not one (`bias-ranking-multisignal`,
+  2026-07-22).
+
+## Multi-signal votes (`bias-ranking-multisignal`, 2026-07-22)
+
+Beyond the original eight, `score_bias` takes seven more abstention-aware votes. All new weights
+default to `0.0` — inert in the score and out of the quorum denominator — so they are opt-in per
+config. The `strangle_*_hedged.yaml` baselines are left pristine (new weights stay `0.0`) so an A/B
+comparison is clean; the actual starting values live in the new benchmark configs
+(`backtest/configs/strangle_*_multisignal.yaml`), and walk-forward tuning is the required gate
+before any promotion to the live `strategies/directional_strangle_*.yaml`. The same `IndicatorEngine`
+tracker types produce the inputs on both paths (backtest loader's warmed trackers + live engine),
+keeping backtest↔live parity (rule #4 — consume, never recompute).
+
+| Input | Weight | Vote (`_st_vote`/`_psar_vote`/`_atm_vote`) |
+|-------|--------|--------------------------------------------|
+| `st_5m/st_15m/st_1h: (dir_ST(10,2), dir_ST(10,3))` | `w_st_*` | `+1` iff both variants bullish, `-1` iff both bearish, else `0`; `None` abstains |
+| `psar_5m/psar_15m/psar_1h: int` (SAR direction) | `w_psar_*` | votes the direction; `None` abstains |
+| `atm_ce_5m/atm_pe_5m: SeriesInputs` (EMA+ST+PSAR read per leg) | `w_atm` | `_series_trend` reduces each leg to ±1/0; combine CE with **inverted** PE (a falling PE ⇒ bullish underlying); `+1`/`-1` only when both agree, else `0`; abstains if either leg absent |
+
+`SeriesInputs` bundles one series' `ema`/`st`/`psar` sub-reads; `_series_trend` sums the *present*
+sub-reads and returns the sign, abstaining only when the series has no data at all. It is reused for
+the two ATM legs.
 
 Note these are a *backstop*: live already blocks entry on any unseeded indicator via
 `DirectionalStrangle.check_readiness`, and the backtest now loads a spot-only warmup prefix

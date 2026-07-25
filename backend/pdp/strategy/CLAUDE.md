@@ -14,7 +14,7 @@
 | `strikes.py` | 3.6 KB | Strike selection helpers (ATM, OTM ±N) |
 | `schemas.py` | 0.8 KB | Pydantic schemas for strategy API |
 | `routes.py` | — | `/api/v1/strategies` endpoints: list (merges live host state + `unified_registry`, adds `params_schema`/`defaults`/`source`), `POST /register` (new strategy via registry), start, stop; plus strangle-console + levels routers; `strangle_monitor` (`/api/v1/strangle/monitor`) fetches its 4 independent I/O groups (indices, per-leg Greeks, indicator matrix, ATM CE/PE rows) via `asyncio.gather` — see `strangle-monitor-concurrent-fetch` |
-| `atm_suite.py` | — | On-demand NIFTY ATM CE/PE indicator rows for `/monitor` — resolves the ATM strike, rolls up session-anchored bars via `pdp.market.bars.rollup_1m_bars`, builds one row per option side; each side opens its own DB session so the two sides can be gathered concurrently (`AsyncSession` can't run two queries on one connection) |
+| `atm_suite.py` | — | On-demand ATM CE/PE indicator rows for `/monitor` (`resolve_nifty_atm_option`/`build_atm_option_row`, NIFTY-only) plus a generic `resolve_atm_option(underlying, ...)` for any underlying, used by `atm_trend_read` — the ATM CE/PE 5m EMA/SuperTrend/PSAR trend read `directional_strangle.py` feeds into the bias engine's `w_atm` vote (`bias-ranking-multisignal`). Rolls up session-anchored bars via `pdp.market.bars.rollup_1m_bars`, builds one row per option side; each side opens its own DB session so the two sides can be gathered concurrently (`AsyncSession` can't run two queries on one connection) |
 | `promotion.py` | ~2 KB | `promote_run(run_id, strategy_id)` — PASS-gate promote: writes `strategies/<id>.yaml` + `backtest_promotions` audit doc in Mongo |
 
 ## Strategy YAML Config (strategies/*.yaml)

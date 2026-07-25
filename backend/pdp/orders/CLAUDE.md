@@ -57,6 +57,17 @@ Strategy-private classification — which `leg_kind` (`short`/`hedge`/`momentum`
 `_rehydrate_legs` on restart, so leg type survives a process restart without being re-inferred from
 the broker's `net_qty` sign (which cannot distinguish a long hedge from a long momentum leg).
 
+## Cancel/fill race (`strangle-orphan-fill-reconciliation`, 2026-07-25)
+
+`OrderRouter.cancel_open_entry_orders` and `PaperBroker._fill` both mutate the same `Order` row from
+independent sessions and must not race each other: `cancel_open_entry_orders`'s SELECT uses
+`.with_for_update()` so a concurrent `_fill` (which locks the row first) is re-checked by Postgres
+before the cancel is allowed to land — without the lock, a plain SELECT could read a row as OPEN and
+then blindly overwrite a fill that committed CANCELLED in between. `_fill` itself re-checks the
+order's authoritative DB status under its own `SELECT ... FOR UPDATE` before committing a fill, so a
+cancelled order can't still fill. `strangle_orphan_fill_reconciliation.md` in memory has the full
+incident writeup.
+
 ## Active Specs
 
 `order-approval-center` (in-flight) — manual approval gate before live sends.
