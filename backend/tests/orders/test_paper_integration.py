@@ -225,6 +225,231 @@ class TestPositionMathDirect:
         assert pos.realized_pnl == Decimal("-2188.5435")
 
 
+class TestUnrealizedPnlResetOnFlat:
+    """strangle-orphan-fill-reconciliation: a position that just went flat must not
+    keep displaying stale mark-to-market from before the close."""
+
+    @pytest.mark.asyncio
+    async def test_full_close_zeroes_unrealized_pnl(self) -> None:
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="63925",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-650,
+            avg_price=Decimal("135.30"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("-18343.9100"),  # stale mark from before close
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.BUY, qty=650)  # covering buy closes the short
+        await broker._upsert_position(session, order, Decimal("135.35"), datetime.now(UTC))
+
+        assert pos.net_qty == 0
+        assert pos.unrealized_pnl == Decimal("0"), (
+            f"flat position must not carry stale unrealized_pnl, got {pos.unrealized_pnl}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_close_keeps_live_unrealized_pnl(self) -> None:
+        """A position that remains open after a partial fill is not touched."""
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        pos = Position(
+            id=1,
+            security_id="63925",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=-650,
+            avg_price=Decimal("135.30"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("-500.0000"),
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: pos))
+        session.flush = AsyncMock()
+
+        order = _open_order(side=Side.BUY, qty=200)  # partial cover, still short 450
+        await broker._upsert_position(session, order, Decimal("135.35"), datetime.now(UTC))
+
+        assert pos.net_qty == -450
+        assert pos.unrealized_pnl == Decimal("-500.0000"), (
+            "a still-open position's unrealized_pnl must be left for the live MTM loop"
+        )
+
+
+class TestFillRespectsConcurrentCancel:
+    """strangle-orphan-fill-reconciliation: `_fill` must re-check the order's
+    authoritative DB status before committing a fill. A stale in-memory Order
+    snapshot (taken when the tick loop read `self._open_orders`) must not fill if
+    a concurrent `cancel_open_entry_orders`/`cancel_order` call already marked the
+    DB row CANCELLED — this is the exact race that orphaned a NIFTY position on
+    2026-07-24."""
+
+    @staticmethod
+    def _cm(session: AsyncMock):
+        class _CM:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return _CM()
+
+    @pytest.mark.asyncio
+    async def test_fill_skipped_when_order_already_cancelled_in_db(self) -> None:
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        stale_order = _open_order(order_id=63925, security_id="OPT_1", side=Side.SELL, qty=650)
+        broker._open_orders = {"OPT_1": [stale_order]}
+
+        db_order = _open_order(order_id=63925, security_id="OPT_1", side=Side.SELL, qty=650)
+        db_order.status = OrderStatus.CANCELLED
+
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: db_order))
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+        broker._session_maker = MagicMock(return_value=self._cm(session))
+
+        await broker._fill(stale_order, Decimal("112.52"), "NSE_FNO")
+
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        assert stale_order not in broker._open_orders.get("OPT_1", [])
+
+    @pytest.mark.asyncio
+    async def test_fill_proceeds_when_order_still_open_in_db(self) -> None:
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._slippage_bps = Decimal("0")
+        broker._costs = {}
+        broker._hub = None
+
+        order = _open_order(order_id=63963, security_id="OPT_2", side=Side.SELL, qty=650)
+        broker._open_orders = {"OPT_2": [order]}
+
+        db_order = _open_order(order_id=63963, security_id="OPT_2", side=Side.SELL, qty=650)
+        db_order.status = OrderStatus.OPEN
+
+        pos = Position(
+            id=2,
+            security_id="OPT_2",
+            exchange_segment="NSE_FNO",
+            product=Product.NRML,
+            net_qty=0,
+            avg_price=Decimal("0"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+        )
+
+        calls = {"n": 0}
+
+        async def _execute(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return MagicMock(scalar_one_or_none=lambda: db_order)
+            if calls["n"] == 3:
+                return MagicMock(scalar_one_or_none=lambda: pos)
+            return MagicMock()
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_execute)
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+        broker._session_maker = MagicMock(return_value=self._cm(session))
+
+        await broker._fill(order, Decimal("3.10"), "NSE_FNO")
+
+        session.commit.assert_called_once()
+        assert order not in broker._open_orders.get("OPT_2", [])
+        assert pos.net_qty == -650
+
+
+class TestLoadOpenOrdersExpiresStaleOnBoot:
+    """strangle-orphan-fill-reconciliation: on 2026-07-25, restarting the API
+    reloaded a MARKET order placed the previous IST trading day (2026-07-24,
+    left OPEN when the strategy gave up on it without confirming the cancel)
+    and filled it for real the moment a live tick landed — creating a brand
+    new orphaned position almost 25 hours later. `_load_open_orders` must not
+    re-arm an OPEN order from a prior IST trading day; it should expire
+    (CANCEL) it in the DB instead."""
+
+    @staticmethod
+    def _cm(session: AsyncMock):
+        class _CM:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return _CM()
+
+    @pytest.mark.asyncio
+    async def test_stale_open_order_expired_not_rearmed(self) -> None:
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._open_orders = {}
+
+        stale = _open_order(order_id=2958, security_id="OPT_STALE")
+        stale.status = OrderStatus.OPEN
+        stale.placed_at = datetime(2026, 7, 24, 6, 25, 20, tzinfo=UTC)
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [stale]))
+        )
+        session.commit = AsyncMock()
+        broker._session_maker = MagicMock(return_value=self._cm(session))
+
+        await broker._load_open_orders()
+
+        assert broker._open_orders.get("OPT_STALE", []) == []
+        assert stale.status == OrderStatus.CANCELLED
+        assert stale.cancelled_at is not None
+        session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_open_order_from_today_is_loaded_normally(self) -> None:
+        broker = PaperBroker.__new__(PaperBroker)
+        broker._open_orders = {}
+
+        fresh = _open_order(order_id=3001, security_id="OPT_FRESH")
+        fresh.status = OrderStatus.OPEN
+        fresh.placed_at = datetime.now(UTC)
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [fresh]))
+        )
+        session.commit = AsyncMock()
+        broker._session_maker = MagicMock(return_value=self._cm(session))
+
+        await broker._load_open_orders()
+
+        assert fresh in broker._open_orders.get("OPT_FRESH", [])
+        assert fresh.status == OrderStatus.OPEN
+        session.commit.assert_not_called()
+
+
 # ------------------------------------------------------------------ #
 # Charges                                                             #
 # ------------------------------------------------------------------ #

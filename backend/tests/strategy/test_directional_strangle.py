@@ -1304,6 +1304,18 @@ async def test_failed_open_does_not_latch_bucket_and_retries_next_bar():
     async def _fill(_sid):
         return None if cold["v"] else Decimal("100")
 
+    # `_FakeOrders.place_order` sets an avg price the instant an order is placed (its
+    # "instant fill" simplification, relied on by many other tests in this file) — that
+    # would make the strategy's post-cancel broker-position recovery check (see
+    # `_confirm_fill_or_recover`) see a "real fill" even while this test means to
+    # simulate the price genuinely still being unresolved. Gate it on the same cold flag.
+    real_get_position = s.ctx.orders.get_position
+
+    async def _get_position(sid):
+        if cold["v"]:
+            return 0, Decimal("0")
+        return await real_get_position(sid)
+
     bar1 = _make_bar(ist_hhmm="10:20")
     bar2 = _make_bar(ist_hhmm="10:25")
 
@@ -1311,6 +1323,7 @@ async def test_failed_open_does_not_latch_bucket_and_retries_next_bar():
         patch("pdp.strategies.directional_strangle.score_bias", return_value=bull),
         patch("pdp.strategies.directional_strangle.resolve_otm_option", AsyncMock(side_effect=_resolve)),
         patch.object(s, "_resolve_fill_price", AsyncMock(side_effect=_fill)),
+        patch.object(s.ctx.orders, "get_position", AsyncMock(side_effect=_get_position)),
     ):
         await s.on_bar(bar1)  # cold: open aborts
         assert len(s._short_legs) == 0, "no legs must open while the fill price is cold"

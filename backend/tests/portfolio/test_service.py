@@ -169,3 +169,32 @@ async def test_flush_dirty_writes_to_pg():
     mock_session.execute.assert_called_once()
     mock_session.commit.assert_called_once()
     assert not svc._dirty
+
+
+@pytest.mark.asyncio
+async def test_flush_dirty_where_clause_excludes_flat_positions() -> None:
+    """strangle-orphan-fill-reconciliation: `_run_flush` calls `_flush_dirty()` before
+    `_load_positions()` reloads the cache from the DB each cycle, so a position that a
+    fill flattened (`paper.py`'s `upsert_position`, which zeroes `unrealized_pnl` on the
+    same commit) since the last reload still has a stale nonzero cached MTM here. Without
+    a `net_qty != 0` guard in the WHERE clause, this flush would overwrite that fill's
+    correct zero right back to the stale value — found live 2026-07-25 while flattening
+    the strangle-orphan-fill-reconciliation orphans."""
+    svc = _make_service()
+    key = ("13", "NSE_FNO", "NRML")
+    svc._cache[key] = _make_pos(net_qty=1, avg_price="22000.0000")
+    svc._cache[key].unrealized_pnl = Decimal("500.0000")
+    svc._dirty.add(key)
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+    mock_session.commit = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("pdp.portfolio.service.AsyncSession", return_value=mock_session):
+        await svc._flush_dirty()
+
+    stmt = mock_session.execute.call_args[0][0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "net_qty" in compiled

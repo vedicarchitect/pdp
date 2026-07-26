@@ -12,7 +12,12 @@ from pdp.signals.bias import (
     BiasInputs,
     BiasWeights,
     CamLevels,
+    SeriesInputs,
     TimeframeEMA,
+    _atm_vote,
+    _psar_vote,
+    _series_trend,
+    _st_vote,
     score_bias,
 )
 
@@ -40,6 +45,9 @@ def _all_bull_inputs() -> BiasInputs:
         pwl=84.0,
         orb_high=97.5,
         orb_low=93.0,
+        # st_1h agreeing-bullish so the two-family extreme guard permits COMPLETE_BULL
+        # (weight defaults 0.0, so it drives the guard without shifting the score).
+        st_1h=(1, 1),
         pcr=1.3,
         vix_now=12.0,
         vix_day_open=12.5,
@@ -117,6 +125,7 @@ def test_all_bear_is_complete_bear_ratio():
         pwl=85,
         orb_high=89,
         orb_low=86,
+        st_1h=(-1, -1),  # agreeing-bearish 1h SuperTrend permits COMPLETE_BEAR
         pcr=0.7,
         vix_now=12.0,
         vix_day_open=12.5,
@@ -242,10 +251,11 @@ def test_breakdown_records_vote_for_present_input():
 
 
 def test_breakdown_covers_every_input_every_evaluation():
-    """Every evaluation's breakdown names all eight inputs, regardless of which abstain."""
+    """Every evaluation's breakdown names all fifteen inputs, regardless of which abstain."""
     r = score_bias(BiasInputs(spot=100.0))
     assert set(r.breakdown) == {
         "ema_1h", "ema_15m", "ema_5m", "cam_daily", "cam_weekly", "swing", "orb", "pcr",
+        "st_5m", "st_15m", "st_1h", "psar_5m", "psar_15m", "psar_1h", "atm",
     }
     assert all(v.abstained for v in r.breakdown.values())
 
@@ -318,3 +328,104 @@ def test_extreme_bull_downgraded_when_trend_disagrees():
     assert r.breakdown["ema_1h"].vote == -1
     assert r.bucket is BiasBucket.MOST_BULL
     assert (r.pe_lots, r.ce_lots) == (4, 2)
+
+
+# --------------------------------------------------------------------------- #
+# Multi-signal votes: SuperTrend / PSAR / ATM (bias-ranking-multisignal)
+# --------------------------------------------------------------------------- #
+
+
+def test_st_vote_agreement_table():
+    """Agreement of both (10,2) and (10,3) variants required for a directional ST vote."""
+    assert _st_vote((1, 1)) == 1
+    assert _st_vote((-1, -1)) == -1
+    assert _st_vote((1, -1)) == 0  # disagree -> weight, no direction
+    assert _st_vote((-1, 1)) == 0
+    assert _st_vote(None) is None  # unseeded -> abstain
+
+
+def test_psar_vote_direction():
+    assert _psar_vote(1) == 1
+    assert _psar_vote(-1) == -1
+    assert _psar_vote(None) is None
+
+
+def test_series_trend_combines_present_subreads():
+    """A series' EMA/ST/PSAR sub-reads sum, and the sign is the trend; abstains only when
+    the series has no data at all."""
+    # EMA bullish (price>50EMA), ST bullish, PSAR bullish -> +1
+    bull = SeriesInputs(ema=_bull_ema(), st=(1, 1), psar=1)
+    assert _series_trend(bull) == 1
+    # EMA bearish, ST bearish, PSAR bearish -> -1
+    bear = SeriesInputs(ema=_bear_ema(), st=(-1, -1), psar=-1)
+    assert _series_trend(bear) == -1
+    # net zero (one up, one down) -> 0
+    mixed = SeriesInputs(ema=_bull_ema(), psar=-1)  # +1 and -1 -> 0
+    assert _series_trend(mixed) == 0
+    # only one live sub-read still contributes
+    assert _series_trend(SeriesInputs(psar=1)) == 1
+    # nothing present -> abstain
+    assert _series_trend(SeriesInputs()) is None
+    assert _series_trend(None) is None
+
+
+def test_atm_vote_inverts_pe_and_requires_agreement():
+    ce_bull = SeriesInputs(ema=_bull_ema(), st=(1, 1), psar=1)  # CE rising -> bullish underlying
+    pe_bear = SeriesInputs(ema=_bear_ema(), st=(-1, -1), psar=-1)  # PE falling -> bullish underlying
+    # CE up + PE down -> both point bullish once PE is inverted -> +1
+    assert _atm_vote(ce_bull, pe_bear) == 1
+    # CE down + PE up -> both bearish -> -1
+    assert _atm_vote(pe_bear, ce_bull) == -1
+    # CE up + PE up (PE rising) -> inverted PE is bearish -> conflict -> 0
+    assert _atm_vote(ce_bull, ce_bull) == 0
+    # either side absent -> abstain
+    assert _atm_vote(ce_bull, None) is None
+    assert _atm_vote(None, pe_bear) is None
+
+
+def test_new_votes_flow_through_score_when_weighted():
+    """With non-zero weights the new votes participate in the weighted average and breakdown."""
+    inp = BiasInputs(
+        spot=100.0,
+        st_1h=(1, 1),
+        psar_1h=1,
+        atm_ce_5m=SeriesInputs(ema=_bull_ema(), st=(1, 1), psar=1),
+        atm_pe_5m=SeriesInputs(ema=_bear_ema(), st=(-1, -1), psar=-1),
+    )
+    w = BiasWeights(w_st_1h=1.0, w_psar_1h=1.0, w_atm=1.0)
+    r = score_bias(inp, weights=w)
+    assert r.votes == {"st_1h": 1, "psar_1h": 1, "atm": 1}
+    assert r.score == 1.0
+    assert r.breakdown["atm"].vote == 1
+    assert r.breakdown["st_1h"].abstained is False
+
+
+def test_new_votes_abstain_and_stay_out_of_denominator():
+    """A weighted-but-absent new input abstains and is excluded from the quorum denominator,
+    exactly like the original eight."""
+    w = BiasWeights(w_st_1h=1.0)  # weighted but no st_1h supplied
+    r = score_bias(BiasInputs(spot=100.0, pcr=1.3), weights=w)
+    assert r.breakdown["st_1h"].abstained is True
+    # denominator = configured non-zero weights that were present; st_1h absent so excluded
+    assert r.votes == {"pcr": 1}
+
+
+def test_extreme_needs_both_ema_and_st_1h():
+    """The naked COMPLETE buckets now require BOTH ema_1h and st_1h present-and-agreeing."""
+    # ema_1h agrees but st_1h abstains -> downgrade to defended MOST_BULL
+    inp = _all_bull_inputs()
+    inp.st_1h = None
+    r = score_bias(inp)
+    assert r.score >= 0.75
+    assert r.bucket is BiasBucket.MOST_BULL
+    assert (r.pe_lots, r.ce_lots) == (4, 2)
+
+    # ema_1h agrees but st_1h disagrees (bearish) -> still downgrade
+    inp2 = _all_bull_inputs()
+    inp2.st_1h = (-1, -1)
+    r2 = score_bias(inp2)
+    assert r2.bucket is BiasBucket.MOST_BULL
+
+    # both agree -> naked COMPLETE_BULL allowed
+    r3 = score_bias(_all_bull_inputs())
+    assert r3.bucket is BiasBucket.COMPLETE_BULL

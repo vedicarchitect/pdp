@@ -1,0 +1,86 @@
+underlying: SENSEX
+security_id: "51"
+adjustment_on_flip: true
+vix_gate_enabled: false        # parity with live: 5yr data shows the gate costs ~Rs 33L + raises MaxDD
+momentum_enabled: false
+momentum_premium_target: 50000.0
+momentum_score_threshold: 0.5
+day_loss_limit: 15000.0
+dte_max: 15
+entry_after_ist: '10:15'
+extreme_atm: true
+hedge_enabled: true
+hedge_prem_max: 8.0
+hedge_prem_min: 2.0
+lot_size: 20
+neutral_no_trade: false
+otm_steps: 2
+pct_stop_all: 0.4
+pct_stop_enabled: true
+pct_stop_half: 0.3
+premium_floor: 60.0
+ratio_table:
+  complete_bear:
+  - 0
+  - 5
+  complete_bull:
+  - 5
+  - 0
+  more_bear:
+  - 2
+  - 3
+  more_bull:
+  - 3
+  - 2
+  most_bear:
+  - 2
+  - 4
+  most_bull:
+  - 4
+  - 2
+  neutral:
+  - 3
+  - 3
+roll_enabled: true
+roll_target_min_prem: 60.0
+roll_trigger_prem: 25.0
+scale_lots: 2
+squareoff_ist: '15:10'
+strike_method: premium
+strike_step: 100
+take_profit_extreme_only: false
+take_profit_pct: 0.5
+target_delta: 0.6
+timeframe_min: 5
+# --- bias-ranking-multisignal knobs (benchmark variant of the *_hedged baseline) ---
+# SuperTrend agreement variants must match the live MATRIX_ST_VARIANTS (10,2)+(10,3).
+st_fast_period: 10
+st_fast_mult: 2.0
+st_slow_period: 10
+st_slow_mult: 3.0
+psar_step: 0.02
+psar_max_step: 0.2
+atm_trend_enabled: true
+weights:
+  pcr_bear: 0.9
+  pcr_bull: 1.1
+  th_complete: 0.85
+  th_more: 0.3
+  th_most: 0.6
+  vix_day_high_eps: 1.0e-06
+  vix_spike_pct: 0.05
+  w_cam_daily: 1.0
+  w_cam_weekly: 1.0
+  w_ema_15m: 2.0
+  w_ema_1h: 2.5
+  w_ema_5m: 1.5
+  w_orb: 1.0
+  w_pcr: 1.0
+  w_swing: 1.0
+  w_st_1h: 1.5
+  w_st_15m: 1.0
+  w_st_5m: 0.5
+  w_psar_1h: 1.0
+  w_psar_15m: 0.5
+  w_psar_5m: 0.5
+  w_atm: 1.0

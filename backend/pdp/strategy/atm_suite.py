@@ -19,8 +19,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pdp.indicators.ema import EMATracker
 from pdp.indicators.engine import IndicatorEngine
+from pdp.indicators.psar import ParabolicSARTracker
+from pdp.indicators.supertrend import SuperTrendTracker
 from pdp.market.bars import BarClosed, rollup_1m_bars
+from pdp.signals.bias import SeriesInputs, tf_ema_from_values
 from pdp.strategy.strikes import STRIKE_STEP, atm_strike, nearest_expiry, resolve_otm_option
 
 if TYPE_CHECKING:
@@ -48,17 +52,84 @@ async def resolve_nifty_atm_option(
     """Resolve the current NIFTY ATM CE or PE: (security_id, strike, expiry), or None if
     the instruments table has no matching row for today's expiry (degrade honestly rather
     than guessing a security_id)."""
-    step = STRIKE_STEP["NIFTY"]
-    expiry = await nearest_expiry(session, "NIFTY")
+    return await resolve_atm_option(session, "NIFTY", spot, option_type)
+
+
+# Trend read reuses the backtest loader's EMA(9/20/50) periods so both paths assemble the
+# same TimeframeEMA; the ST variants match MATRIX_ST_VARIANTS (10,2)+(10,3).
+_TREND_EMA_PERIODS = [9, 20, 50]
+
+
+async def resolve_atm_option(
+    session: AsyncSession, underlying: str, spot: float, option_type: str
+) -> tuple[str, float, date] | None:
+    """Resolve the current ATM CE or PE for any underlying: (security_id, strike, expiry).
+
+    Generalises ``resolve_nifty_atm_option`` beyond NIFTY (BANKNIFTY/SENSEX strike steps).
+    None when the instruments table has no matching row for the nearest expiry.
+    """
+    step = STRIKE_STEP.get(underlying.upper(), 50)
+    expiry = await nearest_expiry(session, underlying)
     if expiry is None:
         return None
     inst = await resolve_otm_option(
-        session, underlying="NIFTY", spot=spot, option_type=option_type,
+        session, underlying=underlying, spot=spot, option_type=option_type,
         otm_steps=0, strike_step=step, expiry=expiry,
     )
     if inst is None:
         return None
     return inst.security_id, atm_strike(spot, step), expiry
+
+
+async def atm_trend_read(
+    option_bars_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
+    session: AsyncSession,
+    *,
+    underlying: str,
+    spot: float,
+    option_type: str,
+    since: datetime,
+    tf: str = "5m",
+) -> SeriesInputs | None:
+    """A ``SeriesInputs`` (EMA / ST(10,2)+(10,3) / PSAR) for the current ATM CE or PE.
+
+    Off the bias hot path (Mongo read + throwaway trackers). Replays the option's own
+    ``since``-onward 1m ``option_bars`` rolled up to ``tf`` through the same tracker classes the
+    backtest loader uses, so the live and backtest ATM reads are bit-identical given the same
+    bars. ``since`` should be the current IST session open so the read matches the backtest's
+    single-day option series (no cross-day warmup). Returns ``None`` (abstain) if the strike or
+    its bars are unavailable — the ATM vote then simply drops out of the score.
+    """
+    resolved = await resolve_atm_option(session, underlying, spot, option_type)
+    if resolved is None:
+        return None
+    security_id, _strike, _expiry = resolved
+    bars_1m = await _fetch_option_1m_bars(option_bars_col, security_id, since)
+    if not bars_1m:
+        return None
+    tf_minutes = _ROLLUP_TF_MINUTES.get(tf)
+    if tf_minutes is None:
+        return None
+    tf_bars = rollup_1m_bars(bars_1m, tf_minutes, tf)
+    if not tf_bars:
+        return None
+
+    tr_ema = EMATracker(periods=_TREND_EMA_PERIODS)
+    st_fast = SuperTrendTracker(10, 2.0)
+    st_slow = SuperTrendTracker(10, 3.0)
+    psar = ParabolicSARTracker()
+    es = sf = ss = ps = None
+    last_close = 0.0
+    for bar in tf_bars:
+        h, lo, c = float(bar.high), float(bar.low), float(bar.close)
+        es = tr_ema.update(h, lo, c, 0.0, bar.bar_time)
+        sf = st_fast.update(h, lo, c, bar.bar_time)
+        ss = st_slow.update(h, lo, c, bar.bar_time)
+        ps = psar.update(h, lo, c, 0.0, bar.bar_time)
+        last_close = c
+    ema_read = tf_ema_from_values(dict(es.values) if es is not None else None, last_close)
+    st_pair = (sf.direction, ss.direction) if (sf is not None and ss is not None) else None
+    return SeriesInputs(ema=ema_read, st=st_pair, psar=ps.direction if ps is not None else None)
 
 
 async def _fetch_option_1m_bars(

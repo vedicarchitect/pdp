@@ -38,6 +38,17 @@ class IndicatorReader:
             return None
         return self._engine.get(security_id, timeframe)
 
+    def supertrend_variants(self, security_id: str, timeframe: str) -> dict[str, SuperTrendState]:
+        """Latest state for each matrix SuperTrend variant (``st_10_2``/``st_10_3``/``st_3_1``).
+
+        Empty dict when the engine is absent or no suite is configured for this ``(sid, tf)`` —
+        never a partial/fabricated entry. The bias engine consumes the ``(10,2)``/``(10,3)``
+        pair for its per-timeframe SuperTrend-agreement vote.
+        """
+        if self._engine is None:
+            return {}
+        return self._engine.get_supertrend_variants(security_id, timeframe)
+
     def snapshot(self, security_id: str, timeframe: str) -> Any:
         if self._engine is None:
             return None
@@ -242,6 +253,9 @@ class StrategyContext:
     market: MarketControl | None = None
     session_maker: async_sessionmaker[AsyncSession] | None = None
     chain_hub: Any | None = None
+    # MongoDB ``option_bars`` collection (motor async), used by the directional strangle's
+    # ATM CE/PE trend read. None in paper smoke tests with no Mongo — the ATM vote then abstains.
+    option_bars_col: Any | None = None
     _event_service: EventService | None = None
 
     def emit_critical(

@@ -49,6 +49,7 @@ from pdp.signals.bias import (
     BiasInputs,
     BiasWeights,
     CamLevels,
+    SeriesInputs,
     TimeframeEMA,
     score_bias,
 )
@@ -85,6 +86,27 @@ def _to_tf_ema(ema_state: Any, price: float) -> TimeframeEMA | None:
     return TimeframeEMA(price=price, ema9=v[9], ema20=v[20], ema50=v[50])
 
 
+def _st_pair_from_variants(variants: dict[str, Any]) -> tuple[int, int] | None:
+    """``(dir_ST(10,2), dir_ST(10,3))`` from the engine's variant bundle, matching the backtest
+    loader's SuperTrend-agreement input. ``None`` if either variant is absent/unseeded so the
+     st_* vote abstains rather than reading a partial pair."""
+    fast = variants.get("st_10_2")
+    slow = variants.get("st_10_3")
+    if fast is None or slow is None:
+        return None
+    if fast.direction is None or slow.direction is None:
+        return None
+    return int(fast.direction), int(slow.direction)
+
+
+def _psar_dir(psar_state: Any) -> int | None:
+    """Parabolic SAR direction (+1/-1), or None when the SAR is unseeded."""
+    if psar_state is None:
+        return None
+    d = getattr(psar_state, "direction", None)
+    return int(d) if d is not None else None
+
+
 def weights_from_params(p: dict[str, Any]) -> BiasWeights:
     """Build BiasWeights from strategy params.
 
@@ -102,6 +124,16 @@ def weights_from_params(p: dict[str, Any]) -> BiasWeights:
         w_swing=float(p.get("w_swing", 1.0)),
         w_orb=float(p.get("w_orb", 1.0)),
         w_pcr=float(p.get("w_pcr", 1.0)),
+        # Multi-signal votes (bias-ranking-multisignal): default 0.0 so they are inert until a
+        # config opts in (walk-forward sets the finals). Non-zero values trigger the load-time
+        # satisfiability check for the matching watchlist family / options poller.
+        w_st_1h=float(p.get("w_st_1h", 0.0)),
+        w_st_15m=float(p.get("w_st_15m", 0.0)),
+        w_st_5m=float(p.get("w_st_5m", 0.0)),
+        w_psar_1h=float(p.get("w_psar_1h", 0.0)),
+        w_psar_15m=float(p.get("w_psar_15m", 0.0)),
+        w_psar_5m=float(p.get("w_psar_5m", 0.0)),
+        w_atm=float(p.get("w_atm", 0.0)),
         th_complete=float(p.get("th_complete", 0.85)),
         th_most=float(p.get("th_most", 0.60)),
         th_more=float(p.get("th_more", 0.30)),
@@ -235,6 +267,12 @@ class DirectionalStrangle(Strategy):
         # (before the no-latch fix) the bucket latched with zero legs. See
         # `strangle-entry-fill-race-and-latch`.
         self._entry_ltp_wait_s: float = float(p.get("entry_ltp_wait_s", 4.0))
+
+        # Reconciliation must run unattended — see strangle-orphan-fill-reconciliation.
+        # `_reconcile_divergences` used to only run inside `state()` (REST-only), so an
+        # orphan/untracked position between console polls went undetected indefinitely.
+        self._reconcile_interval_s: float = float(p.get("reconcile_interval_s", 60.0))
+        self._reconcile_task: asyncio.Task[None] | None = None
 
         # Rollup params: close short when LTP < roll_trigger_prem, reopen at >= roll_target_min_prem
         self._roll_trigger_prem: float = float(p.get("roll_trigger_prem", 20.0))
@@ -381,6 +419,12 @@ class DirectionalStrangle(Strategy):
         # Rehydrate open legs from the durable position ledger (restart safety)
         await self._rehydrate_legs()
 
+        # Independent periodic reconciliation — runs whether or not anyone polls
+        # state() over HTTP. See strangle-orphan-fill-reconciliation.
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_loop(), name=f"{self.strategy_id}-reconcile"
+        )
+
     # ------------------------------------------------------------------ #
     # Leg structure — one OpenLeg per security_id                          #
     # ------------------------------------------------------------------ #
@@ -473,6 +517,21 @@ class DirectionalStrangle(Strategy):
                 if not is_seeded:
                     suffix = f"({period})" if period else ""
                     ind_blocked.append(f"{family.upper()}{suffix} on {tf}")
+
+        # SuperTrend-agreement variants (st_10_2/st_10_3) are tracked separately from the suite
+        # bundle, so seeding_summary never reports them. Gate them explicitly, but only when the
+        # st_* vote carries weight — an unseeded *weighted* SuperTrend blocks entry the same way
+        # an unseeded EMA does (parity with strangle-readiness-indicators-truthful); a zero-weight
+        # st_* stays out of the gate, exactly as it stays out of the score. See bias-ranking-multisignal.
+        _st_weight_by_tf = {
+            "5m": self._weights.w_st_5m,
+            "15m": self._weights.w_st_15m,
+            "1H": self._weights.w_st_1h,
+        }
+        for tf, w_st in _st_weight_by_tf.items():
+            if w_st > 0 and self.ctx.indicators is not None:
+                if _st_pair_from_variants(self.ctx.indicators.supertrend_variants(self.sid, tf)) is None:
+                    ind_blocked.append(f"ST(10,2)+(10,3) on {tf}")
 
         if ind_blocked:
             components.append(ReadinessComponent(
@@ -608,7 +667,8 @@ class DirectionalStrangle(Strategy):
             self.ctx.log.info("strategy_ready")
             self._entry_gate_blocked = False
 
-        inp = self._build_bias_inputs(spot)
+        atm_ce, atm_pe = await self._atm_trend_reads(spot)
+        inp = self._build_bias_inputs(spot, atm_ce=atm_ce, atm_pe=atm_pe)
         result = score_bias(inp, weights=self._weights, ratio_table=self._ratio_table)
         self._last_score = result.score
 
@@ -842,6 +902,13 @@ class DirectionalStrangle(Strategy):
     # ------------------------------------------------------------------ #
 
     async def on_shutdown(self) -> None:
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
+            except asyncio.CancelledError:
+                pass
+            self._reconcile_task = None
         if self.ctx.market is None:
             return
         for sid in list(self._subscribed_option_sids):
@@ -963,12 +1030,65 @@ class DirectionalStrangle(Strategy):
     # Bias input assembly                                                  #
     # ------------------------------------------------------------------ #
 
-    def _build_bias_inputs(self, spot: float) -> BiasInputs:
+    async def _atm_trend_reads(
+        self, spot: float
+    ) -> tuple[SeriesInputs | None, SeriesInputs | None]:
+        """Resolve the ATM CE/PE 5m trend reads for the ATM vote, off the bias hot path.
+
+        Only runs when the ATM vote carries weight and the Mongo ``option_bars`` collection is
+        wired (both true only in a live/paper session with market data). Reads only the current
+        IST session's option bars so the trend matches the backtest loader's single-day ATM
+        series. Any failure degrades to ``(None, None)`` — the ATM vote abstains, never crashes
+        the bias evaluation.
+        """
+        if self._weights.w_atm <= 0:
+            return None, None
+        col = getattr(self.ctx, "option_bars_col", None)
+        if col is None or self.ctx.session_maker is None:
+            return None, None
+        try:
+            from pdp.strategy.atm_suite import atm_trend_read
+
+            now_ist = datetime.now(tz=_IST)
+            session_open_ist = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+            since = session_open_ist.astimezone(UTC)
+
+            async def _read(option_type: str) -> SeriesInputs | None:
+                # Each leg gets its own AsyncSession — one session can't run two
+                # queries concurrently, so CE/PE must not share one across the gather.
+                async with self.ctx.session_maker() as session:
+                    return await atm_trend_read(
+                        col, session, underlying=self.underlying, spot=spot,
+                        option_type=option_type, since=since,
+                    )
+
+            ce, pe = await asyncio.gather(_read("CE"), _read("PE"))
+            return ce, pe
+        except Exception as exc:
+            self.ctx.log.warning("atm_trend_read_failed", exc=str(exc))
+            return None, None
+
+    def _build_bias_inputs(
+        self,
+        spot: float,
+        atm_ce: SeriesInputs | None = None,
+        atm_pe: SeriesInputs | None = None,
+    ) -> BiasInputs:
         ind = self.ctx.indicators
 
         ema_5m = _to_tf_ema(ind.ema(self.sid, "5m"), spot) if ind else None
         ema_15m = _to_tf_ema(ind.ema(self.sid, "15m"), spot) if ind else None
         ema_1h = _to_tf_ema(ind.ema(self.sid, "1H"), spot) if ind else None
+
+        # SuperTrend (10,2)+(10,3) agreement + Parabolic SAR direction per timeframe. Sourced
+        # from the universal engine (rule #4 — consume, never recompute); each abstains until
+        # seeded, exactly as the backtest loader's warmed trackers do.
+        st_5m = _st_pair_from_variants(ind.supertrend_variants(self.sid, "5m")) if ind else None
+        st_15m = _st_pair_from_variants(ind.supertrend_variants(self.sid, "15m")) if ind else None
+        st_1h = _st_pair_from_variants(ind.supertrend_variants(self.sid, "1H")) if ind else None
+        psar_5m = _psar_dir(ind.psar(self.sid, "5m")) if ind else None
+        psar_15m = _psar_dir(ind.psar(self.sid, "15m")) if ind else None
+        psar_1h = _psar_dir(ind.psar(self.sid, "1H")) if ind else None
 
         pivot = ind.pivots(self.sid, "1D") if ind else None
         cam_daily = _to_cam(pivot)
@@ -996,6 +1116,14 @@ class DirectionalStrangle(Strategy):
             pwl=pl.pwl if pl else None,
             orb_high=self._orb_high,
             orb_low=self._orb_low,
+            st_5m=st_5m,
+            st_15m=st_15m,
+            st_1h=st_1h,
+            psar_5m=psar_5m,
+            psar_15m=psar_15m,
+            psar_1h=psar_1h,
+            atm_ce_5m=atm_ce,
+            atm_pe_5m=atm_pe,
             pcr=pcr,
             vix_now=self._vix_now if self._vix_gate_enabled else None,
             vix_day_open=self._vix_day_open if self._vix_gate_enabled else None,
@@ -1180,6 +1308,32 @@ class DirectionalStrangle(Strategy):
         """
         return await self._resolve_fill_price(sid)
 
+    async def _confirm_fill_or_recover(self, sid: str, order: Any) -> Decimal | None:
+        """Before discarding an entry leg whose fill price didn't resolve in time,
+        confirm the order was actually cancelled. If it wasn't (it already filled, or
+        fills concurrently with the cancel attempt — e.g. during a tick
+        backpressure/drop event), the order is real and MUST be tracked rather than
+        orphaned — resolve its true fill price instead of giving up.
+
+        Checks only the broker's own recorded position average (`get_position`) —
+        never an LTP estimate. `_await_fill_avg_px` already exhausted the LTP fallback
+        layers before this was ever called; falling through to them again here would
+        accept "some price is available" as proof of a fill it may not be (e.g. if the
+        order was actually REJECTED, or cancelled by a different path just before this
+        check ran), registering a phantom leg with no matching broker position. See
+        strangle-orphan-fill-reconciliation.
+        """
+        cancelled_ids = await self.ctx.orders.cancel_open_entry_orders(sid)
+        if order.id in cancelled_ids:
+            return None
+        _, avg_px = await self.ctx.orders.get_position(sid)
+        if avg_px and avg_px > 0:
+            self.ctx.log.warning(
+                "entry_order_filled_after_abort", sid=sid, order_id=order.id, avg_px=str(avg_px)
+            )
+            return avg_px
+        return None
+
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> bool:
         """Open one short OTM leg; return True iff the short leg remains open afterwards.
 
@@ -1237,18 +1391,18 @@ class DirectionalStrangle(Strategy):
 
             avg_px = await self._await_fill_avg_px(sid)
             if avg_px is None or avg_px <= 0:
-                # Cannot resolve entry price — abort and square the leg.
-                await self.ctx.orders.cancel_open_entry_orders(sid)
-                from pdp.events.models import EventType
+                avg_px = await self._confirm_fill_or_recover(sid, order)
+                if avg_px is None or avg_px <= 0:
+                    from pdp.events.models import EventType
 
-                self.ctx.emit_critical(
-                    EventType.MISSING_LTP,
-                    sid,
-                    "Entry price unresolved",
-                    f"short leg {sid} aborted: entry price could not be resolved after all fallbacks",
-                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
-                )
-                return False
+                    self.ctx.emit_critical(
+                        EventType.MISSING_LTP,
+                        sid,
+                        "Entry price unresolved",
+                        f"short leg {sid} aborted: entry price could not be resolved after all fallbacks",
+                        {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                    )
+                    return False
             _reason = self._entry_reason()
             leg = OpenLeg(
                 security_id=sid,
@@ -1376,18 +1530,18 @@ class DirectionalStrangle(Strategy):
 
             avg_px = await self._await_fill_avg_px(h_sid)
             if avg_px is None or avg_px <= 0:
-                # Cannot resolve entry price for hedge — abort.
-                await self.ctx.orders.cancel_open_entry_orders(h_sid)
-                from pdp.events.models import EventType
+                avg_px = await self._confirm_fill_or_recover(h_sid, order)
+                if avg_px is None or avg_px <= 0:
+                    from pdp.events.models import EventType
 
-                self.ctx.emit_critical(
-                    EventType.MISSING_LTP,
-                    h_sid,
-                    "Hedge entry price unresolved",
-                    f"hedge leg {h_sid} aborted: entry price could not be resolved",
-                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
-                )
-                return
+                    self.ctx.emit_critical(
+                        EventType.MISSING_LTP,
+                        h_sid,
+                        "Hedge entry price unresolved",
+                        f"hedge leg {h_sid} aborted: entry price could not be resolved",
+                        {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                    )
+                    return
             h_strike = float(target.strike) if target.strike is not None else 0.0
             _reason = self._entry_reason()
             hedge_leg = OpenLeg(
@@ -1494,17 +1648,18 @@ class DirectionalStrangle(Strategy):
 
             avg_px = await self._await_fill_avg_px(sid)
             if avg_px is None or avg_px <= 0:
-                await self.ctx.orders.cancel_open_entry_orders(sid)
-                from pdp.events.models import EventType
+                avg_px = await self._confirm_fill_or_recover(sid, order)
+                if avg_px is None or avg_px <= 0:
+                    from pdp.events.models import EventType
 
-                self.ctx.emit_critical(
-                    EventType.MISSING_LTP,
-                    sid,
-                    "Momentum entry price unresolved",
-                    f"momentum leg {sid} aborted: entry price could not be resolved",
-                    {"strategy_id": self.strategy_id, "opt_type": opt_type},
-                )
-                return
+                    self.ctx.emit_critical(
+                        EventType.MISSING_LTP,
+                        sid,
+                        "Momentum entry price unresolved",
+                        f"momentum leg {sid} aborted: entry price could not be resolved",
+                        {"strategy_id": self.strategy_id, "opt_type": opt_type},
+                    )
+                    return
             _reason = self._entry_reason()
             momentum_leg = OpenLeg(
                 security_id=sid,
@@ -2013,6 +2168,22 @@ class DirectionalStrangle(Strategy):
             if net != 0 and bsid not in self._legs:
                 self._flag_divergence(current, bsid, 0, abs(net) // self._lot_size)
         self._divergences = current
+
+    async def _reconcile_loop(self) -> None:
+        """Run `_reconcile_divergences` on a fixed interval for the life of the
+        strategy, independent of `state()` being polled. See
+        strangle-orphan-fill-reconciliation — this is the safety net every open-path
+        abort comment already assumes exists ("surfaces via the next
+        _reconcile_divergences() poll"); before this loop it only ran when an
+        operator happened to hit the REST console."""
+        while True:
+            try:
+                await asyncio.sleep(self._reconcile_interval_s)
+                await self._reconcile_divergences()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.ctx.log.warning("reconcile_loop_error", exc=str(exc))
 
     async def _close_matching_hedge(self, short_leg: OpenLeg) -> None:
         matching = [h for h in self._hedge_legs if h.opt_type == short_leg.opt_type]

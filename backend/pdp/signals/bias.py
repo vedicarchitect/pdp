@@ -64,6 +64,21 @@ class CamLevels:
 
 
 @dataclass(slots=True)
+class SeriesInputs:
+    """A full trend read for one price series (an option leg): EMA stack + SuperTrend
+    agreement + Parabolic SAR direction. ``_series_trend`` combines the three present
+    sub-reads into a single ±1/0 (or abstains when the series has no data at all).
+
+    Used for the ATM CE and ATM PE 5m legs (``BiasInputs.atm_ce_5m`` / ``atm_pe_5m``);
+    the spot trend contributions stay as individual per-timeframe votes.
+    """
+
+    ema: TimeframeEMA | None = None
+    st: tuple[int, int] | None = None  # (dir_ST(10,2), dir_ST(10,3))
+    psar: int | None = None  # ParabolicSARState.direction
+
+
+@dataclass(slots=True)
 class BiasInputs:
     """Everything the bias engine needs at one decision instant.
 
@@ -88,6 +103,17 @@ class BiasInputs:
     # 15m opening range
     orb_high: float | None = None
     orb_low: float | None = None
+    # SuperTrend (10,2)+(10,3) agreement per timeframe: (dir_ST(10,2), dir_ST(10,3)).
+    st_5m: tuple[int, int] | None = None
+    st_15m: tuple[int, int] | None = None
+    st_1h: tuple[int, int] | None = None
+    # Parabolic SAR direction (+1/-1) per timeframe.
+    psar_5m: int | None = None
+    psar_15m: int | None = None
+    psar_1h: int | None = None
+    # ATM CE / PE 5m trend reads (EMA stack + ST agreement + PSAR); PE inverted at combine.
+    atm_ce_5m: SeriesInputs | None = None
+    atm_pe_5m: SeriesInputs | None = None
     # Put-call ratio
     pcr: float | None = None
     # VIX gate inputs
@@ -115,6 +141,18 @@ class BiasWeights:
     w_swing: float = 1.0
     w_orb: float = 1.0
     w_pcr: float = 1.0
+
+    # New multi-signal votes (bias-ranking-multisignal). Default 0.0 so they are opt-in: a
+    # zero weight leaves them inert in the score *and* out of the quorum denominator, keeping
+    # the shipped 10.5-weight behaviour bit-identical until a config turns them on. The live
+    # configs (strangle_*_hedged.yaml) set their starting values; walk-forward tunes the finals.
+    w_st_5m: float = 0.0
+    w_st_15m: float = 0.0
+    w_st_1h: float = 0.0
+    w_psar_5m: float = 0.0
+    w_psar_15m: float = 0.0
+    w_psar_1h: float = 0.0
+    w_atm: float = 0.0
 
     # Score bucket thresholds (absolute value of normalised score in [0, 1]).
     th_complete: float = 0.75  # |score| >= -> complete bull/bear
@@ -156,6 +194,12 @@ _TF_FAMILY_REQUIREMENTS: dict[str, tuple[str, str]] = {
     "w_ema_1h": ("1H", "ema"),
     "w_ema_15m": ("15m", "ema"),
     "w_ema_5m": ("5m", "ema"),
+    "w_st_1h": ("1H", "supertrend"),
+    "w_st_15m": ("15m", "supertrend"),
+    "w_st_5m": ("5m", "supertrend"),
+    "w_psar_1h": ("1H", "psar"),
+    "w_psar_15m": ("15m", "psar"),
+    "w_psar_5m": ("5m", "psar"),
 }
 
 
@@ -220,13 +264,22 @@ def check_bias_satisfiability(
             )
         satisfied.append("w_orb")
 
-    if weights.w_pcr > 0:
+    def _require_options_poller(weight_name: str, weight: float, detail: str = "") -> None:
         if underlying not in options_underlyings:
             raise BiasInputUnsatisfiable(
-                f"w_pcr={weights.w_pcr} requires {underlying!r} to have a running options "
-                f"chain poller (add params.underlying: {underlying!r} to a strategy YAML)"
+                f"{weight_name}={weight} requires {underlying!r} to have a running options "
+                f"chain poller {detail}(add params.underlying: {underlying!r} to a strategy YAML)"
             )
+
+    if weights.w_pcr > 0:
+        _require_options_poller("w_pcr", weights.w_pcr)
         satisfied.append("w_pcr")
+
+    if weights.w_atm > 0:
+        # The ATM CE/PE 5m read resolves marks off the same option data the chain poller feeds,
+        # so it shares w_pcr's prerequisite: this underlying must have a running options poller.
+        _require_options_poller("w_atm", weights.w_atm, "for the ATM CE/PE read ")
+        satisfied.append("w_atm")
 
     return satisfied
 
@@ -369,6 +422,75 @@ def _pcr_vote(pcr: float | None, w: BiasWeights) -> int | None:
     return 0
 
 
+def _st_vote(pair: tuple[int, int] | None) -> int | None:
+    """SuperTrend (10,2)+(10,3) agreement: +1 iff both bullish, -1 iff both bearish, else 0.
+
+    Requiring both variants to agree makes a single-variant whipsaw contribute weight but no
+    direction (a ``0`` vote) rather than a false directional lean. ``None`` (either variant
+    unseeded) abstains, so an unwarmed SuperTrend is excluded from the score denominator.
+    """
+    if pair is None:
+        return None
+    d2, d3 = pair
+    if d2 > 0 and d3 > 0:
+        return 1
+    if d2 < 0 and d3 < 0:
+        return -1
+    return 0
+
+
+def _psar_vote(direction: int | None) -> int | None:
+    """Parabolic SAR votes its flip direction directly; ``None`` abstains."""
+    if direction is None:
+        return None
+    if direction > 0:
+        return 1
+    if direction < 0:
+        return -1
+    return 0
+
+
+def _series_trend(si: SeriesInputs | None) -> int | None:
+    """Combine a single series' EMA / SuperTrend / PSAR sub-reads into one ±1/0 trend read.
+
+    Sums the *present* sub-reads (``_ema5_vote`` for the price-vs-50EMA read, ``_st_vote`` for
+    SuperTrend agreement, ``_psar_vote`` for SAR) and returns the sign of that sum. Abstains
+    (``None``) only when the series carries no data at all -- so a leg with even one live
+    sub-read still contributes. Used for the ATM CE and PE legs.
+    """
+    if si is None:
+        return None
+    subs = [v for v in (_ema5_vote(si.ema), _st_vote(si.st), _psar_vote(si.psar)) if v is not None]
+    if not subs:
+        return None
+    total = sum(subs)
+    if total > 0:
+        return 1
+    if total < 0:
+        return -1
+    return 0
+
+
+def _atm_vote(ce: SeriesInputs | None, pe: SeriesInputs | None) -> int | None:
+    """Combined ATM-option vote: CE trend against the *inverted* PE trend.
+
+    A rising CE and a falling PE both imply a bullish underlying, so the PE read is inverted
+    before combining. The vote is +1 only when both point bullish, -1 only when both point
+    bearish, and 0 when they conflict. Abstains if either leg is absent -- a one-legged read
+    is not a reliable directional signal.
+    """
+    ce_read = _series_trend(ce)
+    pe_read = _series_trend(pe)
+    if ce_read is None or pe_read is None:
+        return None
+    pe_inverted = -pe_read
+    if ce_read > 0 and pe_inverted > 0:
+        return 1
+    if ce_read < 0 and pe_inverted < 0:
+        return -1
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # VIX gate
 # --------------------------------------------------------------------------- #
@@ -414,20 +536,27 @@ def _bucket_for(score: float, w: BiasWeights) -> BiasBucket:
 
 
 def _guard_extreme(bucket: BiasBucket, breakdown: dict[str, VoteBreakdown]) -> BiasBucket:
-    """Downgrade a naked extreme bucket unless the 1h trend vote confirms its direction.
+    """Downgrade a naked extreme bucket unless *both* 1h trend families confirm its direction.
 
     ``COMPLETE_BULL`` (5:0) and ``COMPLETE_BEAR`` (0:5) are the only buckets that sell a fully
-    naked, undefended side. They are reachable only when ``ema_1h`` is present (non-abstaining)
-    and points the bucket's way; otherwise we drop to the nearest *defended* bucket
-    (``MOST_BULL``/``MOST_BEAR``), which keeps a protective position on the opposite side. This
-    stops a starved/renormalised score from committing to an undefended directional bet off
-    inputs that don't include the heavyweight higher-TF trend. See bias-ranking-hardening.
+    naked, undefended side. They are reachable only when **both** higher-timeframe trend votes --
+    the EMA alignment vote (``ema_1h``) and the SuperTrend agreement vote (``st_1h``) -- are
+    present (non-abstaining) and point the bucket's way; otherwise we drop to the nearest
+    *defended* bucket (``MOST_BULL``/``MOST_BEAR``), which keeps a protective position on the
+    opposite side. This stops a starved/renormalised score from committing to an undefended
+    directional bet off inputs that don't include an independently-confirmed higher-TF trend.
+    See bias-ranking-hardening (ema_1h) and bias-ranking-multisignal (adds st_1h).
     """
-    vb = breakdown.get("ema_1h")
-    trend = vb.vote if (vb is not None and not vb.abstained) else None
-    if bucket is BiasBucket.COMPLETE_BULL and trend != 1:
+
+    def _trend(name: str) -> int | None:
+        vb = breakdown.get(name)
+        return vb.vote if (vb is not None and not vb.abstained) else None
+
+    ema = _trend("ema_1h")
+    st = _trend("st_1h")
+    if bucket is BiasBucket.COMPLETE_BULL and not (ema == 1 and st == 1):
         return BiasBucket.MOST_BULL
-    if bucket is BiasBucket.COMPLETE_BEAR and trend != -1:
+    if bucket is BiasBucket.COMPLETE_BEAR and not (ema == -1 and st == -1):
         return BiasBucket.MOST_BEAR
     return bucket
 
@@ -455,6 +584,13 @@ def score_bias(
         (_swing_vote(inp.spot, inp.pdh, inp.pdl, inp.pwh, inp.pwl), w.w_swing, "swing"),
         (_orb_vote(inp.spot, inp.orb_high, inp.orb_low), w.w_orb, "orb"),
         (_pcr_vote(inp.pcr, w), w.w_pcr, "pcr"),
+        (_st_vote(inp.st_5m), w.w_st_5m, "st_5m"),
+        (_st_vote(inp.st_15m), w.w_st_15m, "st_15m"),
+        (_st_vote(inp.st_1h), w.w_st_1h, "st_1h"),
+        (_psar_vote(inp.psar_5m), w.w_psar_5m, "psar_5m"),
+        (_psar_vote(inp.psar_15m), w.w_psar_15m, "psar_15m"),
+        (_psar_vote(inp.psar_1h), w.w_psar_1h, "psar_1h"),
+        (_atm_vote(inp.atm_ce_5m, inp.atm_pe_5m), w.w_atm, "atm"),
     ]
 
     votes: dict[str, int] = {}

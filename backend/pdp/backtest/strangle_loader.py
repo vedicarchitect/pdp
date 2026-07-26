@@ -19,10 +19,19 @@ from datetime import UTC, date, datetime, timedelta
 
 from pdp.backtest.day_loader import WindowData, _prior_session_1m, _resample_spot_ist
 from pdp.backtest.resample import resample_ohlcv
+from pdp.backtest.sim import resolve_from_chain
 from pdp.backtest.strangle_config import StrangleConfig
 from pdp.backtest.strangle_sim import DecisionBar, StrangleDayData
 from pdp.indicators.ema import EMATracker
-from pdp.signals.bias import BiasInputs, CamLevels, TimeframeEMA, tf_ema_from_values
+from pdp.indicators.psar import ParabolicSARTracker
+from pdp.indicators.supertrend import SuperTrendTracker
+from pdp.signals.bias import (
+    BiasInputs,
+    CamLevels,
+    SeriesInputs,
+    TimeframeEMA,
+    tf_ema_from_values,
+)
 
 _IST = timedelta(hours=5, minutes=30)
 _EMA_PERIODS = [9, 20, 50]
@@ -59,6 +68,75 @@ def _tf_ema_at(times: list[datetime], vals: list[dict[int, float]], t: datetime,
     if i is None:
         return None
     return tf_ema_from_values(vals[i], price)
+
+
+def _st_psar_series(
+    bars: list[dict], prior_bars: list[dict], cfg: StrangleConfig
+) -> tuple[list[datetime], list[tuple[int, int] | None], list[int | None]]:
+    """Per-bar SuperTrend-agreement + PSAR reads for a spot timeframe (IST times), warmed
+    with the prior window.
+
+    ``st_pair = (dir_ST(fast), dir_ST(slow))`` (``None`` until both variants seed); ``psar_dir``
+    is the SAR direction (``None`` until the SAR seeds). Mirrors ``_ema_series`` so the same
+    warm-then-replay tracker state feeds the bias engine on both the backtest and live paths.
+    """
+    st_fast = SuperTrendTracker(cfg.st_fast_period, cfg.st_fast_mult)
+    st_slow = SuperTrendTracker(cfg.st_slow_period, cfg.st_slow_mult)
+    psar = ParabolicSARTracker(cfg.psar_step, cfg.psar_max_step)
+    for wb in prior_bars:
+        wts = wb["ts"] if wb["ts"].tzinfo else wb["ts"].replace(tzinfo=UTC)
+        st_fast.update(wb["high"], wb["low"], wb["close"], wts)
+        st_slow.update(wb["high"], wb["low"], wb["close"], wts)
+        psar.update(wb["high"], wb["low"], wb["close"], 0.0, wts)
+    times: list[datetime] = []
+    st_pairs: list[tuple[int, int] | None] = []
+    psar_dirs: list[int | None] = []
+    for b in bars:
+        ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
+        ist = (ts + _IST).replace(tzinfo=None)
+        sf = st_fast.update(b["high"], b["low"], b["close"], ts)
+        ss = st_slow.update(b["high"], b["low"], b["close"], ts)
+        ps = psar.update(b["high"], b["low"], b["close"], 0.0, ts)
+        times.append(ist)
+        st_pairs.append(
+            (sf.direction, ss.direction) if (sf is not None and ss is not None) else None
+        )
+        psar_dirs.append(ps.direction if ps is not None else None)
+    return times, st_pairs, psar_dirs
+
+
+def _at(times: list[datetime], vals: list, t: datetime):
+    """As-of lookup into a parallel (times, vals) pair; None if nothing at/before ``t``."""
+    i = _asof(times, t)
+    return vals[i] if i is not None else None
+
+
+def _option_series_reads(
+    sbars: list, cfg: StrangleConfig
+) -> tuple[list[datetime], list[SeriesInputs]]:
+    """Replay EMA/ST/PSAR over one option strike's own ``(dt, o, h, lo, c)`` decision-tf bars.
+
+    No warmup prefix: an option contract's bars only exist for the trade day, so EMA(50) /
+    SuperTrend seed intraday and each sub-read abstains (contributes ``None``) until it does —
+    ``_series_trend`` combines whatever is present. Returns parallel (ist_times, reads).
+    """
+    tr_ema = EMATracker(periods=_EMA_PERIODS)
+    st_fast = SuperTrendTracker(cfg.st_fast_period, cfg.st_fast_mult)
+    st_slow = SuperTrendTracker(cfg.st_slow_period, cfg.st_slow_mult)
+    psar = ParabolicSARTracker(cfg.psar_step, cfg.psar_max_step)
+    times: list[datetime] = []
+    reads: list[SeriesInputs] = []
+    for row in sbars:
+        dt, _o, h, lo, c = row[0], row[1], row[2], row[3], row[4]
+        es = tr_ema.update(h, lo, c, 0.0, dt)
+        sf = st_fast.update(h, lo, c, dt)
+        ss = st_slow.update(h, lo, c, dt)
+        ps = psar.update(h, lo, c, 0.0, dt)
+        ema_read = tf_ema_from_values(dict(es.values) if es is not None else None, float(c))
+        st_pair = (sf.direction, ss.direction) if (sf is not None and ss is not None) else None
+        reads.append(SeriesInputs(ema=ema_read, st=st_pair, psar=ps.direction if ps is not None else None))
+        times.append(dt)
+    return times, reads
 
 
 def _hlc(bars: list[dict]) -> tuple[float, float, float] | None:
@@ -148,6 +226,11 @@ def build_strangle_day(
     t15, v15 = _ema_series(bars_15, prior_15)
     t60, v60 = _ema_series(bars_60, prior_60)
 
+    # SuperTrend-agreement + PSAR reads per timeframe (warmed with the same prefix as EMA).
+    st5_t, st5_pairs, ps5_dirs = _st_psar_series(bars_5, prior_5, cfg)
+    st15_t, st15_pairs, ps15_dirs = _st_psar_series(bars_15, prior_15, cfg)
+    st60_t, st60_pairs, ps60_dirs = _st_psar_series(bars_60, prior_60, cfg)
+
     # Day-constant levels from prior period HLC.
     cam_daily = _camarilla(_hlc(prior1))
     cam_weekly = _camarilla(_hlc(_prior_week_1m(window, trade_date)))
@@ -172,6 +255,30 @@ def build_strangle_day(
     pcr_times = [t for t, _ in pcr_day] if pcr_day else []
     pcr_vals = [v for _, v in pcr_day] if pcr_day else []
 
+    day_chain: dict[str, dict[float, list]] = {}
+    for opt in ("CE", "PE"):
+        series_by_strike = window.chain_1m.get((trade_date, opt), {})
+        day_chain[opt] = {stk: resample_ohlcv(bars, tf) for stk, bars in series_by_strike.items()}
+
+    # ATM CE/PE 5m trend read: replayed EMA/ST/PSAR over each ATM strike's own bars. Populated
+    # only when the ATM vote carries weight (it is otherwise inert, so building it would be pure
+    # overhead). Reads are memoised per resolved chain strike so a strike that is ATM across many
+    # bars is replayed once. Mirrors the live path, which gates the same read on `w_atm > 0`.
+    populate_atm = cfg.atm_trend_enabled and cfg.weights.w_atm > 0
+    step = cfg.strike_step
+    _atm_cache: dict[tuple[str, float], tuple[list[datetime], list[SeriesInputs]]] = {}
+
+    def _atm_read_at(opt: str, spot: float, t: datetime) -> SeriesInputs | None:
+        atm = round(spot / step) * step
+        strike, sbars = resolve_from_chain(day_chain, opt, float(atm), step, band=2)
+        if strike is None or not sbars:
+            return None
+        key = (opt, strike)
+        if key not in _atm_cache:
+            _atm_cache[key] = _option_series_reads(sbars, cfg)
+        entry_times, entry_reads = _atm_cache[key]
+        return _at(entry_times, entry_reads, t)
+
     decision: list[DecisionBar] = []
     for b in dec_bars:
         ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
@@ -194,16 +301,19 @@ def build_strangle_day(
             cam_weekly=cam_weekly,
             pdh=pdh, pdl=pdl, pwh=pwh, pwl=pwl,
             orb_high=orb_high, orb_low=orb_low,
+            st_5m=_at(st5_t, st5_pairs, ist),
+            st_15m=_at(st15_t, st15_pairs, ist),
+            st_1h=_at(st60_t, st60_pairs, ist),
+            psar_5m=_at(st5_t, ps5_dirs, ist),
+            psar_15m=_at(st15_t, ps15_dirs, ist),
+            psar_1h=_at(st60_t, ps60_dirs, ist),
+            atm_ce_5m=_atm_read_at("CE", c, ist) if populate_atm else None,
+            atm_pe_5m=_atm_read_at("PE", c, ist) if populate_atm else None,
             pcr=pcr,
             vix_now=vix_now, vix_day_open=vix_open, vix_day_high=vix_high,
             vix_recent=list(vix_recent),
         )
         decision.append(DecisionBar(ist_dt=ist, open=o, high=h, low=lo, close=c, bias=bias))
-
-    day_chain: dict[str, dict[float, list]] = {}
-    for opt in ("CE", "PE"):
-        series_by_strike = window.chain_1m.get((trade_date, opt), {})
-        day_chain[opt] = {stk: resample_ohlcv(bars, tf) for stk, bars in series_by_strike.items()}
 
     return StrangleDayData(
         trade_date=trade_date,
