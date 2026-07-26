@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import select, update
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 _FOUR = Decimal("0.0001")
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def _round4(v: Decimal) -> Decimal:
@@ -172,13 +174,38 @@ class PaperBroker:
     # ------------------------------------------------------------------ #
 
     async def _load_open_orders(self) -> None:
+        """Reload OPEN orders into the tick-watch list on boot.
+
+        Only orders placed on today's IST trading day are re-armed. An OPEN
+        order left over from a prior session (never filled or cancelled before
+        the process died/restarted, e.g. a strategy that gave up on it without
+        confirming the cancel — see strangle-orphan-fill-reconciliation) would
+        otherwise sit in the DB indefinitely and fill for real, at an
+        arbitrary future price, against whichever tick happens to land next
+        for that security. Stale ones are expired (CANCELLED) here instead."""
         from sqlalchemy.exc import ProgrammingError
 
+        today = datetime.now(_IST).date()
         try:
             async with self._session_maker() as session:
                 result = await session.execute(select(Order).where(Order.status == OrderStatus.OPEN))
+                stale: list[Order] = []
                 for order in result.scalars().all():
+                    if order.placed_at.astimezone(_IST).date() != today:
+                        stale.append(order)
+                        continue
                     self._open_orders.setdefault(order.security_id, []).append(order)
+                if stale:
+                    now = datetime.now(UTC)
+                    for order in stale:
+                        order.status = OrderStatus.CANCELLED
+                        order.cancelled_at = now
+                    await session.commit()
+                    log.warning(
+                        "paper_broker_stale_open_orders_expired",
+                        count=len(stale),
+                        order_ids=[o.id for o in stale],
+                    )
         except ProgrammingError:
             log.warning("paper_broker_orders_table_missing", hint="run alembic upgrade head")
 
@@ -248,6 +275,35 @@ class PaperBroker:
         charges = self._compute_charges(order, fp)
         now = datetime.now(UTC)
         async with self._session_maker() as session:
+            # Re-check the order's authoritative DB status under a row lock before
+            # committing a fill. The in-memory `order` object here is a snapshot taken
+            # when the tick loop iterated `self._open_orders`; a concurrent
+            # OrderRouter.cancel_order/cancel_open_entry_orders call can have already
+            # marked this order CANCELLED in the DB (a different session/object) without
+            # that ever reaching this snapshot's `.status` attribute. Without this check
+            # a cancelled order can still fill for real — see
+            # strangle-orphan-fill-reconciliation.
+            locked = await session.execute(
+                select(Order).where(Order.id == order.id).with_for_update()
+            )
+            db_order = locked.scalar_one_or_none()
+            if db_order is None or db_order.status != OrderStatus.OPEN:
+                sid_orders = self._open_orders.get(order.security_id, [])
+                if order in sid_orders:
+                    sid_orders.remove(order)
+                log.info(
+                    "paper_fill_skipped_not_open",
+                    order_id=order.id,
+                    security_id=order.security_id,
+                    status=db_order.status if db_order is not None else "missing",
+                )
+                # Tell any WS-connected console the order's real (already-committed)
+                # status, since this skip path is exactly when it can otherwise keep
+                # displaying the order as OPEN indefinitely — see
+                # strangle-orphan-fill-reconciliation.
+                if self._hub is not None and db_order is not None:
+                    self._hub.publish("order", _order_dict(db_order))
+                return
             # 1. Create trade row
             trade = Trade(
                 order_id=order.id,
@@ -450,6 +506,12 @@ async def upsert_position(
         pos.net_qty = update.new_qty
         pos.avg_price = update.new_avg
         pos.realized_pnl += update.realized_delta
+        if update.new_qty == 0:
+            # A position that just went flat must not keep displaying mark-to-market
+            # from before the close — the live MTM loop (PortfolioService) only updates
+            # unrealized_pnl for net_qty != 0 positions, so without this the last
+            # pre-close value would otherwise persist indefinitely.
+            pos.unrealized_pnl = Decimal("0")
         pos.updated_at = now
     await session.flush()
     return pos

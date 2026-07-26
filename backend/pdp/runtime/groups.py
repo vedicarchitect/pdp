@@ -235,6 +235,7 @@ class FeedEngineGroup:
         strategy_host.set_redis(redis)
         strategy_host.set_paper_broker(paper_broker)
         if options_hub: strategy_host.set_options_hub(options_hub)
+        strategy_host.set_option_bars_col(mongo_db["option_bars"])
         app.state.strategy_host = strategy_host
 
         from pdp.indicators.engine import IndicatorEngine

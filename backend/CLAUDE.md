@@ -76,12 +76,14 @@ For implementation specs, start at:
 - **Market feed** → `openspec/specs/market-feed/spec.md`
 
 ## Notes
-- `task test`: `1213 passed, 4 failed` (2026-07-20). The 4 failures are pre-existing test-isolation
-  flakes that pass when their file runs alone (3 in `tests/observability/test_processor.py`, 1
-  `tests/jobs/test_runner.py::test_job_cancel`) — not caused by any in-flight change; excluding
-  those two dirs the suite is fully green (1182 passed, 0 failed). The two `xfail(strict=True, ...)`
-  markers that previously guarded `test_leg_rehydration.py`/`test_event_taxonomy.py` were dropped
-  once `strangle-leg-state-durability` and `strangle-observability-gaps` landed for real — there is
-  no standing xfail debt.
+- `task test` equivalent (`pytest tests/ --ignore=observability --ignore=jobs`): `1219 passed, 0
+  failed` (2026-07-25, after the `bias-ranking-multisignal` + `strangle-orphan-fill-reconciliation`
+  work and a same-day `/code-review max --fix` pass — see root `CLAUDE.md`'s 2026-07-25 milestone).
+  The excluded dirs carry the same pre-existing test-isolation flakes noted below (pass when their
+  file runs alone: 3 in `tests/observability/test_processor.py`, 1
+  `tests/jobs/test_runner.py::test_job_cancel`) — not caused by any in-flight change. The two
+  `xfail(strict=True, ...)` markers that previously guarded `test_leg_rehydration.py`/
+  `test_event_taxonomy.py` were dropped once `strangle-leg-state-durability` and
+  `strangle-observability-gaps` landed for real — there is no standing xfail debt.
 - The three canonical strangle configs (`strangle_nifty_hedged.yaml`, `strangle_banknifty_hedged.yaml`,
   `strangle_sensex_hedged.yaml`) are clean — no stale keys. Old inactive configs moved to `strategies/inactive/`.

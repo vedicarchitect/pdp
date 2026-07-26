@@ -275,6 +275,13 @@ class PortfolioService:
                     ps = self._cache.get(key)
                     if ps is None:
                         continue
+                    # `ps.net_qty` is a snapshot from the last `_load_positions()` reload — a
+                    # fill that flattened this position (paper.py's upsert_position, which
+                    # zeroes unrealized_pnl on the same commit) may have landed in the DB
+                    # since then, and reload only happens *after* this flush in `_run_flush`.
+                    # Without the `net_qty != 0` guard, that stale cached MTM would clobber
+                    # the fill's correct zero right back to a nonzero value — found live
+                    # 2026-07-25 flattening the strangle-orphan-fill-reconciliation orphans.
                     await session.execute(
                         update(Position)
                         .where(
@@ -282,6 +289,7 @@ class PortfolioService:
                             Position.security_id == ps.security_id,
                             Position.exchange_segment == ps.exchange_segment,
                             Position.product == ps.product,
+                            Position.net_qty != 0,
                         )
                         .values(unrealized_pnl=ps.unrealized_pnl, updated_at=now)
                     )

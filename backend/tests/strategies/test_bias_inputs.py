@@ -134,3 +134,55 @@ async def test_pcr_none_when_no_chain_hub_wired():
     s = await _build_strategy(chain_hub=None)
     inp = s._build_bias_inputs(spot=100.0)
     assert inp.pcr is None
+
+
+@pytest.mark.asyncio
+async def test_supertrend_and_psar_votes_flow_from_reader():
+    """st_*/psar_* on BiasInputs come from the engine's variant + PSAR reads, abstaining
+    (None) when a variant is unseeded — mirroring the backtest loader (bias-ranking-multisignal)."""
+    ind = MagicMock()
+    ind.ema.return_value = None
+    ind.pivots.return_value = None
+    ind.period_levels.return_value = None
+
+    def _variants(sid, tf):
+        return {
+            "1H": {"st_10_2": SimpleNamespace(direction=1), "st_10_3": SimpleNamespace(direction=1)},
+            "15m": {"st_10_2": SimpleNamespace(direction=-1), "st_10_3": SimpleNamespace(direction=-1)},
+            "5m": {"st_10_2": SimpleNamespace(direction=1)},  # slow variant missing -> abstain
+        }.get(tf, {})
+
+    ind.supertrend_variants.side_effect = _variants
+
+    def _psar(sid, tf):
+        return {"1H": SimpleNamespace(direction=1), "15m": SimpleNamespace(direction=-1),
+                "5m": None}.get(tf)
+
+    ind.psar.side_effect = _psar
+
+    s = await _build_strategy(ind=ind)
+    inp = s._build_bias_inputs(spot=100.0)
+
+    assert inp.st_1h == (1, 1)
+    assert inp.st_15m == (-1, -1)
+    assert inp.st_5m is None  # one variant unseeded -> abstain
+    assert inp.psar_1h == 1
+    assert inp.psar_15m == -1
+    assert inp.psar_5m is None
+
+
+@pytest.mark.asyncio
+async def test_atm_reads_passthrough_and_abstain_by_default():
+    """_build_bias_inputs forwards ATM reads; _atm_trend_reads abstains when the ATM vote is
+    unweighted (default) so no Mongo read is attempted."""
+    from pdp.signals.bias import SeriesInputs
+
+    s = await _build_strategy()
+    ce = SeriesInputs(st=(1, 1), psar=1)
+    pe = SeriesInputs(st=(-1, -1), psar=-1)
+    inp = s._build_bias_inputs(spot=100.0, atm_ce=ce, atm_pe=pe)
+    assert inp.atm_ce_5m is ce and inp.atm_pe_5m is pe
+
+    # Default weights carry w_atm == 0.0 -> the ATM read is skipped and abstains.
+    assert s._weights.w_atm == 0.0
+    assert await s._atm_trend_reads(100.0) == (None, None)

@@ -247,15 +247,25 @@ class OrderRouter:
         """Cancel all OPEN SELL orders for a security+strategy before a close event.
 
         Returns the list of cancelled order IDs.
+
+        Locks the matching rows with `FOR UPDATE` so this can't race a concurrent fill:
+        without the lock, a plain SELECT can read a row as OPEN, then blindly commit it
+        to CANCELLED even though `PaperBroker._fill` locked and filled that same order
+        moments earlier — silently overwriting a real fill's status. With `FOR UPDATE`,
+        Postgres re-checks the WHERE clause against the fill's committed row once the
+        lock is released, so an order that filled in the meantime is correctly excluded
+        here instead of being clobbered. See strangle-orphan-fill-reconciliation.
         """
         broker, _ = select_broker(self._settings)
         result = await session.execute(
-            select(Order).where(
+            select(Order)
+            .where(
                 Order.security_id == security_id,
                 Order.strategy_id == strategy_id,
                 Order.side == "SELL",
                 Order.status == OrderStatus.OPEN,
             )
+            .with_for_update()
         )
         orders = result.scalars().all()
         now = datetime.now(UTC)

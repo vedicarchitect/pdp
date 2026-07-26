@@ -89,6 +89,19 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-25: `bias-ranking-hardening` (quorum floor + extreme-bucket guard + backtest warmup prefix,
+  archived 2026-07-22) and `strangle-orphan-fill-reconciliation` (archived 2026-07-25) both landed on
+  branch `startegy`, **not yet committed**. The latter's live `dev:trade` smoke test surfaced 2 more
+  root causes beyond its original scope (stale OPEN orders re-arming on boot, a portfolio flush/reload
+  race clobbering just-flattened P&L) plus a live cleanup (3 orphan positions, 35 stale orders, 119
+  historical P&L-display rows). A same-day `/code-review max --fix` pass on the combined diff (which
+  also includes the still-in-progress `bias-ranking-multisignal` ST/PSAR/ATM-vote work) found and
+  fixed 4 more real bugs — most notably that `_open_hedge`/`_open_momentum` never got the
+  cancel-confirmation fix `_open_short` did, leaving the same orphan-fill race open in 2 of 3 entry
+  paths — and flagged (without auto-fixing) that the live NIFTY/BANKNIFTY/SENSEX strategy YAMLs carry
+  `bias-ranking-multisignal` placeholder weights its own `tasks.md` says not to promote. `task test`:
+  1219 passed, 0 failed. See `memory/strangle_orphan_fill_reconciliation.md`,
+  `memory/bias_ranking_multisignal.md`, `memory/code_review_2026_07_25_findings.md`.
 - 2026-07-17: Go-live hardening pass on live-session evidence (root cause: entry-path fill race +
   one-shot bucket latch silently blocked NIFTY/BANKNIFTY paper entries) — fixed and pushed to
   `papermode`: `strangle-partial-entry-recovery` (bounded per-side recovery, 2 correctness gaps from

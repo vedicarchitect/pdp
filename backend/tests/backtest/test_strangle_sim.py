@@ -43,6 +43,7 @@ def _bull_bias(spot: float = SPOT) -> BiasInputs:
         cam_weekly=CamLevels(r3=spot - 80, r4=spot - 20, s3=spot - 500, s4=spot - 550),
         pdh=spot - 100, pdl=spot - 600, pwh=spot - 120, pwl=spot - 650,
         orb_high=spot - 40, orb_low=spot - 300, pcr=1.3,
+        st_1h=(1, 1),  # agreeing 1h SuperTrend so the two-family guard permits COMPLETE_BULL
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0, vix_recent=[13.0, 12.5, 12.0],
     )
 
@@ -55,6 +56,7 @@ def _bear_bias(spot: float = SPOT) -> BiasInputs:
         cam_weekly=CamLevels(r3=spot + 500, r4=spot + 550, s3=spot + 80, s4=spot + 20),
         pdh=spot + 600, pdl=spot + 100, pwh=spot + 650, pwl=spot + 120,
         orb_high=spot + 300, orb_low=spot + 40, pcr=0.7,
+        st_1h=(-1, -1),  # agreeing 1h SuperTrend so the two-family guard permits COMPLETE_BEAR
         vix_now=12.0, vix_day_open=12.5, vix_day_high=13.0, vix_recent=[13.0, 12.5, 12.0],
     )
 

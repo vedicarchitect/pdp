@@ -108,6 +108,7 @@ class StrategyHost:
         self._paper_broker: PaperBroker | None = None
         self._event_service: Any = None
         self._options_hub: Any | None = None
+        self._option_bars_col: Any | None = None
 
     def set_indicator_engine(self, engine: IndicatorEngine | None) -> None:
         """Wire the universal indicator engine read by strategies via ctx.indicators."""
@@ -132,6 +133,10 @@ class StrategyHost:
     def set_options_hub(self, hub: Any) -> None:
         """Wire the OptionsHub so strategies can read live PCR via ctx.chain_hub."""
         self._options_hub = hub
+
+    def set_option_bars_col(self, col: Any) -> None:
+        """Wire the Mongo ``option_bars`` collection for the strangle's ATM CE/PE trend read."""
+        self._option_bars_col = col
 
     @property
     def strategies_dir(self) -> Path:
@@ -241,6 +246,7 @@ class StrategyHost:
             ),
             session_maker=self._session_maker,
             chain_hub=self._options_hub,
+            option_bars_col=self._option_bars_col,
             _event_service=self._event_service,
         )
 

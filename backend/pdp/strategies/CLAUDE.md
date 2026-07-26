@@ -50,3 +50,15 @@ All indicator state (SuperTrend values, ATR, etc.) comes from `IndicatorEngine` 
   `strategy_leg` table on open and read back on `_rehydrate_legs` — a broker `net_qty` sign alone
   cannot distinguish a long hedge from a long momentum leg. An orphan `Position` with no matching
   `strategy_leg` row is adopted by sign inference as a best effort and flagged `LEG_TYPE_UNKNOWN`.
+- **An unresolved entry price must never silently discard a real fill.** `_open_short`/`_open_hedge`/
+  `_open_momentum` all share `_confirm_fill_or_recover(sid, order)`: if `_await_fill_avg_px` can't get
+  a price within budget, it cancels the entry order and — only if the cancel *didn't* take effect
+  (the order already filled, or fills concurrently with the cancel) — checks the broker's own
+  `get_position` avg (never an LTP estimate, which would be available whether or not this specific
+  order actually filled) and registers the leg from the real fill instead of orphaning it. See
+  `strangle-orphan-fill-reconciliation`.
+- **Reconciliation runs unattended.** `_reconcile_loop` (started in `on_init`, cancelled in
+  `on_shutdown`) calls `_reconcile_divergences()` on a fixed interval (`reconcile_interval_s`, default
+  60s) for the strategy's whole lifetime — not only when `state()` is polled over HTTP, closing the
+  gap where an orphan/diverged position could sit undetected indefinitely with nobody watching the
+  console.

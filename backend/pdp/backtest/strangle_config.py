@@ -128,6 +128,21 @@ class StrangleConfig:
     # None = no filter (all trading days).
     dte_max: int | None = None
 
+    # Multi-signal bias votes (bias-ranking-multisignal). SuperTrend agreement uses two
+    # variants per timeframe; the fast/slow pair MUST match the live MATRIX_ST_VARIANTS
+    # (10,2)+(10,3) that `IndicatorEngine.get_supertrend_variants` exposes, or backtest and
+    # live diverge on the st_* votes. PSAR defaults match the live ParabolicSARTracker.
+    st_fast_period: int = 10
+    st_fast_mult: float = 2.0
+    st_slow_period: int = 10
+    st_slow_mult: float = 3.0
+    psar_step: float = 0.02
+    psar_max_step: float = 0.2
+    # ATM CE/PE 5m trend read is populated only when enabled AND `weights.w_atm > 0` (it
+    # replays a throwaway EMA/ST/PSAR tracker over each ATM strike's own option bars, so it
+    # is skipped entirely when the ATM vote carries no weight).
+    atm_trend_enabled: bool = True
+
     # Position sizing
     scale_lots: int = 1  # multiply every ratio_table value by this (1=unchanged, 2=double, ...)
 
@@ -175,6 +190,21 @@ class StrangleConfig:
                 )
         if self.scale_lots < 1:
             raise ValueError(f"scale_lots must be >= 1, got {self.scale_lots}")
+        if self.st_fast_period < 1 or self.st_slow_period < 1:
+            raise ValueError(
+                f"SuperTrend periods must be >= 1, got fast={self.st_fast_period} "
+                f"slow={self.st_slow_period}"
+            )
+        if self.st_fast_mult <= 0 or self.st_slow_mult <= 0:
+            raise ValueError(
+                f"SuperTrend multipliers must be > 0, got fast={self.st_fast_mult} "
+                f"slow={self.st_slow_mult}"
+            )
+        if not 0.0 < self.psar_step <= self.psar_max_step:
+            raise ValueError(
+                f"PSAR step/max must satisfy 0 < step <= max, got "
+                f"({self.psar_step}, {self.psar_max_step})"
+            )
         if self.day_loss_limit <= 0:
             raise ValueError(f"day_loss_limit must be > 0, got {self.day_loss_limit}")
         if self.hedge_enabled and not 0.0 < self.hedge_prem_min <= self.hedge_prem_max:
