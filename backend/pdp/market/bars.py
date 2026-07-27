@@ -109,7 +109,7 @@ def _bar_boundary(dt: datetime, tf_minutes: int) -> datetime:
     return session_open + timedelta(minutes=truncated_minutes)
 
 
-def _in_session_window(dt: datetime, holiday_set: frozenset[date] = frozenset()) -> bool:
+def in_session_window(dt: datetime, holiday_set: frozenset[date] = frozenset()) -> bool:
     """True iff dt falls in [09:15:00, 15:30:00) IST *and* its IST date is a trading day.
 
     The clock-time check is integer arithmetic only. The trading-day check (weekday + not
@@ -339,7 +339,7 @@ class BarAggregator:
         post-close, or non-trading-day print contributes to any bar, on any timeframe.
         """
         ltt = tick.ltt if tick.ltt.tzinfo else tick.ltt.replace(tzinfo=UTC)
-        if not _in_session_window(ltt, self._holiday_set):
+        if not in_session_window(ltt, self._holiday_set):
             return []
 
         closed: list[BarClosed] = []
