@@ -321,6 +321,10 @@ flutter test                   # widget/unit tests
 | `strategies/directional_strangle_banknifty.yaml` | `directional_strangle_banknifty` | Same bias engine, BANKNIFTY tuned (lot=30, strike_step=100). See §17. |
 | `strategies/directional_strangle_sensex.yaml` | `directional_strangle_sensex` | Same bias engine, SENSEX tuned (lot=20). See §17. |
 | `strategies/inactive/supertrend_short.yaml` | `supertrend_short` | (Archived) ST(10,2)/15m NIFTY. Superseded by directional strangle. |
+| `strategies/inactive/intraday_directional_nifty.yaml` | `intraday_directional_nifty` | Intraday directional option seller (ORB + VWAP + ST(10,2) + EMA9/20; 3→6→9 lot ladder; rollup-to-ATM). **Not auto-started** — parked in `inactive/` pending promotion. See §8. |
+
+> `StrategyHost` auto-starts every top-level `strategies/*.yaml`. Anything not ready to trade
+> belongs in `strategies/inactive/` (globbed non-recursively, so it is skipped).
 
 ### Add a new strategy
 
@@ -436,6 +440,31 @@ task backtest -- --config-file backtest/configs/st3_1_5m_otm1.yaml --days 30
 # Inline JSON config
 task backtest -- --config '{"st_period":10,"st_multiplier":2,"timeframe_min":15,"moneyness":1}'
 ```
+
+### Intraday directional
+
+Separate engine and CLI (`backtest/intraday_run.py`), same warehouse and the same
+`Net | PF | Win | MaxDD | Trades | Halted` summary, so results are directly comparable with a
+strangle run over the identical window.
+
+```powershell
+# Clean NIFTY option history starts 2023-01-06 (see the 763-day blackout in §10)
+task backtest:intraday -- --config-file backtest/configs/intraday_nifty.yaml --from 2023-01-06 --to 2026-07-25
+
+# BANKNIFTY has no cadence gaps — the genuine 5-year read
+task backtest:intraday -- --config-file backtest/configs/intraday_banknifty.yaml --from 2021-08-05 --to 2026-07-25
+
+# Overrides (each is validated through IntradayDirectionalConfig before the run starts)
+task backtest:intraday -- --config-file backtest/configs/intraday_nifty.yaml --days 20 \
+  --moneyness -1 --unreal-loss-pct 0.30 --dte-max 3 --no-hedge --no-roll --trace
+```
+
+`--moneyness 0` is ATM, negative is ITM. `Halted` counts days that hit the `day_loss_limit`
+cap — square-off days are deliberately *not* counted, so "halted" means the same thing it does
+in a strangle run.
+
+There is no in-process sweep engine for this strategy (`sweep_engine.py` is strangle-only);
+`scripts/oneoff/intraday_sweep.py` shells out per combination and writes a ranked JSON.
 
 ### Parameter grid sweep
 

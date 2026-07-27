@@ -11,6 +11,9 @@ Python package — importable modules only. Runnable scripts and YAML configs li
 | `strangle_config.py` | `StrangleConfig` dataclass — bias weights, ratio table, strike method, hedge band, exits; `from_yaml`/`to_yaml` |
 | `strangle_loader.py` | Assembles per-bar multi-timeframe `BiasInputs` (5m/15m/1h EMAs, daily+weekly Camarilla, swing, VWAP, ORB, India VIX) from a cached Mongo window for `strangle_sim.py` |
 | `strangle_report.py` | `RunWriter` — archives per-day artifacts (status.log, trades.csv, legs.csv, day.json) + run-level summary.csv/equity.csv/manifest.json with build/sim timing |
+| `intraday_sim.py` | **Intraday-directional engine** — single directional short with a 15-min scale-in ladder, 8 exit rules, rollup-to-ATM; delegates every decision to `pdp.signals.intraday_directional` (the same pure core the live strategy calls) and emits the shared `DayResult`/`Trade`/`LegRecord` so `RunWriter`/`aggregate()` work unchanged |
+| `intraday_config.py` | `IntradayDirectionalConfig` dataclass — ORB/VWAP/EMA/ST knobs, sizing ladder, exits, roll band; `from_dict`/`from_yaml`/`to_dict`/`to_yaml` + strict `validate()`; reuses `strangle_config.lot_size_for_date` so lot history matches the strangle |
+| `intraday_loader.py` | Assembles per-bar `IntradayInputs` (5m EMAs + ST(10,2), 15m confirmation, session-VWAP proxy, opening range, daily Camarilla) from a cached Mongo window for `intraday_sim.py` |
 | `day_loader.py` | Loads one trading day of index spot + option bars from MongoDB for `sim.py` |
 | `strategy_config.py` | `StrategyConfig` dataclass — all strategy knobs; `from_dict` / `to_dict` / `from_yaml` / `to_yaml` |
 | `commissions.py` | `CommissionCalculator` — uses `settings.backtest_commission.*` |
@@ -47,6 +50,12 @@ Override via `.env`: `BACKTEST_COMMISSION__BROKERAGE_PER_ORDER=15`
 ## Key Constraints
 
 - **No look-ahead**: signals on bar close → fill on **next bar open**. Enforced in `execution.py`.
+- **No look-ahead across timeframes either.** A resampled bar is stamped at its bucket *start*,
+  so indexing a higher-timeframe series at the decision bar's stamp reads a candle that has not
+  closed yet. `intraday_loader` therefore looks the confirmation series up at
+  `ist - confirm_timeframe_min`, and gates the opening range on `orb_start + orb_minutes`.
+  Both are asserted by `tests/test_intraday_parity.py`; the first one was a real bug caught by
+  that test.
 - **No live indicator recompute**: backtest rebuilds ST bar-by-bar via `indicators.py`, mirrors live `IndicatorEngine` params.
 - Data source: MongoDB `option_bars` and `market_bars` collections.
 - `strategy_config.py` is the canonical config format; YAML files in `backtest/configs/` are its serialized form.

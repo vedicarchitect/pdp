@@ -89,6 +89,26 @@ Every feature starts in OpenSpec, then lands in code:
 Full 16-chunk roadmap in [`memory/MEMORY.md`](~/.claude/projects/C--Users-prasa-OneDrive-Desktop-komalavalli-PDP/memory/MEMORY.md).
 
 **Recent milestones:**
+- 2026-07-27: `eod-walkthrough-report` (implementation-complete, spec authored + validated) — a
+  hand-written per-day walkthrough doc was audited and found to encode two real bugs rather than
+  real trading behaviour: `strangle_sim.close_partial_leg` doubled a partially-closed leg's entry
+  price (avg read *after* qty was mutated instead of before), and the India-VIX gate was never
+  single-sourced — `_vix_gate` had no on/off switch, so `strangle_walkforward.py`/`sweep_engine.py`/
+  `replay.py` gated on VIX even against `vix_gate_enabled: false` configs while `strangle_run.py`/
+  live faked it disabled independently. Both fixed at the root (`BiasWeights.vix_gate_enabled` is
+  now the one flag `_vix_gate` reads; `close_partial_leg` snapshots `avg_entry` before mutating
+  qty, plus a day-loss-cap check and a `half_stopped` latch it was missing). Built a
+  `task eod:walkthrough` / `/eod:walkthrough` generator on top (`pdp/backtest/walkthrough.py`,
+  `walkthrough_checks.py`'s 15-detector findings engine, `backtest/walkthrough_run.py`) that
+  replays both strategies for any date/range and writes one markdown report per trading day into
+  `backend/backtest/manual/` with every fill's underlying spot, a why-no-trade census, and a ranked
+  FINDINGS section — re-running the same date is byte-identical apart from `generated_at`. Regenerating
+  2026-07-21→24 with the fix answered the original question: 2026-07-22 now trades (+6,889) with every
+  bar reading `vix_gate_disabled`, contradicting the old doc's "VIX gate stayed shut all day" claim.
+  `task test`: 1444 passed (the 3 `tests/observability/test_processor.py` failures are the known
+  pre-existing asyncio-teardown race — pass standalone). Ruff clean on all new files. Still open:
+  re-baselining the promoted NIFTY/BANKNIFTY/SENSEX configs against the partial-close fix (deliberately
+  not bundled), and archiving once that's decided. See `memory/eod_walkthrough_report.md`.
 - 2026-07-25: `bias-ranking-hardening` (quorum floor + extreme-bucket guard + backtest warmup prefix,
   archived 2026-07-22) and `strangle-orphan-fill-reconciliation` (archived 2026-07-25) both landed on
   branch `startegy`, **not yet committed**. The latter's live `dev:trade` smoke test surfaced 2 more

@@ -55,6 +55,21 @@ def price_at(bars: list[Bar], target: datetime, prefer: str = "open") -> float |
     return best[1] if prefer == "open" else best[4]
 
 
+def last_price(bars: list[Bar], before_dt: datetime) -> float | None:
+    """Last close at or before *before_dt*, with no time-window limit.
+
+    The shared fallback for when ``price_at`` returns ``None`` (a deep-OTM strike that
+    stopped trading mid-session): we want the most recent traded price even if it is
+    hours old. Lives here beside ``price_at`` so every engine prices an illiquid exit
+    by the same rule — which is what keeps their P&L comparable.
+    """
+    best: float | None = None
+    for b in bars:
+        if b[0] <= before_dt:
+            best = b[4]   # close field
+    return best
+
+
 def prev_curr_bars(bars: list[Bar], target: datetime) -> tuple[Bar | None, Bar | None]:
     """Return (prior_bar, current_bar) for the nearest bar at or before ``target`` (15-min tol)."""
     best_i, bd = None, timedelta(hours=99)

@@ -104,18 +104,6 @@ params:
   w_orb: 1.0
   w_pcr: 1.0
 
-  # ---- Multisignal (bias-ranking-multisignal) — inert until walk-forward tuned ----
-  # The 120-day A/B benchmark (backtest/configs/strangle_banknifty_multisignal.yaml) showed these
-  # placeholder weights are a regression here specifically (net -29%, PF 17.22->11.00; tasks.md
-  # §7.2/7.4). Keep at 0.0 until `task backtest:strangle:wf` finds weights that clear the gate.
-  w_st_1h: 0.0
-  w_st_15m: 0.0
-  w_st_5m: 0.0
-  w_psar_1h: 0.0
-  w_psar_15m: 0.0
-  w_psar_5m: 0.0
-  w_atm: 0.0
-
   th_complete: 0.85
   th_most: 0.60
   th_more: 0.30

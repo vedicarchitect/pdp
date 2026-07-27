@@ -16,9 +16,12 @@ from datetime import date, time
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 
 from pdp.signals.bias import DEFAULT_RATIO_TABLE, BiasBucket, BiasWeights
+
+log = structlog.get_logger()
 
 # Lot-size history per underlying — (effective_from, lot_size). Last entry covers "now".
 _LOT_HISTORY: dict[str, list[tuple[date, int]]] = {
@@ -153,10 +156,11 @@ class StrangleConfig:
 
     # Behaviour
     neutral_no_trade: bool = True       # skip the neutral bucket
-    # India-VIX entry gate. Live parity: disabled (5yr data shows it costs ~Rs 33L +
-    # raises MaxDD). Read by strangle_run.py; when False the runner treats every bar
-    # as VIX-safe (equivalent to --no-vix-gate).
-    vix_gate_enabled: bool = True
+    # NOTE: the India-VIX entry gate is NOT configured here. It lives on
+    # `weights.vix_gate_enabled` (see `pdp.signals.bias.BiasWeights`) so backtest and live
+    # read the same knob in the same place and every path through `score_bias` honours it.
+    # A legacy top-level `vix_gate_enabled:` in a YAML is migrated by `from_dict` with a
+    # warning.
 
     # Bias engine
     weights: BiasWeights = field(default_factory=BiasWeights)
@@ -226,6 +230,21 @@ class StrangleConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StrangleConfig:
         d = dict(d)
+        # Compat shim: `vix_gate_enabled` moved from the top level onto `weights` so the
+        # gate has exactly one home shared with live. Migrate + warn; drop after one release.
+        if "vix_gate_enabled" in d:
+            legacy = bool(d.pop("vix_gate_enabled"))
+            w = d.get("weights")
+            if isinstance(w, dict):
+                w.setdefault("vix_gate_enabled", legacy)
+            elif isinstance(w, BiasWeights):
+                w.vix_gate_enabled = legacy
+            else:
+                d["weights"] = {"vix_gate_enabled": legacy}
+            log.warning(
+                "StrangleConfig: top-level `vix_gate_enabled: %s` is deprecated — "
+                "move it under `weights:` (migrated for this load)", legacy,
+            )
         known = set(cls.__dataclass_fields__)
         unknown = set(d) - known
         if unknown:

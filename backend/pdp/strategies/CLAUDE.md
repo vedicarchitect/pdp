@@ -8,6 +8,7 @@ Python implementations of trading strategies. Each file implements a class that 
 |------|---------|
 | `supertrend_short.py` | `SuperTrendShort` — ST(10,2)/15m NIFTY OTM-1 option-selling |
 | `directional_strangle.py` | `DirectionalStrangle` — bias-driven multi-leg ratio strangle; reuses `pdp.signals.bias.score_bias()`; hedge via Rs 2–5 premium-band scan; momentum disabled by default |
+| `intraday_directional.py` | `IntradayDirectional` — intraday directional option seller (sell PE in an uptrend / CE in a downtrend); delegates every decision to `pdp.signals.intraday_directional`, the same pure core `pdp.backtest.intraday_sim` calls; ORB + session-VWAP + ST(10,2) + EMA9/20 entry gate, 15-min 3→6→9 scale-in ladder, 8 exit rules, rollup-to-ATM on premium decay |
 
 ## Wiring
 
@@ -30,7 +31,27 @@ class: pdp.strategies.supertrend_short.SuperTrendShort
 
 All indicator state (SuperTrend values, ATR, etc.) comes from `IndicatorEngine` — strategies do **not** recompute indicators.
 
-## Leg tracking invariants (`directional_strangle.py`)
+## Live/backtest parity seam
+
+`directional_strangle.py` and `intraday_directional.py` both delegate every *decision* to a
+pure, no-I/O core in `pdp/signals/` (`bias.py`, `intraday_directional.py`) that the matching
+backtest engine calls too. The strategy module owns only I/O: reading indicators, resolving
+strikes, placing/reconciling orders, persisting leg state. Never re-implement a rule in the
+strategy module — put it in the core so both paths get it.
+
+`tests/test_intraday_parity.py` drives one synthetic day through *both* input builders and
+asserts the `IntradayInputs` are field-for-field identical. It has already caught a real
+look-ahead bug (the loader indexed the 15m confirmation bar at its bucket start, 15 minutes
+before it closed). Two rules keep the paths equal and are load-bearing:
+
+- **The opening range is gated on the clock, not on arrival.** The 15m ORB bar and the 5m bar
+  that closes with it (09:25) close at the same instant and inter-timeframe dispatch order is
+  not guaranteed, so both paths expose the range only from `orb_start + orb_minutes`.
+- **Confirmation-timeframe reads are snapshotted at their bar's close**
+  (`_snapshot_confirmation` / `_confirmation_as_of`), never read live from the engine at
+  decision time — same reason.
+
+## Leg tracking invariants (`directional_strangle.py`, `intraday_directional.py`)
 
 - **One leg per security.** Open legs live in `self._legs: dict[security_id, OpenLeg]`; `_add_leg`
   raises on a duplicate `security_id` rather than allowing two `OpenLeg`s to track the same broker
@@ -50,7 +71,10 @@ All indicator state (SuperTrend values, ATR, etc.) comes from `IndicatorEngine` 
   `strategy_leg` table on open and read back on `_rehydrate_legs` — a broker `net_qty` sign alone
   cannot distinguish a long hedge from a long momentum leg. An orphan `Position` with no matching
   `strategy_leg` row is adopted by sign inference as a best effort and flagged `LEG_TYPE_UNKNOWN`.
-- **An unresolved entry price must never silently discard a real fill.** `_open_short`/`_open_hedge`/
+- **An unresolved entry price must never silently discard a real fill.** These helpers now live
+  once, in `pdp/strategy/fills.py`, and *both* strategies call them — duplicating them is exactly
+  what left `_open_hedge`/`_open_momentum` without the cancel-confirmation fix `_open_short` had
+  (2026-07-25 review). `_open_short`/`_open_hedge`/
   `_open_momentum` all share `_confirm_fill_or_recover(sid, order)`: if `_await_fill_avg_px` can't get
   a price within budget, it cancels the entry order and — only if the cancel *didn't* take effect
   (the order already filled, or fills concurrently with the cancel) — checks the broker's own

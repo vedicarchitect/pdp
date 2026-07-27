@@ -147,9 +147,27 @@ def test_vix_gate_blocks_entry():
         return b
 
     data = StrangleDayData(TD, TD, _bars(gated_bull, times), chain)
-    res = simulate_strangle_day(StrangleConfig(), data)
+    # The gate is armed via the bias weights -- the one place any caller configures it.
+    cfg = StrangleConfig.from_dict({"weights": {"vix_gate_enabled": True}})
+    res = simulate_strangle_day(cfg, data)
     assert res is not None
     assert res.trades == []
+
+
+def test_vix_gate_off_by_default_lets_spike_through():
+    """Same spiking VIX, default config: the gate is disarmed, so the entry happens."""
+    times = [_t(10, 15), _t(10, 20)]
+    chain = _flat_chain({"PE": _PE_PREMS, "CE": _CE_PREMS}, times)
+
+    def gated_bull():
+        b = _bull_bias()
+        b.vix_now, b.vix_day_open = 14.0, 12.0  # +16% spike
+        return b
+
+    data = StrangleDayData(TD, TD, _bars(gated_bull, times), chain)
+    res = simulate_strangle_day(StrangleConfig(), data)
+    assert res is not None
+    assert res.trades != []
 
 
 def test_no_entry_before_10_15():

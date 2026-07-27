@@ -15,11 +15,15 @@ launchable — no code change, no restart.
 Ask for whatever is missing rather than guessing:
 - `strategy_id` — a canonical id, unique across both live and backtest registrations (check
   `GET /api/v1/strategies` first if unsure)
-- `kind` — `strangle` (directional-strangle engine) or `supertrend` (SuperTrend option-selling
-  engine)
+- `kind` — one of:
+  - `strangle` — directional-strangle engine
+  - `supertrend` — SuperTrend option-selling engine
+  - `intraday_directional` — intraday directional option seller (ORB + VWAP + ST(10,2) +
+    EMA9/20 gate, 15-minute scale-in ladder, rollup-to-ATM)
 - `params` — a dict of engine knobs. Only the fields the user wants to override from the
   engine's defaults are required; unset fields fall back to the dataclass default
-  (`StrangleConfig` / `pdp.backtest.strategy_config.StrategyConfig`). For `strangle`, include
+  (`StrangleConfig` / `pdp.backtest.strategy_config.StrategyConfig` /
+  `IntradayDirectionalConfig`). For `strangle` and `intraday_directional`, include
   `underlying` (NIFTY/BANKNIFTY/SENSEX) if it's not NIFTY.
 - Whether to immediately run a backtest against it (and the date window if so)
 
@@ -40,7 +44,7 @@ Ask for whatever is missing rather than guessing:
    ```
    curl -s -X POST http://localhost:8000/api/v1/strategies/register \
      -H "Content-Type: application/json" \
-     -d '{"strategy_id": "<id>", "kind": "<strangle|supertrend>", "params": {...}}'
+     -d '{"strategy_id": "<id>", "kind": "<strangle|supertrend|intraday_directional>", "params": {...}}'
    ```
 
    - `201` → registered; response includes the resolved `defaults` (full config, ready to use
@@ -78,5 +82,10 @@ Ask for whatever is missing rather than guessing:
 - Registration is additive only — it never edits an existing config file or the live
   `strategies/*.yaml` configs. Promoting a validated backtest config to a *live* paper strategy
   still goes through the existing PASS-gated `/backtest:promote` flow, not this skill.
-- `kind` is currently limited to the two engines the registry adapts (`strangle`,
-  `supertrend`); the legacy `options-strategy` YAML dialect isn't unified yet.
+- `kind` is limited to the three engines the registry adapts (`strangle`, `supertrend`,
+  `intraday_directional`); the legacy `options-strategy` YAML dialect isn't unified yet.
+- Backtest config YAMLs carry no kind marker, so the registry detects the dialect by field
+  set. `intraday_directional` is discriminated by fields only it has (`initial_lots`,
+  `orb_start_ist`, `unreal_loss_pct`, …) and is checked before `strangle`, whose field set is
+  broader. A hand-written intraday config that overrides *only* fields the strangle also has
+  will be misread as a strangle — keep at least one intraday-only knob in the file.

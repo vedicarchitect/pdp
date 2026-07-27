@@ -9,8 +9,14 @@ YAML configuration files for strategies. `StrategyHost` auto-loads all `*.yaml` 
 
 | File | Purpose |
 |------|---------|
-| `supertrend_short.yaml` | Active: ST(3,1) NIFTY OTM short option-selling |
+| `directional_strangle_{nifty,banknifty,sensex}.yaml` | Active: bias-driven ratio strangle |
 | `example.yaml.tpl` | Template — copy to add a new strategy |
+| `intraday-directional.md` | Prose spec for the intraday directional seller (source doc, not a config) |
+| `inactive/` | Configs deliberately **not** auto-started — `registry.load_all` globs `*.yaml` non-recursively, so anything here is skipped |
+| `inactive/intraday_directional_nifty.yaml` | `IntradayDirectional` NIFTY config — parked until the backtest justifies promotion |
+
+⚠️ `StrategyHost` auto-starts **every** top-level `*.yaml` in this folder. A config that is
+not ready to trade belongs in `inactive/`, not here.
 
 ## Adding a new strategy
 

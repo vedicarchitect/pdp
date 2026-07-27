@@ -104,6 +104,23 @@ async def atm_trend_read(
     if resolved is None:
         return None
     security_id, _strike, _expiry = resolved
+    return await option_trend_read(option_bars_col, security_id, since=since, tf=tf)
+
+
+async def option_trend_read(
+    option_bars_col: AsyncIOMotorCollection,  # type: ignore[type-arg]
+    security_id: str,
+    *,
+    since: datetime,
+    tf: str = "5m",
+) -> SeriesInputs | None:
+    """A ``SeriesInputs`` (EMA / ST(10,2)+(10,3) / PSAR) for one **specific** contract.
+
+    The strike-agnostic half of ``atm_trend_read``: callers that already know which
+    contract they hold (an open leg) pass its ``security_id`` directly instead of
+    re-resolving the ATM strike, which would read a different contract as soon as spot
+    moved. Returns ``None`` (abstain) when the contract has no usable bars.
+    """
     bars_1m = await _fetch_option_1m_bars(option_bars_col, security_id, since)
     if not bars_1m:
         return None

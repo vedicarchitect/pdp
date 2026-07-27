@@ -161,12 +161,17 @@ def test_score_always_in_range_with_partial_data():
 # --------------------------------------------------------------------------- #
 
 
+# The gate is OFF by default (`BiasWeights.vix_gate_enabled`) and that flag is the one
+# switch every caller reads. These tests arm it explicitly rather than leaning on a default.
+_VIX_ON = BiasWeights(vix_gate_enabled=True)
+
+
 def test_vix_spike_gates_entry():
     inp = _all_bull_inputs()
     inp.vix_now = 12.0
     inp.vix_day_high = 14.0
     inp.vix_day_open = 12.0  # +16.7% -> spike
-    r = score_bias(inp)
+    r = score_bias(inp, _VIX_ON)
     assert r.gated is True
     assert "vix_spike" in r.reason
 
@@ -176,7 +181,7 @@ def test_vix_at_day_high_gates_entry():
     inp.vix_now = 13.0
     inp.vix_day_open = 12.8
     inp.vix_day_high = 13.0  # now == high
-    r = score_bias(inp)
+    r = score_bias(inp, _VIX_ON)
     assert r.gated is True
     assert "day_high" in r.reason
 
@@ -187,22 +192,58 @@ def test_vix_rising_last_3_gates_entry():
     inp.vix_day_open = 12.5
     inp.vix_day_high = 13.0
     inp.vix_recent = [11.0, 11.5, 12.0]  # rising
-    r = score_bias(inp)
+    r = score_bias(inp, _VIX_ON)
     assert r.gated is True
     assert "rising" in r.reason
 
 
 def test_stable_vix_allows_entry():
-    r = score_bias(_all_bull_inputs())  # vix flat-to-down, not at high
+    r = score_bias(_all_bull_inputs(), _VIX_ON)  # vix flat-to-down, not at high
     assert r.gated is False
 
 
 def test_missing_vix_allows_entry():
     inp = _all_bull_inputs()
     inp.vix_now = None
-    r = score_bias(inp)
+    r = score_bias(inp, _VIX_ON)
     assert r.gated is False
     assert "vix_unavailable" in r.reason
+
+
+def test_gate_disabled_by_default():
+    """Default weights never gate, whatever the VIX data says."""
+    inp = _all_bull_inputs()
+    inp.vix_now = 12.0
+    inp.vix_day_high = 14.0
+    inp.vix_day_open = 12.0  # would be a spike if the gate were armed
+    r = score_bias(inp)
+    assert r.gated is False
+    assert "vix_gate_disabled" in r.reason
+
+
+def test_disabled_gate_ignores_vix_inputs_entirely():
+    """With the gate off, supplying VIX and withholding it must be indistinguishable.
+
+    This is the invariant that lets every caller (live strategy, strangle_run,
+    strangle_walkforward, sweep_engine, replay) keep VIX populated for *reporting*
+    instead of nulling it out to emulate "gate off" -- which is exactly how three
+    backtest entry points ended up silently gating against configs that asked for it off.
+    """
+    with_vix = _all_bull_inputs()
+    with_vix.vix_now = 12.0
+    with_vix.vix_day_open = 12.0
+    with_vix.vix_day_high = 14.0
+    with_vix.vix_recent = [11.0, 11.5, 12.0]
+
+    without_vix = _all_bull_inputs()
+    without_vix.vix_now = None
+    without_vix.vix_day_open = None
+    without_vix.vix_day_high = None
+    without_vix.vix_recent = []
+
+    a, b = score_bias(with_vix), score_bias(without_vix)
+    assert a.gated is False and b.gated is False
+    assert (a.score, a.bucket, a.pe_lots, a.ce_lots) == (b.score, b.bucket, b.pe_lots, b.ce_lots)
 
 
 # --------------------------------------------------------------------------- #

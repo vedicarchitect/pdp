@@ -1,7 +1,6 @@
 underlying: BANKNIFTY
 security_id: "25"
 adjustment_on_flip: true
-vix_gate_enabled: false        # parity with live: 5yr data shows the gate costs ~Rs 33L + raises MaxDD
 momentum_enabled: false
 momentum_premium_target: 50000.0
 momentum_score_threshold: 0.5
@@ -67,6 +66,7 @@ weights:
   th_complete: 0.85
   th_more: 0.3
   th_most: 0.6
+  vix_gate_enabled: false      # parity with live: 5yr data shows the gate costs ~Rs 33L + raises MaxDD
   vix_day_high_eps: 1.0e-06
   vix_spike_pct: 0.05
   w_cam_daily: 1.0
