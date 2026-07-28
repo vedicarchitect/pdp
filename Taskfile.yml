@@ -395,6 +395,18 @@ tasks:
     cmds:
       - uv run python backtest/strangle_run.py {{.CLI_ARGS}}
 
+  backtest:intraday:
+    desc: "Intraday directional option-selling backtest (ORB+VWAP+ST+EMA, 3->9 lot ladder). Args: -- [--config-file PATH] [--underlying NIFTY] [--days N | --from --to] [--moneyness 0] [--no-roll] [--hedge/--no-hedge] [--trace] [--no-mongo]"
+    dir: backend
+    cmds:
+      - uv run python backtest/intraday_run.py {{.CLI_ARGS}}
+
+  eod:walkthrough:
+    desc: "Per-day strategy walkthrough -> backend/backtest/manual/<date>.md (indicators, orders, decisions, per-minute detail, ranked findings). Any date. Args: -- [--date YYYY-MM-DD | --from A --to B | --days N] [--underlying NIFTY] [--force]"
+    dir: backend
+    cmds:
+      - uv run python backtest/walkthrough_run.py {{.CLI_ARGS}}
+
   backtest:strangle:wf:
     desc: "Directional-strangle walk-forward (IS/OOS) optimizer — go/no-go gate. Args: -- --from --to [--is-months 12] [--oos-months 3] [--step-months 3] [--objective sharpe] [--out logs/wf.csv]"
     dir: backend

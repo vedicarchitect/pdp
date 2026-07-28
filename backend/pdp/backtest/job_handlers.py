@@ -50,20 +50,39 @@ async def backtest_single_handler(
     params: dict[str, Any],
     progress: Callable[[UUID, int, str], Awaitable[None]],
 ) -> dict[str, Any]:
-    """Run a single strangle backtest and optionally ingest to Mongo."""
-    import json
+    """Run a single backtest for the requested engine and optionally ingest to Mongo.
+
+    ``params["kind"]`` selects the engine (default ``"strangle"``); each kind validates
+    the submitted config through its own dataclass before a subprocess is spawned, so a
+    bad param fails fast here rather than as an opaque non-zero exit code.
+    """
     import tempfile
 
+    import yaml
+
+    kind = str(params.get("kind", "strangle"))
     await progress(job_id, 2, "preparing config")
+    if kind == "intraday_directional":
+        from pdp.backtest.intraday_config import IntradayDirectionalConfig
+
+        cfg_dict = IntradayDirectionalConfig.from_dict(params.get("config", {})).to_dict()
+        script = "backtest/intraday_run.py"
+    elif kind == "strangle":
+        from pdp.backtest.strangle_config import StrangleConfig
+
+        cfg_dict = StrangleConfig.from_dict(params.get("config", {})).to_dict()
+        script = "backtest/strangle_run.py"
+    else:
+        raise ValueError(
+            f"unknown backtest kind {kind!r}; expected 'strangle' or 'intraday_directional'"
+        )
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
-        # Write config as YAML using the StrangleConfig serializer
-        from pdp.backtest.strangle_config import StrangleConfig  # noqa: PLC0415
-        cfg = StrangleConfig.from_dict(params.get("config", {}))
-        tf.write(cfg.to_yaml())
+        yaml.safe_dump(cfg_dict, tf, default_flow_style=False, sort_keys=True)
         cfg_path = tf.name
 
     cmd = [
-        sys.executable, "backtest/strangle_run.py",
+        sys.executable, script,
         "--config-file", cfg_path,
         "--from", params["date_from"],
         "--to", params["date_to"],
@@ -83,7 +102,7 @@ async def backtest_single_handler(
         raise RuntimeError(f"backtest process exited with code {rc}")
 
     await progress(job_id, 99, "complete")
-    return {"status": "complete", "kind": "single"}
+    return {"status": "complete", "kind": "single", "engine": kind}
 
 
 async def backtest_sweep_handler(

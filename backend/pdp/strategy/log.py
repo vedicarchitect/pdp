@@ -25,6 +25,31 @@ class StrangleEventType(StrEnum):
     SQUARE_OFF = "square_off"
     STRATEGY_NOT_READY = "strategy_not_ready"
 
+
+class IntradayEventType(StrEnum):
+    """Event taxonomy for the intraday directional option-selling strategy.
+
+    Separate from `StrangleEventType` because the two strategies have genuinely
+    different lifecycles (a single directional leg with a scale-in ladder vs a
+    two-sided ratio strangle); sharing one enum would leave each carrying members the
+    other can never emit. The overlapping names are deliberately spelled identically so
+    a dashboard can group on them.
+    """
+
+    LEG_OPEN = "leg_open"
+    LEG_CLOSE = "leg_close"
+    SCALE_IN = "scale_in"
+    ROLLED = "rolled"
+    SIGNAL_EVALUATED = "signal_evaluated"
+    LEG_STATUS = "leg_status"
+    ENTRY_ABORTED = "entry_aborted"
+    ENTRY_BLOCKED = "entry_blocked"
+    DAY_LOSS_CAP = "day_loss_cap"
+    SQUARE_OFF = "square_off"
+    ORB_CAPTURED = "orb_captured"
+    STRATEGY_NOT_READY = "strategy_not_ready"
+
+
 _IST = ZoneInfo("Asia/Kolkata")
 _LOGS_DIR = Path("logs")
 

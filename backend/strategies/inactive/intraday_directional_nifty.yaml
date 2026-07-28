@@ -1,0 +1,97 @@
+id: intraday_directional_nifty
+class: pdp.strategies.intraday_directional.IntradayDirectional
+
+watchlist:
+  - security_id: "13"       # NIFTY index (Dhan IDX_I)
+    exchange_segment: IDX_I
+    # 1m feeds the session-VWAP accumulator, 5m is the decision bar, 15m carries the
+    # opening range + confirmation, 1D carries the daily Camarilla levels.
+    timeframes: [1m, 5m, 15m, 1D]
+    indicators:
+      # EMA 9/20 are the entry gate; 50 is kept so the warmup window matches the
+      # strangle's and the seeding summary is comparable between the two strategies.
+      - family: ema
+        periods: [9, 20, 50]
+      - family: pivots
+      - family: period_levels
+      # NOTE: do NOT add `- family: supertrend` here. It is not a registry family and
+      # `configure_suite` silently ignores it (`indicator_suite_unknown_family`). The
+      # ST(10,2) this strategy reads comes from `MATRIX_ST_VARIANTS`, which the engine
+      # computes for any (sid, tf) that already has a suite configured — i.e. the
+      # `ema`/`pivots` entries above are what switch it on.
+      #
+      # NOTE: `vwap` is also deliberately absent. The index security carries zero traded
+      # volume, so `VWAPTracker` can never converge on it; the strategy accumulates a
+      # session TWAP proxy from 1m bars instead (see `vwap_source`).
+
+params:
+  underlying: NIFTY
+  underlying_security_id: "13"
+  index_segment: IDX_I
+  option_segment: NSE_FNO
+
+  # Instrument / strike
+  lot_size: 65              # advisory only — the instruments table wins
+  strike_step: 50
+  moneyness: 0              # 0 = ATM, -1/-2 = 1-2 strikes ITM
+  dte_max: 6                # strictly less than 7 DTE, per the source spec
+
+  # Timeframes
+  timeframe_min: 5
+  confirm_timeframe_min: 15
+
+  # Session
+  orb_start_ist: "09:15"
+  orb_minutes: 15
+  entry_after_ist: "09:30"  # only after the opening-range candle has closed
+  squareoff_ist: "15:15"
+
+  # Sizing ladder: 3 -> 6 -> 9 lots, one step every 15 minutes while the trend holds
+  initial_lots: 3
+  scale_lots_step: 3
+  max_lots: 9
+  scale_in_minutes: 15
+
+  # Re-entry after any non-day-ending exit
+  reentry_cooloff_minutes: 15
+
+  # Exits
+  day_loss_limit: 10000     # realised + open MTM
+  unreal_loss_pct: 0.20     # 20% adverse premium move
+  premium_rise_stop_pct: 1.0  # premium doubles (backstop behind unreal_loss_pct)
+  ema_break_bars: 3         # three consecutive wrong-side 5m closes = 15 minutes
+  cam_reject_minutes: 30
+  cam_touch_eps: 0.001
+
+  # Rollup to ATM on premium decay
+  roll_enabled: true
+  roll_trigger_prem: 20.0
+  roll_target_min_prem: 50.0
+  max_rolls_per_day: 2
+  roll_cutoff_ist: "14:45"
+
+  # Optional gates (off by default — sweep before enabling)
+  require_15m_confirm: false
+  atm_option_vwap_gate: false
+
+  # Session VWAP source. `session_twap` = anchored mean of (h+l+c)/3 on 1m bars.
+  vwap_source: session_twap
+
+  # Option-chart SuperTrend(10,2) on the held strike's own 5m series
+  option_st_enabled: true
+
+  # Protective hedge (optional)
+  hedge_enabled: false
+  hedge_prem_min: 2.0
+  hedge_prem_max: 5.0
+  hedge_scan_start: 10
+  hedge_scan_end: 22
+
+  # Plumbing
+  entry_ltp_wait_s: 2.0
+  reconcile_interval_s: 60
+
+risk:
+  # 9 lots + an optional hedge, times entry/scale/exit legs, with headroom for a roll.
+  max_open_orders: 20
+  max_daily_loss_inr: 10000

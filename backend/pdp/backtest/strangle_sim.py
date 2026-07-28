@@ -20,7 +20,7 @@ Semantics:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -32,6 +32,7 @@ from pdp.backtest.sim import (
     LegRecord,
     Trade,
     _zero_commission,
+    last_price,
     price_at,
     resolve_from_chain,
     select_strike,
@@ -43,18 +44,10 @@ from pdp.signals.bias import BiasBucket, BiasInputs, BiasResult, CamLevels, scor
 _EXTREME = (BiasBucket.COMPLETE_BULL, BiasBucket.COMPLETE_BEAR)
 
 
-def _last_price(bars: list, before_dt: datetime) -> float | None:
-    """Last close price at or before *before_dt* with no time-window limit.
-
-    Used as a fallback when ``price_at`` returns ``None`` (deep-OTM strikes that
-    stopped trading mid-session).  Scanning all bars is intentional: we want the
-    most recent traded price even if it is hours old.
-    """
-    best: float | None = None
-    for b in bars:
-        if b[0] <= before_dt:
-            best = b[4]   # close field
-    return best
+# The illiquid-exit pricing fallback now lives beside `price_at` in `sim.py`, so every
+# engine prices a dead strike by the same rule. Kept as a module-local alias so the
+# existing call sites (and their tests) are untouched.
+_last_price = last_price
 
 
 @dataclass
@@ -79,6 +72,11 @@ class StrangleDayData:
     day_chain: dict[str, dict[float, list]]  # opt_type -> {strike: [(dt,o,h,lo,c), ...]}
     nifty_open: float = 0.0
     nifty_close: float = 0.0
+    # Raw 1-minute spot bars [(dt, o, h, l, c), ...]. The engine decides at
+    # ``cfg.timeframe_min`` (5m by default) and never reads this; it exists so the EOD
+    # walkthrough report can render a true per-minute ribbon (spot + each open leg's LTP
+    # from ``day_chain``) between decision bars without changing the decision cadence.
+    spot_1m: list = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +118,39 @@ class BarStatus:
     legs: list[LegStatus]
     day_pnl: float
     action: str            # what happened this bar: hold/entry/take_profit/roll/...
+
+    # ---- Forensic detail (EOD walkthrough report) --------------------------- #
+    # Everything below is optional and defaulted: `format_status_line`, the warehouse
+    # decision docs, and every existing consumer are unaffected by its presence.
+    #
+    # The two engine objects are carried *by reference* rather than re-flattened into
+    # ~40 scalars — the loader already built them, and a report that reads the real
+    # dataclasses cannot drift from what `score_bias` actually saw. `bias_inputs` is the
+    # full multi-timeframe input set (per-TF EMAs, Camarilla, swing levels, ST/PSAR, ATM
+    # legs, the whole VIX series); `bias_result` carries the 15-vote `breakdown`
+    # (including which inputs abstained), `present_weight_frac`, `bucket_raw`, and the
+    # quorum/extreme-guard flags.
+    bias_inputs: BiasInputs | None = None
+    bias_result: BiasResult | None = None
+    # Ratio the bucket asked for this bar, after `cfg.scale_lots` — what the engine
+    # *would* size to, whether or not it acted.
+    pe_lots: int = 0
+    ce_lots: int = 0
+    # Bias bucket recorded per side at the time that side's leg was opened. A leg is
+    # managed against the bucket it was opened in (take_profit_extreme_only reads this),
+    # so it is not always the current bar's bucket.
+    leg_buckets: dict[str, str] = field(default_factory=dict)
+    # Sides currently blocked from re-entry by the 15m post-stop cool-off, and how many
+    # consecutive qualifying bars each has banked so far: {opt_type: (n_below, needed)}.
+    cooloff: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Sides already half-stopped on their current leg (the one-shot latch).
+    half_stopped: list[str] = field(default_factory=list)
+    # Mark-to-market of every open leg at this bar (shorts + hedges + momentum longs).
+    # `day_pnl` above is realised only; day_pnl + unrealized is the true running total.
+    unrealized: float = 0.0
+    # Engine halt state as of this bar.
+    done: bool = False
+    done_reason: str = ""
 
 
 def format_status_line(s: BarStatus) -> str:
@@ -337,6 +368,10 @@ def simulate_strangle_day(
     # {opt_type: {"exit_px": float, "bars": list[Bar], "n_below": int}}
     stop_gate: dict[str, dict] = {}
     leg_buckets: dict[str, BiasBucket] = {}   # bucket at time leg was opened
+    # Sides already half-stopped on their CURRENT leg. Mirrors live's per-leg
+    # `OpenLeg.half_stopped` one-shot latch; cleared whenever the leg itself goes away
+    # (full close / roll) or a fresh leg is opened on that side.
+    half_stopped: set[str] = set()
     _gate_bars_needed = max(1, -(-15 // cfg.timeframe_min))  # ceil(15 / tf_min)
     # Sides whose stop-gate just cleared — the next entry on that side is a "reentry"
     # (after the 15m cooloff), not a fresh "entry". Consumed on the next open_leg call.
@@ -379,6 +414,7 @@ def simulate_strangle_day(
         leg.total_cost = px * lots * lot
         legs[opt_type] = leg
         leg_buckets[opt_type] = bucket
+        half_stopped.discard(opt_type)   # fresh leg → fresh half-stop budget
         comm = commission_fn("SELL", lots * lot * px)
         trades.append(Trade(
             side="SELL", opt_type=opt_type, strike=strike, bar_time=ist_dt, qty=lots * lot,
@@ -534,6 +570,7 @@ def simulate_strangle_day(
             ))
         del legs[opt_type]
         leg_buckets.pop(opt_type, None)
+        half_stopped.discard(opt_type)   # leg is gone; a future leg starts un-latched
         day_loss_halt = day_pnl <= -cfg.day_loss_limit and not done
         if day_loss_halt:
             done = True
@@ -558,7 +595,7 @@ def simulate_strangle_day(
 
     def close_partial_leg(opt_type: str, ist_dt: datetime, spot: float, reason: str) -> None:
         """Close half the lots on one side; keep the rest open (re-entry allowed)."""
-        nonlocal day_pnl
+        nonlocal day_pnl, done, done_reason
         leg = legs.get(opt_type)
         if leg is None:
             return
@@ -586,15 +623,29 @@ def simulate_strangle_day(
                 exit_ist=ist_dt, lots=close_lots, avg_entry=leg.avg_entry, exit_px=close_px,
                 leg_pnl=leg_pnl, reason=reason,
             ))
+        # Reduce the remaining position in-place at an UNCHANGED average entry price.
+        # `avg_entry` is a derived property (total_cost / total_qty, see sim.py), so the
+        # average must be snapshotted BEFORE total_qty is written — reading it afterwards
+        # returns an already-inflated value and doubles the remainder's basis.
+        avg = leg.avg_entry
+        leg.lots = remaining
+        leg.total_qty = remaining * lot
+        leg.total_cost = avg * leg.total_qty
+        # One-shot latch, mirroring live's `OpenLeg.half_stopped`: a side may be
+        # half-stopped once per leg. Without it the (correctly sized) remainder can be
+        # half-stopped again on the very next bar.
+        half_stopped.add(opt_type)
+        # A partial close moves day P&L too, so it can breach the day-loss cap exactly
+        # like a full close does (close_leg above) — check it here as well.
+        day_loss_halt = day_pnl <= -cfg.day_loss_limit and not done
+        if day_loss_halt:
+            done = True
+            done_reason = f"day_loss ({day_pnl:+.0f})"
         log_decision(
             ist_dt, spot, "exit", action=reason, sub_reason="stop_half",
             extra={"opt_type": opt_type, "leg_pnl": leg_pnl, "closed_lots": close_lots,
-                   "remaining_lots": remaining},
+                   "remaining_lots": remaining, "day_loss_halt": day_loss_halt},
         )
-        # Reduce remaining position in-place (avg_entry is preserved — cost/qty both halve).
-        leg.lots = remaining
-        leg.total_qty = remaining * lot
-        leg.total_cost = leg.avg_entry * leg.total_qty
 
     def manage_legs(ist_dt: datetime, spot: float) -> None:
         """Per-bar exits on each open leg: take-profit, tiered pct stop, rollup."""
@@ -623,7 +674,7 @@ def simulate_strangle_day(
                     stop_gate[ot] = {"exit_px": px, "bars": leg.bars, "n_below": 0}
                     close_leg(ot, ist_dt, spot, "pct_stop_all")
                     continue
-                if px >= leg.avg_entry * (1.0 + cfg.pct_stop_half):
+                if px >= leg.avg_entry * (1.0 + cfg.pct_stop_half) and ot not in half_stopped:
                     stop_gate[ot] = {"exit_px": px, "bars": leg.bars, "n_below": 0}
                     close_partial_leg(ot, ist_dt, spot, "pct_stop_half")
                     continue
@@ -696,6 +747,10 @@ def simulate_strangle_day(
                     mtm=((mltp - ml.avg_entry) * ml.total_qty if mltp is not None else None),
                     is_momentum=True,
                 ))
+        unrealized = sum(lg.mtm for lg in leg_snaps if lg.mtm is not None)
+        pe_lots = ce_lots = 0
+        if bias is not None:
+            pe_lots, ce_lots = cfg.ratio_for(bias.bucket)
         trace.append(BarStatus(
             ist_dt=ist_dt, spot=spot,
             score=bias.score if bias else 0.0,
@@ -707,6 +762,14 @@ def simulate_strangle_day(
             cam_daily=db.bias.cam_daily, cam_weekly=db.bias.cam_weekly,
             orb_high=db.bias.orb_high, orb_low=db.bias.orb_low,
             legs=leg_snaps, day_pnl=day_pnl, action=action,
+            bias_inputs=db.bias, bias_result=bias,
+            pe_lots=pe_lots, ce_lots=ce_lots,
+            leg_buckets={ot: b.value for ot, b in leg_buckets.items()},
+            cooloff={ot: (int(g["n_below"]), _gate_bars_needed)
+                     for ot, g in stop_gate.items()},
+            half_stopped=sorted(half_stopped),
+            unrealized=unrealized,
+            done=done, done_reason=done_reason,
         ))
 
     for db in bars:

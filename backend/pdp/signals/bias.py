@@ -167,7 +167,18 @@ class BiasWeights:
     # (ema_1h+pcr = 3.0/10.5 = 0.286 -> allowed); walk-forward tunable. See bias-ranking-hardening.
     min_quorum_weight_frac: float = 0.25
 
-    # VIX gate
+    # VIX gate.
+    #
+    # `vix_gate_enabled` is the SINGLE source of truth for whether the gate runs, on every
+    # path that reaches `score_bias` — live strategy, strangle_run, strangle_walkforward,
+    # sweep_engine and replay alike. Callers must NOT emulate "off" by withholding
+    # `BiasInputs.vix_*`: doing so is how three backtest entry points ended up silently
+    # gating against configs that had asked for the gate off. VIX inputs stay populated for
+    # reporting whether or not the gate is armed.
+    #
+    # Default OFF: the gate has been measured net-negative on the promoted configs
+    # (costs ~Rs 33L and *increases* MaxDD) — see memory/directional_strangle.md.
+    vix_gate_enabled: bool = False
     vix_spike_pct: float = 0.05  # >5% intraday rise blocks entries
     vix_day_high_eps: float = 1e-6  # tolerance for "at day high"
     pcr_bull: float = 1.1
@@ -343,6 +354,17 @@ class BiasResult:
     # weight the strategy's own config can't supply) is visible in the log
     # rather than inferred from a suspicious bucket distribution.
     breakdown: dict[str, VoteBreakdown] = field(default_factory=dict)
+    # Why this bucket, not the one the raw score asked for. `bucket_raw` is what
+    # `_bucket_for(score)` returned before the quorum floor and the extreme-bucket guard
+    # ran; the two flags say which of them moved it. Without these, a report can only
+    # observe that a strong score produced a mild bucket and has to guess why.
+    bucket_raw: BiasBucket = BiasBucket.NEUTRAL
+    quorum_forced_neutral: bool = False
+    extreme_guard_applied: bool = False
+    # The VIX gate's own verdict string, unwrapped from `reason` -- one of
+    # `vix_gate_disabled | vix_unavailable | vix_ok | vix_spike_gt_5pct |
+    # vix_at_day_high | vix_rising_last_3_5m`.
+    gate_reason: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -498,6 +520,10 @@ def _atm_vote(ce: SeriesInputs | None, pe: SeriesInputs | None) -> int | None:
 
 def _vix_gate(inp: BiasInputs, w: BiasWeights) -> tuple[bool, str]:
     """Return (gated, reason). Missing VIX data => allow (logged by caller)."""
+    if not w.vix_gate_enabled:
+        # Single switch for every caller. Deliberately checked before the data check so
+        # the reason string distinguishes "config turned it off" from "no VIX data".
+        return False, "vix_gate_disabled"
     if inp.vix_now is None:
         return False, "vix_unavailable"
     # >5% intraday spike ANY TIME TODAY (using day high instead of now)
@@ -614,11 +640,15 @@ def score_bias(
     total_configured = sum(weight for _v, weight, _n in candidates if weight > 0)
     present_frac = (weight_total / total_configured) if total_configured > 0 else 0.0
 
-    bucket = _bucket_for(score, w)
-    if present_frac < w.min_quorum_weight_frac:
+    bucket_raw = _bucket_for(score, w)
+    bucket = bucket_raw
+    quorum_forced_neutral = present_frac < w.min_quorum_weight_frac
+    if quorum_forced_neutral:
         bucket = BiasBucket.NEUTRAL
     # Guard the naked extreme buckets on the 1h trend vote (after any quorum downgrade).
-    bucket = _guard_extreme(bucket, breakdown)
+    guarded = _guard_extreme(bucket, breakdown)
+    extreme_guard_applied = guarded is not bucket
+    bucket = guarded
     pe_lots, ce_lots = table[bucket]
 
     gated, gate_reason = _vix_gate(inp, w)
@@ -637,4 +667,8 @@ def score_bias(
         votes=votes,
         breakdown=breakdown,
         present_weight_frac=present_frac,
+        bucket_raw=bucket_raw,
+        quorum_forced_neutral=quorum_forced_neutral,
+        extreme_guard_applied=extreme_guard_applied,
+        gate_reason=gate_reason,
     )

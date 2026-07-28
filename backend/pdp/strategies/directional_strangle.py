@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -53,6 +54,7 @@ from pdp.signals.bias import (
     TimeframeEMA,
     score_bias,
 )
+from pdp.strategy import fills
 from pdp.strategy.abc import Strategy
 from pdp.strategy.log import StrangleEventType
 from pdp.strategy.strikes import (
@@ -114,30 +116,22 @@ def weights_from_params(p: dict[str, Any]) -> BiasWeights:
     (``pdp.signals.bias.check_bias_satisfiability``) so both read identical
     defaults -- a duplicated copy would silently drift the moment either one's
     defaults changed without the other.
+
+    Every ``BiasWeights`` field is mapped generically from a same-named param, and every
+    default comes from the ``BiasWeights`` dataclass itself. Restating defaults here is
+    how the live thresholds (0.85/0.60/0.30) silently diverged from the engine's
+    (0.75/0.50/0.20), and how ``vix_gate_enabled``/``min_quorum_weight_frac``/
+    ``pcr_bull``/``pcr_bear``/``vix_spike_pct``/``vix_day_high_eps`` ended up unreachable
+    from a strategy YAML at all.
     """
-    return BiasWeights(
-        w_ema_1h=float(p.get("w_ema_1h", 2.5)),
-        w_ema_15m=float(p.get("w_ema_15m", 2.0)),
-        w_ema_5m=float(p.get("w_ema_5m", 1.5)),
-        w_cam_daily=float(p.get("w_cam_daily", 1.0)),
-        w_cam_weekly=float(p.get("w_cam_weekly", 1.0)),
-        w_swing=float(p.get("w_swing", 1.0)),
-        w_orb=float(p.get("w_orb", 1.0)),
-        w_pcr=float(p.get("w_pcr", 1.0)),
-        # Multi-signal votes (bias-ranking-multisignal): default 0.0 so they are inert until a
-        # config opts in (walk-forward sets the finals). Non-zero values trigger the load-time
-        # satisfiability check for the matching watchlist family / options poller.
-        w_st_1h=float(p.get("w_st_1h", 0.0)),
-        w_st_15m=float(p.get("w_st_15m", 0.0)),
-        w_st_5m=float(p.get("w_st_5m", 0.0)),
-        w_psar_1h=float(p.get("w_psar_1h", 0.0)),
-        w_psar_15m=float(p.get("w_psar_15m", 0.0)),
-        w_psar_5m=float(p.get("w_psar_5m", 0.0)),
-        w_atm=float(p.get("w_atm", 0.0)),
-        th_complete=float(p.get("th_complete", 0.85)),
-        th_most=float(p.get("th_most", 0.60)),
-        th_more=float(p.get("th_more", 0.30)),
-    )
+    defaults = BiasWeights()
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(BiasWeights):
+        if f.name not in p:
+            continue
+        current = getattr(defaults, f.name)
+        kwargs[f.name] = bool(p[f.name]) if isinstance(current, bool) else float(p[f.name])
+    return BiasWeights(**kwargs)
 
 
 def _to_cam(pivot_state: Any) -> CamLevels | None:
@@ -242,8 +236,6 @@ class DirectionalStrangle(Strategy):
         # None (default) = no filter. Reuses the same `within_dte` helper as the backtest.
         self._dte_max: int | None = int(p["dte_max"]) if p.get("dte_max") is not None else None
 
-        # VIX gate — disabled by default (5yr data shows it costs Rs 33L and increases MaxDD)
-        self._vix_gate_enabled: bool = bool(p.get("vix_gate_enabled", False))
 
         self._hedge_price_wait_s: float = float(p.get("hedge_price_wait_s", 2.0))
 
@@ -280,6 +272,10 @@ class DirectionalStrangle(Strategy):
 
         # Bias weights (dominant tren/cons walk-forward config)
         self._weights = weights_from_params(p)
+        # VIX gate — configured once, on `self._weights.vix_gate_enabled` (mapped from the
+        # same `vix_gate_enabled:` param by `weights_from_params`) and enforced inside
+        # `score_bias`. Kept here read-only for the heartbeat/state payload.
+        self._vix_gate_enabled: bool = self._weights.vix_gate_enabled
 
         raw_rt: dict = p.get("ratio_table", {})
         self._ratio_table: dict[BiasBucket, tuple[int, int]] = (
@@ -1125,10 +1121,13 @@ class DirectionalStrangle(Strategy):
             atm_ce_5m=atm_ce,
             atm_pe_5m=atm_pe,
             pcr=pcr,
-            vix_now=self._vix_now if self._vix_gate_enabled else None,
-            vix_day_open=self._vix_day_open if self._vix_gate_enabled else None,
-            vix_day_high=self._vix_day_high if self._vix_gate_enabled else None,
-            vix_recent=list(self._vix_recent) if self._vix_gate_enabled else [],
+            # VIX is always supplied — it is heartbeat/report data. Whether it *gates* is
+            # decided solely by `weights.vix_gate_enabled` inside `score_bias`; withholding
+            # the inputs to fake "off" is what let the gate drift between call sites.
+            vix_now=self._vix_now,
+            vix_day_open=self._vix_day_open,
+            vix_day_high=self._vix_day_high,
+            vix_recent=list(self._vix_recent),
         )
 
     # ------------------------------------------------------------------ #
@@ -1243,96 +1242,25 @@ class DirectionalStrangle(Strategy):
         if entry_price and entry_price > Decimal("0"):
             self._ltp_cache[sid] = float(entry_price)
 
+    # The four fill-resolution helpers below delegate to `pdp.strategy.fills`, which is
+    # shared with every other option-selling strategy. Keeping one implementation is the
+    # structural fix for the orphan-fill race: when this logic was duplicated per entry
+    # path, `_open_hedge`/`_open_momentum` silently missed the fix `_open_short` had.
     async def _await_option_ltp(self, sid: str) -> bool:
-        """Wait up to `_entry_ltp_wait_s` for a freshly-subscribed option's first LTP.
-
-        Returns True once a positive LTP is visible (in-process cache or market feed),
-        so the subsequent MARKET order can fill on the first tick rather than aborting
-        cold. Returns False if no tick arrives within the budget (caller still attempts
-        the open; the existing fill-price fallbacks + abort path handle a cold leg).
-        """
-        deadline = asyncio.get_running_loop().time() + self._entry_ltp_wait_s
-        while asyncio.get_running_loop().time() < deadline:
-            cached = self._ltp_cache.get(sid)
-            if cached and cached > 0:
-                return True
-            if self.ctx.market is not None:
-                ltp, _ = await self.ctx.market.ltp_with_age(sid)
-                if ltp and ltp > 0:
-                    return True
-            await asyncio.sleep(0.2)
-        return False
+        return await fills.await_option_ltp(
+            self.ctx, self._ltp_cache, sid, self._entry_ltp_wait_s
+        )
 
     async def _resolve_fill_price(self, sid: str) -> Decimal | None:
-        """Resolve a real fill reference price via four fallback layers.
-
-        1. Broker avg (from PaperBroker / DhanBroker position)
-        2. In-process LTP cache (updated on every on_tick)
-        3. Market feed ltp_with_age (Redis)
-        4. Last bar close (not implemented here — rare cold-start fallback)
-
-        Returns None only if all four layers are exhausted.
-        """
-        # Layer 1: broker avg
-        for _ in range(8):
-            _, avg_px = await self.ctx.orders.get_position(sid)
-            if avg_px and avg_px > 0:
-                return avg_px
-            await asyncio.sleep(0.15)
-        _, avg_px = await self.ctx.orders.get_position(sid)
-        if avg_px and avg_px > 0:
-            return avg_px
-
-        # Layer 2: in-process LTP cache
-        ltp_cached = self._ltp_cache.get(sid)
-        if ltp_cached and ltp_cached > 0:
-            self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, source="ltp_cache", ltp=ltp_cached)
-            return Decimal(str(ltp_cached))
-
-        # Layer 3: market feed Redis
-        if self.ctx.market is not None:
-            ltp_feed, _ = await self.ctx.market.ltp_with_age(sid)
-            if ltp_feed and ltp_feed > 0:
-                self.ctx.log.warning("fill_avg_px_ltp_fallback", sid=sid, source="market_feed", ltp=float(ltp_feed))
-                return Decimal(str(ltp_feed))
-
-        self.ctx.log.warning("fill_avg_px_zero", sid=sid)
-        return None
+        return await fills.resolve_fill_price(self.ctx, self._ltp_cache, sid)
 
     async def _await_fill_avg_px(self, sid: str) -> Decimal | None:
-        """Poll broker until filled then fall through to resolve_fill_price.
-
-        Returns a Decimal > 0 on success, or None if all fallback layers are cold.
-        Callers MUST check for None and abort the leg open rather than recording
-        entry_price=0 which would make MTM compute as -ltp×qty.
-        """
+        # Routed through the instance method, not `fills` directly, so overriding or
+        # patching `_resolve_fill_price` still governs what this returns.
         return await self._resolve_fill_price(sid)
 
     async def _confirm_fill_or_recover(self, sid: str, order: Any) -> Decimal | None:
-        """Before discarding an entry leg whose fill price didn't resolve in time,
-        confirm the order was actually cancelled. If it wasn't (it already filled, or
-        fills concurrently with the cancel attempt — e.g. during a tick
-        backpressure/drop event), the order is real and MUST be tracked rather than
-        orphaned — resolve its true fill price instead of giving up.
-
-        Checks only the broker's own recorded position average (`get_position`) —
-        never an LTP estimate. `_await_fill_avg_px` already exhausted the LTP fallback
-        layers before this was ever called; falling through to them again here would
-        accept "some price is available" as proof of a fill it may not be (e.g. if the
-        order was actually REJECTED, or cancelled by a different path just before this
-        check ran), registering a phantom leg with no matching broker position. See
-        strangle-orphan-fill-reconciliation.
-        """
-        cancelled_ids = await self.ctx.orders.cancel_open_entry_orders(sid)
-        if order.id in cancelled_ids:
-            return None
-        _, avg_px = await self.ctx.orders.get_position(sid)
-        if avg_px and avg_px > 0:
-            self.ctx.log.warning(
-                "entry_order_filled_after_abort", sid=sid, order_id=order.id, avg_px=str(avg_px)
-            )
-            return avg_px
-        return None
+        return await fills.confirm_fill_or_recover(self.ctx, sid, order)
 
     async def _open_short(self, spot: float, opt_type: str, lots: int) -> bool:
         """Open one short OTM leg; return True iff the short leg remains open afterwards.

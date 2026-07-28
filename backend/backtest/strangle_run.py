@@ -171,12 +171,18 @@ def main() -> int:
     ap.add_argument("--no-mongo", dest="mongo", action="store_false",
                     help="Skip Mongo persistence entirely (console-only run)")
     ap.add_argument("--no-vix-gate", dest="no_vix_gate", action="store_true", default=False,
-                    help="Disable India VIX entry gate entirely (treat every bar as VIX-safe)")
+                    help="Disable the India VIX entry gate for this run "
+                         "(overrides weights.vix_gate_enabled)")
     args = ap.parse_args()
 
     cfg = StrangleConfig.from_yaml(args.config_file) if args.config_file else StrangleConfig()
-    if not getattr(cfg, "vix_gate_enabled", True):
-        args.no_vix_gate = True
+    if args.no_vix_gate:
+        # The gate lives on the bias weights — one switch, honoured inside score_bias by
+        # every caller. The runner no longer withholds VIX data to fake "off": VIX stays
+        # loaded and visible in the trace either way.
+        d = cfg.to_dict()
+        d["weights"]["vix_gate_enabled"] = False
+        cfg = StrangleConfig.from_dict(d)
     if args.hedge is not None:
         cfg = StrangleConfig.from_dict({**cfg.to_dict(), "hedge_enabled": args.hedge})
     if args.dte_max is not None:
@@ -273,7 +279,9 @@ def main() -> int:
             underlying=cfg.underlying,
             warmup_days=warmup_days,
         )
-        vix_by_day = {} if args.no_vix_gate else load_vix_window(mdb, args.vix_sid, chunk)
+        # VIX is always loaded — it is trace/report data. Whether it *gates* is decided
+        # solely by cfg.weights.vix_gate_enabled inside score_bias.
+        vix_by_day = load_vix_window(mdb, args.vix_sid, chunk)
         vix_days_seen += len(vix_by_day)
         pcr_by_day = load_pcr_window(mdb["option_bars"], window.expiry_by_day, chunk,
                                      underlying=cfg.underlying)

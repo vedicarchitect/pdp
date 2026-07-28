@@ -315,6 +315,17 @@ def build_strangle_day(
         )
         decision.append(DecisionBar(ist_dt=ist, open=o, high=h, low=lo, close=c, bias=bias))
 
+    # Raw 1m spot in IST, in the same (dt, o, h, l, c) tuple shape `day_chain` uses. The
+    # engine never reads this — it decides on `dec_bars` (cfg.timeframe_min). It exists so
+    # the EOD walkthrough can render a real per-minute ribbon between decision bars.
+    spot_1m: list[tuple[datetime, float, float, float, float]] = []
+    for b in raw1:
+        ts = b["ts"] if b["ts"].tzinfo else b["ts"].replace(tzinfo=UTC)
+        spot_1m.append((
+            (ts + _IST).replace(tzinfo=None),
+            float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]),
+        ))
+
     return StrangleDayData(
         trade_date=trade_date,
         expiry_date=window.expiry_by_day[trade_date],
@@ -322,6 +333,7 @@ def build_strangle_day(
         day_chain=day_chain,
         nifty_open=float(dec_bars[0]["open"]) if dec_bars else 0.0,
         nifty_close=float(dec_bars[-1]["close"]) if dec_bars else 0.0,
+        spot_1m=spot_1m,
     )
 
 

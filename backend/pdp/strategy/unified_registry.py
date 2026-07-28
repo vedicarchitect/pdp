@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from pdp.backtest.intraday_config import IntradayDirectionalConfig
 from pdp.backtest.strangle_config import StrangleConfig
 from pdp.backtest.strategy_config import StrategyConfig as BacktestSTConfig
 from pdp.strategy.registry import load_all as _load_live_configs
@@ -46,7 +47,34 @@ PARAM_BOUNDS: dict[str, dict[str, Any]] = {
     "day_loss_limit": {"min": 0.0, "min_exclusive": True},
     "day_stop": {"min": 0.0, "min_exclusive": True},
     "dte_max": {"min": 0},
+    # intraday-directional knobs
+    "initial_lots": {"min": 1, "max": 50},
+    "scale_lots_step": {"min": 0, "max": 20},
+    "scale_in_minutes": {"min": 1, "max": 375},
+    "reentry_cooloff_minutes": {"min": 0, "max": 375},
+    "unreal_loss_pct": {"min": 0.0, "min_exclusive": True},
+    "premium_rise_stop_pct": {"min": 0.0, "min_exclusive": True},
+    "ema_break_bars": {"min": 1, "max": 20},
+    "cam_reject_minutes": {"min": 1, "max": 375},
+    "max_rolls_per_day": {"min": 0, "max": 10},
+    "roll_trigger_prem": {"min": 0.0, "min_exclusive": True},
+    "roll_target_min_prem": {"min": 0.0, "min_exclusive": True},
+    "ema_fast": {"min": 1},
+    "ema_slow": {"min": 2},
+    "st_mult": {"min": 0.0, "min_exclusive": True},
+    "orb_minutes": {"min": 1, "max": 60},
+    "vwap_source": {"enum": ["session_twap", "off"]},
 }
+
+# Fields only the intraday-directional dialect has. A backtest config YAML is a flat
+# dict with no kind marker, so dialect detection is by field set; requiring at least one
+# of these prevents a minimal config (whose keys happen to be a subset of every dialect)
+# from being misread as a strangle.
+_INTRADAY_MARKERS = frozenset({
+    "initial_lots", "scale_lots_step", "scale_in_minutes", "reentry_cooloff_minutes",
+    "unreal_loss_pct", "premium_rise_stop_pct", "ema_break_bars", "cam_reject_minutes",
+    "orb_start_ist", "orb_minutes", "vwap_source", "moneyness", "max_rolls_per_day",
+})
 
 
 @dataclass
@@ -94,7 +122,15 @@ def _load_live_entries(strategies_dir: Path) -> list[StrategyEntry]:
         return []
     entries: list[StrategyEntry] = []
     for cfg in _load_live_configs(strategies_dir):
-        kind = "strangle" if "strangle" in cfg.cls.lower() else cfg.cls.rpartition(".")[-1].lower()
+        cls_lower = cfg.cls.lower()
+        if "strangle" in cls_lower:
+            kind = "strangle"
+        elif "intradaydirectional" in cls_lower:
+            # Match the backtest dialect's kind so a live config and its backtest
+            # variants group under one kind in the listing.
+            kind = "intraday_directional"
+        else:
+            kind = cfg.cls.rpartition(".")[-1].lower()
         entries.append(StrategyEntry(
             id=cfg.id,
             kind=kind,
@@ -117,13 +153,24 @@ def _load_backtest_entries(configs_dir: Path) -> list[StrategyEntry]:
         return []
     strangle_fields = set(StrangleConfig.__dataclass_fields__)
     st_fields = set(BacktestSTConfig.__dataclass_fields__)
+    intraday_fields = set(IntradayDirectionalConfig.__dataclass_fields__)
     entries: list[StrategyEntry] = []
     for path in sorted(configs_dir.glob("*.yaml")):
         raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         body: dict[str, Any] = {k: v for k, v in raw.items() if k != "strategy_id"}
         keys = set(body)
         canonical = _canonical_backtest_id(path, raw)
-        if keys <= strangle_fields:
+        # Checked first, and gated on a discriminating marker field, so this dialect is
+        # never shadowed by the broader strangle field set.
+        if keys <= intraday_fields and keys & _INTRADAY_MARKERS:
+            icfg = IntradayDirectionalConfig.from_dict(body)
+            idefaults = icfg.to_dict()
+            entries.append(StrategyEntry(
+                id=canonical, kind="intraday_directional", underlying=icfg.underlying,
+                source="backtest", params_schema=_params_schema_from_dict(idefaults),
+                defaults=idefaults, config_path=str(path),
+            ))
+        elif keys <= strangle_fields:
             cfg = StrangleConfig.from_dict(body)
             defaults = cfg.to_dict()
             entries.append(StrategyEntry(
@@ -173,13 +220,21 @@ def register_strategy(
         raise ValueError(f"strategy id {strategy_id!r} is already registered")
 
     if kind == "strangle":
-        cfg: StrangleConfig | BacktestSTConfig = StrangleConfig.from_dict(params)
+        cfg: StrangleConfig | BacktestSTConfig | IntradayDirectionalConfig = (
+            StrangleConfig.from_dict(params)
+        )
         underlying = cfg.underlying
     elif kind == "supertrend":
         cfg = BacktestSTConfig.from_dict(params)
         underlying = "NIFTY"
+    elif kind == "intraday_directional":
+        cfg = IntradayDirectionalConfig.from_dict(params)
+        underlying = cfg.underlying
     else:
-        raise ValueError(f"unknown strategy kind {kind!r}; expected 'strangle' or 'supertrend'")
+        raise ValueError(
+            f"unknown strategy kind {kind!r}; expected 'strangle', 'supertrend' or "
+            f"'intraday_directional'"
+        )
 
     configs_dir.mkdir(parents=True, exist_ok=True)
     path = configs_dir / f"{strategy_id}.yaml"

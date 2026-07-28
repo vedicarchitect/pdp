@@ -37,6 +37,24 @@ class PivotState:
     session_date: date
 
 
+def camarilla_levels(
+    high: float, low: float, close: float
+) -> tuple[float, float, float, float]:
+    """Camarilla ``(r3, r4, s3, s4)`` from a period's high/low/close.
+
+    The canonical implementation — ``PivotTracker`` and any consumer that needs only
+    the Camarilla band (e.g. the intraday-directional backtest loader) share it, so
+    there is one place where this math can be wrong.
+    """
+    rng = high - low
+    return (
+        close + rng * 1.1 / 4.0,   # r3
+        close + rng * 1.1 / 2.0,   # r4
+        close - rng * 1.1 / 4.0,   # s3
+        close - rng * 1.1 / 2.0,   # s4
+    )
+
+
 def _compute_pivots(h: float, l: float, c: float, session_date: date) -> PivotState:
     rng = h - l
     pp = (h + l + c) / 3.0
@@ -51,10 +69,7 @@ def _compute_pivots(h: float, l: float, c: float, session_date: date) -> PivotSt
 
     # Camarilla
     cam_pp = pp
-    cam_r3 = c + rng * 1.1 / 4.0
-    cam_r4 = c + rng * 1.1 / 2.0
-    cam_s3 = c - rng * 1.1 / 4.0
-    cam_s4 = c - rng * 1.1 / 2.0
+    cam_r3, cam_r4, cam_s3, cam_s4 = camarilla_levels(h, l, c)
 
     # Fibonacci
     fib_pp = pp
